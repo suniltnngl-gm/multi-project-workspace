@@ -1,5 +1,13 @@
 import './style.css'
 import { getProjectCards, workspaceSummary } from '../../../packages/shared/index.js'
+import {
+  buildTaskQuery,
+  formatBusyMessage,
+  priorities,
+  statuses,
+  taskTypes,
+  waitForRetry
+} from './lib.js'
 
 const app = document.querySelector('#app')
 
@@ -135,15 +143,6 @@ const draftTaskButton = document.querySelector('#draft-task')
 let tasks = []
 let draftController = null
 
-const statuses = [
-  ['todo', 'To do'],
-  ['in_progress', 'In progress'],
-  ['blocked', 'Blocked'],
-  ['done', 'Done']
-]
-const priorities = ['low', 'medium', 'high', 'urgent']
-const taskTypes = ['feature', 'bug', 'chore', 'test', 'docs']
-
 async function request(path, options) {
   const response = await fetch(path, options)
   if (response.status === 204) return null
@@ -158,31 +157,6 @@ async function request(path, options) {
     throw error
   }
   return result
-}
-
-function formatBusyMessage(reasons, retryAfter = 5) {
-  const details = Array.isArray(reasons) && reasons.length > 0
-    ? reasons.join('; ')
-    : 'one or more resource limits are exceeded'
-  return `Local AI paused: ${details}. Checking again in ${retryAfter} seconds.`
-}
-
-function waitForRetry(milliseconds, signal) {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) {
-      reject(new DOMException('Draft cancelled.', 'AbortError'))
-      return
-    }
-    const onAbort = () => {
-      clearTimeout(timeout)
-      reject(new DOMException('Draft cancelled.', 'AbortError'))
-    }
-    const timeout = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort)
-      resolve()
-    }, milliseconds)
-    signal.addEventListener('abort', onAbort, { once: true })
-  })
 }
 
 function showStatus(message, isError = false) {
@@ -365,11 +339,8 @@ async function loadProjects() {
 
 async function loadTasks() {
   try {
-    const filters = new URLSearchParams()
-    for (const [key, value] of new FormData(filterForm)) {
-      if (value) filters.set(key, value)
-    }
-    tasks = await request(`/api/tasks?${filters}`)
+    const query = buildTaskQuery(new FormData(filterForm))
+    tasks = await request(`/api/tasks?${query}`)
     renderTasks()
   } catch (error) {
     showStatus(`Could not load tasks: ${error.message}`, true)

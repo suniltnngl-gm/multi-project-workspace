@@ -20,10 +20,13 @@ Useful commands:
 - `./workspace install` — install npm dependencies and sync the uv-managed Python environment
 - `./workspace python-add <package>` — add a tracked Python dependency with uv
 - `./workspace python-pip install <package>` — use uv's pip-compatible interface in the workspace environment
-- `./workspace test` / `./workspace build` — run checks or build
+- `./workspace test` / `./workspace lint` / `./workspace build` — run tests, lint the frontend, or build
 - `npm run dev:web` / `npm run dev:api` / `npm run dev:python` — run one workspace directly
 - `npm run build` — build the frontend
-- `npm test` — run backend tests
+- `npm test` — run frontend and backend tests
+- `npm run lint` — lint the frontend
+
+The frontend uses Vitest with jsdom for DOM-level tests and ESLint for static checks; both are configured inside `apps/web`.
 - `npm run start:api` — start the API without the Vite dev server
 
 Python is managed by [uv](https://docs.astral.sh/uv/), with its version pinned in `apps/python/.python-version` and its project metadata in `apps/python/pyproject.toml`. Commands use an activated `VIRTUAL_ENV` when present; otherwise, they use `apps/python/.venv` by default (configurable with `UV_PROJECT_ENVIRONMENT`). Add persistent project dependencies with `./workspace python-add <package>` so `pyproject.toml` and `uv.lock` stay in sync. For pip-compatible operations, use `./workspace python-pip ...`; it calls `uv pip` against that environment, never standalone pip. The Python service uses `python-dotenv` to load the workspace-root `.env` file.
