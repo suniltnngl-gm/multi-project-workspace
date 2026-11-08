@@ -13,6 +13,8 @@ The web app is available at http://localhost:5173, the Node API at http://localh
 
 For portable configuration, copy `.env.example` to `.env` and set machine-specific values there. The Node and Python services load the workspace-root `.env` automatically, and the `./workspace` launcher passes those settings to child processes. Values already set in the shell take precedence. Keep `.env` private; it is ignored by Git.
 
+Install scripts are disabled in `.npmrc` so `npm install` works without a C++ toolchain: `better-sqlite3` ships platform-specific prebuilt binaries. If a future dependency needs its install script, run `npm install --ignore-scripts=false` for that installation.
+
 Useful commands:
 
 - `./workspace dev` — start all services
