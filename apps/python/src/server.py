@@ -92,8 +92,9 @@ def main():
         os.environ.get("DATABASE_PATH", str(DEFAULT_DATABASE_PATH))
     ).expanduser()
     port = int(os.environ.get("PYTHON_PORT", "3002"))
-    server = ThreadingHTTPServer(("0.0.0.0", port), create_handler(database_path))
-    print(f"Python satellite listening on http://localhost:{port}")
+    host = os.environ.get("HOST", "127.0.0.1")
+    server = ThreadingHTTPServer((host, port), create_handler(database_path))
+    print(f"Python satellite listening on http://{host}:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -48,6 +48,8 @@ class KaggleNotebookTests(unittest.TestCase):
         self.assertIn('"--upgrade"', install)
         self.assertIn('"--force-reinstall"', install)
         self.assertIn('"--cache-dir"', install)
+        self.assertIn("import torch", install)
+        self.assertLess(install.index("import torch"), install.index("torch.__version__"))
         cell_ids = [cell.get("id") for cell in self.notebook["cells"]]
         self.assertLess(cell_ids.index("kaggle-paths"), cell_ids.index("kaggle-install"))
         dataset = self.cells_by_id["kaggle-dataset"]
