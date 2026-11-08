@@ -1,0 +1,14 @@
+{
+  "folders": [
+    { "name": "workspace-root", "path": "." },
+    { "name": "web", "path": "apps/web" },
+    { "name": "api", "path": "apps/api" },
+    { "name": "shared", "path": "packages/shared" }
+  ],
+  "settings": {
+    "files.exclude": {
+      "**/node_modules": true,
+      "**/dist": true
+    }
+  }
+}

@@ -1,0 +1,10 @@
+[project]
+name = "workspace-python-satellite"
+version = "0.1.0"
+description = "Python analytics satellite for the multi-project workspace"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false
+python-preference = "only-managed"

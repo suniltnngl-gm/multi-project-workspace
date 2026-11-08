@@ -1,0 +1,20 @@
+{
+  "name": "multi-project-workspace",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently --kill-others \"npm run dev --workspace apps/web\" \"npm run dev --workspace apps/api\" \"npm run dev:python\"",
+    "dev:web": "npm run dev --workspace apps/web",
+    "dev:api": "npm run dev --workspace apps/api",
+    "dev:python": "${UV:-uv} run --project apps/python python apps/python/src/server.py",
+    "build": "npm run build --workspace apps/web",
+    "test": "npm test --workspace apps/api && PYTHONPATH=apps/python/src ${UV:-uv} run --project apps/python python -m unittest discover -s apps/python/tests",
+    "start:api": "npm run start --workspace apps/api"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

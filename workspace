@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+if ! command -v npm >/dev/null 2>&1; then
+  NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  if [[ -s "$NVM_DIR/nvm.sh" ]]; then
+    # Load a user-local Node installation when npm is not on PATH.
+    # shellcheck disable=SC1091
+    source "$NVM_DIR/nvm.sh"
+  fi
+fi
+
+if ! command -v uv >/dev/null 2>&1 && [[ -x "$HOME/.local/bin/uv" ]]; then
+  PATH="$HOME/.local/bin:$PATH"
+  export PATH
+fi
+
+command_name="${1:-help}"
+
+require_npm() {
+  if ! command -v npm >/dev/null 2>&1; then
+    printf 'npm is required for this command. Install Node.js/npm first.\n' >&2
+    exit 1
+  fi
+}
+
+require_uv() {
+  UV_BIN="${UV:-uv}"
+  if ! command -v "$UV_BIN" >/dev/null 2>&1; then
+    printf 'uv is required. Install it with: wget -qO- https://astral.sh/uv/install.sh | sh\n' >&2
+    exit 1
+  fi
+  export UV="$UV_BIN"
+
+  if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+    UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV"
+  elif [[ -z "${UV_PROJECT_ENVIRONMENT:-}" ]]; then
+    UV_PROJECT_ENVIRONMENT="$ROOT_DIR/apps/python/.venv"
+  elif [[ "$UV_PROJECT_ENVIRONMENT" != /* ]]; then
+    UV_PROJECT_ENVIRONMENT="$ROOT_DIR/apps/python/$UV_PROJECT_ENVIRONMENT"
+  fi
+  export UV_PROJECT_ENVIRONMENT
+}
+
+case "$command_name" in
+  dev)
+    require_npm
+    require_uv
+    exec npm run dev
+    ;;
+  dev-colab)
+    require_npm
+    require_uv
+    if [[ -z "${LOCAL_AI_URL:-}" || -z "${LOCAL_AI_API_KEY:-}" ]]; then
+      printf 'Set LOCAL_AI_URL and LOCAL_AI_API_KEY from the active Colab notebook first.\n' >&2
+      exit 2
+    fi
+    exec npm run dev
+    ;;
+  web)
+    require_npm
+    exec npm run dev:web
+    ;;
+  node|api)
+    require_npm
+    exec npm run dev:api
+    ;;
+  python)
+    require_uv
+    exec "$UV" run --project apps/python python apps/python/src/server.py
+    ;;
+  local-ai)
+    model="${2:-0.5b}"
+    case "$model" in
+      0.5b)
+        model_path="$HOME/.local/share/llama.cpp/models/Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf"
+        ;;
+      1.5b)
+        model_path="$HOME/.local/share/llama.cpp/models/Qwen2.5-Coder-1.5B-Instruct-Q4_K_M.gguf"
+        ;;
+      *)
+        printf 'Usage: ./workspace local-ai [0.5b|1.5b]\n' >&2
+        exit 2
+        ;;
+    esac
+    if [[ ! -f "$model_path" ]]; then
+      printf 'Model file not found: %s\n' "$model_path" >&2
+      exit 1
+    fi
+    llama_server="${LLAMA_SERVER:-$HOME/.local/bin/llama-server}"
+    if [[ ! -x "$llama_server" ]]; then
+      printf 'llama-server is not executable: %s\n' "$llama_server" >&2
+      exit 1
+    fi
+    exec "$llama_server" -m "$model_path" --host 127.0.0.1 --port 8080 \
+      -c "${LOCAL_AI_CONTEXT:-1024}" -t "${LOCAL_AI_THREADS:-2}"
+    ;;
+  install)
+    require_npm
+    require_uv
+    npm install
+    "$UV" python install "$(cat apps/python/.python-version)"
+    exec "$UV" sync --project apps/python
+    ;;
+  python-add)
+    require_uv
+    if [[ $# -lt 2 ]]; then
+      printf 'Usage: ./workspace python-add <package> [package ...]\n' >&2
+      printf 'Adds project dependencies and updates apps/python/uv.lock.\n' >&2
+      exit 2
+    fi
+    shift
+    exec "$UV" add --project apps/python "$@"
+    ;;
+  python-pip)
+    require_uv
+    if [[ $# -lt 2 ]]; then
+      printf 'Usage: ./workspace python-pip <uv-pip-command> [arguments ...]\n' >&2
+      printf 'Example: ./workspace python-pip install <package>\n' >&2
+      exit 2
+    fi
+    shift
+    "$UV" sync --project apps/python
+    exec "$UV" pip "$@" --python "$UV_PROJECT_ENVIRONMENT/bin/python"
+    ;;
+  build)
+    require_npm
+    exec npm run build
+    ;;
+  test)
+    require_npm
+    require_uv
+    exec npm test
+    ;;
+  help|-h|--help)
+    printf 'Usage: ./workspace <command>\n\n'
+    printf '  dev      Start frontend, Node API, and Python satellite\n'
+    printf '  dev-colab  Start workspace using the authenticated Colab model endpoint\n'
+    printf '  web      Start only the Vite frontend\n'
+    printf '  node     Start only the Node API (api is an alias)\n'
+    printf '  python   Start only the Python satellite\n'
+    printf '  local-ai [0.5b|1.5b]  Start one local model (default: 0.5b)\n'
+    printf '  install  Install npm dependencies and sync the uv Python project\n'
+    printf '  python-add  Add a managed Python dependency with uv\n'
+    printf '  python-pip  Run uv pip against the workspace Python environment\n'
+    printf '  build    Build the frontend\n'
+    printf '  test     Run Node and Python backend tests\n'
+    ;;
+  *)
+    printf 'Unknown command: %s\n\n' "$command_name" >&2
+    printf 'Run ./workspace help for available commands.\n' >&2
+    exit 2
+    ;;
+esac
