@@ -20,5 +20,8 @@
   },
   "dependencies": {
     "dotenv": "^18.0.9"
+  },
+  "overrides": {
+    "minimatch": "11.0.5"
   }
 }
