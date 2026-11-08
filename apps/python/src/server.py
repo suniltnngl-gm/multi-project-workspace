@@ -7,6 +7,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[3] / ".env")
+
 
 DEFAULT_DATABASE_PATH = (
     Path(__file__).resolve().parents[2] / "api" / "data" / "workspace.sqlite"

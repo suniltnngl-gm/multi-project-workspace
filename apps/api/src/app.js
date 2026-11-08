@@ -2,6 +2,9 @@ import express from 'express'
 import { createResourceMonitor } from './resourceMonitor.js'
 import { createAdaptiveCpuLimit } from './adaptiveCpuLimit.js'
 import { buildTaskPrompt } from './localAiPrompt.js'
+import { loadWorkspaceEnv } from '../../../scripts/env.mjs'
+
+loadWorkspaceEnv()
 
 const MAX_TITLE_LENGTH = 200
 const MAX_DESCRIPTION_LENGTH = 2000

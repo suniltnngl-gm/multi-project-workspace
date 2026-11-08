@@ -27,6 +27,10 @@ require_npm() {
   fi
 }
 
+run_with_env() {
+  exec node "$ROOT_DIR/scripts/with-env.mjs" "$@"
+}
+
 require_uv() {
   UV_BIN="${UV:-uv}"
   if ! command -v "$UV_BIN" >/dev/null 2>&1; then
@@ -49,54 +53,47 @@ case "$command_name" in
   dev)
     require_npm
     require_uv
-    exec npm run dev
-    ;;
-  dev-colab)
-    require_npm
-    require_uv
-    if [[ -z "${LOCAL_AI_URL:-}" || -z "${LOCAL_AI_API_KEY:-}" ]]; then
-      printf 'Set LOCAL_AI_URL and LOCAL_AI_API_KEY from the active Colab notebook first.\n' >&2
-      exit 2
-    fi
-    exec npm run dev
+    run_with_env npm run dev
     ;;
   web)
     require_npm
-    exec npm run dev:web
+    run_with_env npm run dev:web
     ;;
   node|api)
     require_npm
-    exec npm run dev:api
+    run_with_env npm run dev:api
     ;;
   python)
     require_uv
-    exec "$UV" run --project apps/python python apps/python/src/server.py
+    run_with_env "$UV" run --project apps/python python apps/python/src/server.py
     ;;
   local-ai)
     model="${2:-0.5b}"
-    case "$model" in
-      0.5b)
-        model_path="$HOME/.local/share/llama.cpp/models/Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf"
-        ;;
-      1.5b)
-        model_path="$HOME/.local/share/llama.cpp/models/Qwen2.5-Coder-1.5B-Instruct-Q4_K_M.gguf"
-        ;;
-      *)
-        printf 'Usage: ./workspace local-ai [0.5b|1.5b]\n' >&2
-        exit 2
-        ;;
-    esac
-    if [[ ! -f "$model_path" ]]; then
-      printf 'Model file not found: %s\n' "$model_path" >&2
-      exit 1
-    fi
-    llama_server="${LLAMA_SERVER:-$HOME/.local/bin/llama-server}"
-    if [[ ! -x "$llama_server" ]]; then
-      printf 'llama-server is not executable: %s\n' "$llama_server" >&2
-      exit 1
-    fi
-    exec "$llama_server" -m "$model_path" --host 127.0.0.1 --port 8080 \
-      -c "${LOCAL_AI_CONTEXT:-1024}" -t "${LOCAL_AI_THREADS:-2}"
+    run_with_env bash -c '
+      case "$1" in
+        0.5b)
+          model_path="$HOME/.local/share/llama.cpp/models/Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf"
+          ;;
+        1.5b)
+          model_path="$HOME/.local/share/llama.cpp/models/Qwen2.5-Coder-1.5B-Instruct-Q4_K_M.gguf"
+          ;;
+        *)
+          printf "Usage: ./workspace local-ai [0.5b|1.5b]\n" >&2
+          exit 2
+          ;;
+      esac
+      if [[ ! -f "$model_path" ]]; then
+        printf "Model file not found: %s\n" "$model_path" >&2
+        exit 1
+      fi
+      llama_server="${LLAMA_SERVER:-$HOME/.local/bin/llama-server}"
+      if [[ ! -x "$llama_server" ]]; then
+        printf "llama-server is not executable: %s\n" "$llama_server" >&2
+        exit 1
+      fi
+      exec "$llama_server" -m "$model_path" --host 127.0.0.1 --port 8080 \
+        -c "${LOCAL_AI_CONTEXT:-1024}" -t "${LOCAL_AI_THREADS:-2}"
+    ' workspace-local-ai "$model"
     ;;
   install)
     require_npm
@@ -128,17 +125,16 @@ case "$command_name" in
     ;;
   build)
     require_npm
-    exec npm run build
+    run_with_env npm run build
     ;;
   test)
     require_npm
     require_uv
-    exec npm test
+    run_with_env npm test
     ;;
   help|-h|--help)
     printf 'Usage: ./workspace <command>\n\n'
     printf '  dev      Start frontend, Node API, and Python satellite\n'
-    printf '  dev-colab  Start workspace using the authenticated Colab model endpoint\n'
     printf '  web      Start only the Vite frontend\n'
     printf '  node     Start only the Node API (api is an alias)\n'
     printf '  python   Start only the Python satellite\n'
