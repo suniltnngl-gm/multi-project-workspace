@@ -1,0 +1,13 @@
+{
+  "id": "edmundrosariosunil/kaggle-qwen-coder",
+  "title": "kaggle-qwen-coder",
+  "code_file": "kaggle-qwen-coder.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "edmundrosariosunil/qwen2-5-coder-3b-instruct"
+  ]
+}
