@@ -38,23 +38,27 @@ class KaggleNotebookTests(unittest.TestCase):
     def test_kaggle_runtime_and_single_gpu_configuration(self):
         sources = "\n".join(self.cells_by_id.values())
         paths = self.cells_by_id["kaggle-paths"]
-        self.assertIn("datasets/edmundrosariosunil/qwen2-5-coder-3b-instruct", paths)
-        self.assertIn("qwen2.5-coder-3b-instruct", paths)
-        self.assertIn('INPUT_ROOT.rglob("config.json")', paths)
-        self.assertIn("is_target_model_config(config)", paths)
-        self.assertIn("len(matching_dirs) != 1", paths)
-        self.assertNotIn("MODEL_DIR.mkdir", paths)
+        self.assertIn('DATASET_HANDLE = "edmundrosariosunil/qwen2-5-coder-3b-instruct"', paths)
         self.assertIn('os.environ["HF_HOME"] = str(HF_HOME)', paths)
         self.assertIn('os.environ["HF_HUB_CACHE"] = str(HF_HOME / "hub")', paths)
-        self.assertLess(paths.index('os.environ["HF_HOME"]'), paths.index("def is_target_model_config"))
+        self.assertLess(paths.index('os.environ["HF_HOME"]'), paths.index('os.environ["HF_HUB_CACHE"]'))
         install = self.cells_by_id["kaggle-install"]
+        self.assertIn('"kagglehub>=1.0,<2"', install)
         self.assertIn('"huggingface_hub>=0.25.0,<1.0"', install)
         self.assertIn('"--upgrade"', install)
         self.assertIn('"--force-reinstall"', install)
         self.assertIn('"--cache-dir"', install)
-        loading = self.cells_by_id["kaggle-load-model"]
         cell_ids = [cell.get("id") for cell in self.notebook["cells"]]
-        self.assertLess(cell_ids.index("kaggle-paths"), cell_ids.index("kaggle-load-model"))
+        self.assertLess(cell_ids.index("kaggle-paths"), cell_ids.index("kaggle-install"))
+        dataset = self.cells_by_id["kaggle-dataset"]
+        self.assertIn("kagglehub.dataset_download(DATASET_HANDLE)", dataset)
+        self.assertIn('DATASET_ROOT.rglob("config.json")', dataset)
+        self.assertIn("is_target_model_config(config)", dataset)
+        self.assertIn("len(matching_dirs) != 1", dataset)
+        self.assertNotIn("MODEL_DIR.mkdir", dataset)
+        self.assertLess(cell_ids.index("kaggle-install"), cell_ids.index("kaggle-dataset"))
+        loading = self.cells_by_id["kaggle-load-model"]
+        self.assertLess(cell_ids.index("kaggle-dataset"), cell_ids.index("kaggle-load-model"))
         self.assertEqual(loading.count("local_files_only=True"), 2)
         self.assertEqual(loading.count('cache_dir=str(HF_HOME / "hub")'), 2)
         self.assertNotIn("snapshot_download", sources)
