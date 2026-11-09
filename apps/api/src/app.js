@@ -14,11 +14,11 @@ import { loadWorkspaceEnv } from '../../../scripts/env.mjs'
 
 loadWorkspaceEnv()
 
-const MAX_TITLE_LENGTH = 200
-const MAX_DESCRIPTION_LENGTH = 2000
-const MAX_PROJECT_LENGTH = 80
-const MAX_ACCEPTANCE_CRITERIA_LENGTH = 2000
-const MAX_PLANNING_TEXT_LENGTH = 2000
+const MAX_TITLE_LENGTH = Number(process.env.MAX_TASK_TITLE_LENGTH ?? 200)
+const MAX_DESCRIPTION_LENGTH = Number(process.env.MAX_TASK_DESCRIPTION_LENGTH ?? 2000)
+const MAX_PROJECT_LENGTH = Number(process.env.MAX_TASK_PROJECT_LENGTH ?? 80)
+const MAX_ACCEPTANCE_CRITERIA_LENGTH = Number(process.env.MAX_TASK_ACCEPTANCE_CRITERIA_LENGTH ?? 2000)
+const MAX_PLANNING_TEXT_LENGTH = Number(process.env.MAX_TASK_PLANNING_TEXT_LENGTH ?? 2000)
 const PLANNING_TEXT_FIELDS = [
   'objectives', 'requirements', 'decisions', 'relevant_files', 'important_context',
   'work_completed', 'work_active', 'work_blocked', 'next_move'

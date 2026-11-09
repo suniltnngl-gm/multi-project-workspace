@@ -4,6 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
+WEB_PORT="${WEB_PORT:-5173}"
+API_PORT="${PORT:-3001}"
+PYTHON_PORT="${PYTHON_PORT:-3002}"
+export WEB_PORT API_PORT PYTHON_PORT
+
 # Optional user-local toolchains.
 if ! command -v npm >/dev/null 2>&1; then
   NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
@@ -80,7 +85,7 @@ port_in_use() {
 
 check_ports() {
   local port
-  for port in 5173 3001 3002; do
+  for port in "$WEB_PORT" "$API_PORT" "$PYTHON_PORT"; do
     if port_in_use "$port"; then
       error "Port $port is already in use. Stop the existing process or run ./workspace stop."
       return 1
@@ -91,7 +96,7 @@ check_ports() {
 stop_ports() {
   local port stopped=0
   if command -v fuser >/dev/null 2>&1; then
-    for port in 5173 3001 3002; do
+    for port in "$WEB_PORT" "$API_PORT" "$PYTHON_PORT"; do
       if fuser -k "${port}/tcp" >/dev/null 2>&1; then
         stopped=1
       fi
@@ -120,7 +125,7 @@ print_status() {
   printf '  uv:   %s\n' "$(command -v uv >/dev/null 2>&1 && uv --version || echo missing)"
   printf '  python: %s\n' "$(command -v python3 >/dev/null 2>&1 && python3 --version || echo missing)"
   info 'Service ports:'
-  for port in 5173 3001 3002; do
+  for port in "$WEB_PORT" "$API_PORT" "$PYTHON_PORT"; do
     if port_in_use "$port"; then
       printf '  %s: in use\n' "$port"
     else
