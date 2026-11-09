@@ -33,7 +33,7 @@ The frontend uses Vitest with jsdom for DOM-level tests and ESLint for static ch
 
 Python is managed by [uv](https://docs.astral.sh/uv/), with its version pinned in `apps/python/.python-version` and its project metadata in `apps/python/pyproject.toml`. Commands use an activated `VIRTUAL_ENV` when present; otherwise, they use `apps/python/.venv` by default (configurable with `UV_PROJECT_ENVIRONMENT`). Add persistent project dependencies with `./workspace python-add <package>` so `pyproject.toml` and `uv.lock` stay in sync. For pip-compatible operations, use `./workspace python-pip ...`; it calls `uv pip` against that environment, never standalone pip. The Python service uses `python-dotenv` to load the workspace-root `.env` file.
 
-Set `DATABASE_PATH` to use a different SQLite file. Set `PORT` for the Node API or `PYTHON_PORT` for the Python satellite. Both services bind to `127.0.0.1` by default; set `HOST` to override the bind address. Set `UV` to select a uv executable if it is not on `PATH`.
+Set `DATABASE_PATH` to use a different SQLite file. Set `PORT` for the Node API or `PYTHON_PORT` for the Python satellite. Both backend services bind to `127.0.0.1` by default; set `HOST` to override the bind address. The Vite dev server and preview also bind to `127.0.0.1`, so the unauthenticated task API is not exposed through the proxy on the local network. Set `UV` to select a uv executable if it is not on `PATH`.
 
 ## Task API
 
