@@ -210,7 +210,7 @@ export function createModelClient({
   }
 
   async function probe(model) {
-    const cliBackend = model.backend === 'colab-cli' || model.backend === 'kaggle-cli'
+    const cliBackend = model.backend === 'colab-cli' || model.backend === 'kaggle-cli' || model.backend === 'opencode-cli'
     let result
     if (cliBackend) {
       result = await probeCli(model)
@@ -509,9 +509,49 @@ export function createModelClient({
     }
   }
 
+  async function completeOpencode(model, request) {
+    reportPhase(request, 'generating')
+    const prompt = request.messages
+      .map((message) => `${message.role}: ${message.content}`)
+      .join('\\n\\n')
+    const args = ['run', prompt, '--format', 'json']
+    if (model.cli?.model) args.push('--model', model.cli.model)
+    if (model.cli?.agent) args.push('--agent', model.cli.agent)
+
+    const timeoutMs = model.timeoutMs ?? 300000
+    let stdout
+    try {
+      ({ stdout } = await runCommand(model.cli.command, args, {
+        timeoutMs,
+        signal: request.signal
+      }))
+    } catch (error) {
+      throw new ModelCallError(`The OpenCode CLI failed: ${error.message}`, 502)
+    }
+
+    let content = ''
+    for (const line of stdout.split(/\\r?\\n/)) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      try {
+        const event = JSON.parse(trimmed)
+        if (event.type === 'text' && event.part && typeof event.part.text === 'string') {
+          content += event.part.text
+        }
+      } catch {
+        // Ignore non-JSON log lines.
+      }
+    }
+    if (!content) {
+      throw new ModelCallError('The OpenCode CLI returned no model output.', 502)
+    }
+    return content
+  }
+
   async function complete(model, request) {
     if (model.backend === 'colab-cli') return completeColab(model, request)
     if (model.backend === 'kaggle-cli') return completeKaggle(model, request)
+    if (model.backend === 'opencode-cli') return completeOpencode(model, request)
     return completeHttp(model, request)
   }
 

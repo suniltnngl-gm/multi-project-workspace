@@ -119,6 +119,23 @@ export const EXTERNAL_MODEL_DEFINITIONS = Object.freeze([
     defaultTimeoutMs: 3600000,
     minAvailableMemoryMb: 0,
     notes: 'Submits a private Kaggle notebook through the kaggle CLI; set KAGGLE_AI_URL for a faster HTTP endpoint.'
+  },
+  {
+    id: 'opencode',
+    label: 'OpenCode headless',
+    provider: 'opencode',
+    execution: 'live',
+    backend: 'opencode-cli',
+    callable: true,
+    remote: true,
+    priority: 6,
+    urlEnv: 'OPENCODE_AI_URL',
+    apiKeyEnv: 'OPENCODE_AI_API_KEY',
+    timeoutEnv: 'OPENCODE_AI_TIMEOUT_MS',
+    autoSelectEnv: 'OPENCODE_AI_AUTO_SELECT',
+    defaultTimeoutMs: 300000,
+    minAvailableMemoryMb: 0,
+    notes: 'Runs OpenCode in headless mode; set OPENCODE_AI_MODEL to choose a provider/model.'
   }
 ])
 
@@ -219,6 +236,13 @@ function createCliConfig(env) {
       python: readText(env, 'KAGGLE_AI_PYTHON', 'python3'),
       pollIntervalSeconds: readNumber(env, 'KAGGLE_AI_POLL_INTERVAL_SECONDS', 30),
       cancelFallback: readText(env, 'KAGGLE_AI_CANCEL_FALLBACK', 'none')
+    },
+    opencode: {
+      command: 'opencode',
+      probeArgs: ['--version'],
+      model: readText(env, 'OPENCODE_AI_MODEL', ''),
+      agent: readText(env, 'OPENCODE_AI_AGENT', ''),
+      timeoutMs: readNumber(env, 'OPENCODE_AI_TIMEOUT_MS', 300000)
     }
   }
 }
@@ -451,6 +475,7 @@ export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
 
     if (backend === 'colab-cli') model.cli = cli.colab
     if (backend === 'kaggle-cli') model.cli = cli.kaggle
+    if (backend === 'opencode-cli') model.cli = cli.opencode
     return model
   })
 

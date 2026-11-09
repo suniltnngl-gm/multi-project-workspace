@@ -109,13 +109,14 @@ function refine(url, body = {}) {
   })
 }
 
-test('registry contains two callable local models and two CLI-backed remote models', () => {
+test('registry contains two callable local models and three CLI-backed remote models', () => {
   const models = createModelRegistry({ env: {} })
   assert.deepEqual(models.map((model) => [model.id, model.execution, model.backend, model.autoSelect]), [
     ['local-0.5b', 'live', 'http', true],
     ['local-1.5b', 'live', 'http', true],
     ['colab-3b', 'live', 'colab-cli', false],
-    ['kaggle-3b', 'batch', 'kaggle-cli', false]
+    ['kaggle-3b', 'batch', 'kaggle-cli', false],
+    ['opencode', 'live', 'opencode-cli', false]
   ])
   assert.equal(models[0].minAvailableMemoryMb, 1024)
   assert.equal(models[1].minAvailableMemoryMb, 1792)
@@ -206,7 +207,7 @@ test('serverless slot is registered only when an endpoint is configured', () => 
   })
 
   assert.deepEqual(models.map((model) => model.id), [
-    'local-0.5b', 'local-1.5b', 'serverless', 'colab-3b', 'kaggle-3b'
+    'local-0.5b', 'local-1.5b', 'serverless', 'colab-3b', 'kaggle-3b', 'opencode'
   ])
   const serverless = models.find((model) => model.id === 'serverless')
   assert.equal(serverless.url, 'https://api.example/openai')
@@ -267,7 +268,7 @@ test('multiple serverless slots register independently', () => {
   })
 
   assert.deepEqual(models.map((model) => model.id), [
-    'local-0.5b', 'local-1.5b', 'slot-a', 'slot-b', 'colab-3b', 'kaggle-3b'
+    'local-0.5b', 'local-1.5b', 'slot-a', 'slot-b', 'colab-3b', 'kaggle-3b', 'opencode'
   ])
 
   const slotA = models.find((model) => model.id === 'slot-a')
@@ -316,7 +317,7 @@ test('legacy serverless variables coexist with JSON slots', () => {
   })
 
   assert.deepEqual(models.map((model) => model.id), [
-    'local-0.5b', 'local-1.5b', 'serverless', 'slot-a', 'colab-3b', 'kaggle-3b'
+    'local-0.5b', 'local-1.5b', 'serverless', 'slot-a', 'colab-3b', 'kaggle-3b', 'opencode'
   ])
 })
 
