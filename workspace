@@ -147,6 +147,12 @@ print_help() {
   printf '  %-24s %s\n' 'folders scan' 'Scan and register folders in SQLite'
   printf '  %-24s %s\n' 'folders list' 'List centrally tracked folders'
   printf '  %-24s %s\n' 'folders check' 'Verify every folder is tracked'
+  printf '  %-24s %s\n' 'git-context scan' 'Scan and track Git worktrees'
+  printf '  %-24s %s\n' 'git-context list' 'List tracked Git worktrees'
+  printf '  %-24s %s\n' 'git-context check' 'Verify Git worktrees are tracked'
+  printf '  %-24s %s\n' 'tools scan' 'Scan and track workflow tools'
+  printf '  %-24s %s\n' 'tools list' 'List tracked workflow tools'
+  printf '  %-24s %s\n' 'tools check' 'Verify tracked tools are available'
   printf '\n%sAI and remote%s\n' "$C_BOLD" "$C_RESET"
   printf '  %-24s %s\n' 'local-ai [all|0.5b|1.5b]' 'Start local models within memory limits'
   printf '  %-24s %s\n' 'colab [status|stop] [session]' 'Inspect or stop the reusable Colab session'
@@ -291,6 +297,50 @@ case "$command_name" in
     require_uv
     check_ports
     run_with_env npm run dev
+    ;;
+  git-context)
+    subcommand="${2:-scan}"
+    case "$subcommand" in
+      scan)
+        require_uv
+        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_git_context.py" scan --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        ;;
+      list)
+        require_uv
+        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_git_context.py" list --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        ;;
+      check)
+        require_uv
+        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_git_context.py" check --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        ;;
+      *)
+        error "Unknown git-context subcommand: $subcommand"
+        printf 'Usage: ./workspace git-context [scan|list|check]\n' >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  tools)
+    subcommand="${2:-scan}"
+    case "$subcommand" in
+      scan)
+        require_uv
+        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_tools.py" scan --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        ;;
+      list)
+        require_uv
+        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_tools.py" list --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        ;;
+      check)
+        require_uv
+        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_tools.py" check --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        ;;
+      *)
+        error "Unknown tools subcommand: $subcommand"
+        printf 'Usage: ./workspace tools [scan|list|check]\n' >&2
+        exit 2
+        ;;
+    esac
     ;;
   folders)
     subcommand="${2:-scan}"

@@ -91,6 +91,28 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
   connection.pragma('journal_mode = WAL')
   connection.pragma('foreign_keys = ON')
   connection.exec(`
+    CREATE TABLE IF NOT EXISTS git_worktrees (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      repository_root TEXT NOT NULL,
+      worktree_path TEXT NOT NULL UNIQUE,
+      branch TEXT NOT NULL DEFAULT '',
+      head_commit TEXT NOT NULL DEFAULT '',
+      remote_url TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `)
+  connection.exec(`
+    CREATE TABLE IF NOT EXISTS tools (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      command TEXT NOT NULL,
+      version TEXT NOT NULL DEFAULT '',
+      available INTEGER NOT NULL DEFAULT 0,
+      checked_at TEXT NOT NULL
+    );
+  `)
+  connection.exec(`
     CREATE TABLE IF NOT EXISTS folders (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       path TEXT NOT NULL UNIQUE CHECK(length(trim(path)) BETWEEN 1 AND 500),
@@ -477,6 +499,30 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     )
     const deleteFolderStatement = connection.prepare('DELETE FROM folders WHERE id = ?')
 
+    const listGitWorktreesStatement = connection.prepare(
+      'SELECT * FROM git_worktrees ORDER BY repository_root, worktree_path'
+    )
+    const upsertGitWorktreeStatement = connection.prepare(
+      `INSERT INTO git_worktrees (repository_root, worktree_path, branch, head_commit, remote_url, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(worktree_path) DO UPDATE SET
+         repository_root = excluded.repository_root,
+         branch = excluded.branch,
+         head_commit = excluded.head_commit,
+         remote_url = excluded.remote_url,
+         updated_at = excluded.updated_at`
+    )
+    const listToolsStatement = connection.prepare('SELECT * FROM tools ORDER BY name')
+    const upsertToolStatement = connection.prepare(
+      `INSERT INTO tools (name, command, version, available, checked_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(name) DO UPDATE SET
+         command = excluded.command,
+         version = excluded.version,
+         available = excluded.available,
+         checked_at = excluded.checked_at`
+    )
+
     const listUserFilesStatement = connection.prepare(
       'SELECT * FROM user_files ORDER BY path COLLATE NOCASE'
     )
@@ -773,6 +819,56 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
         }
       }
       return { inserted, updated, total: paths.length }
+    },
+    listGitWorktrees() {
+      return listGitWorktreesStatement.all().map((row) => ({
+        id: row.id,
+        repositoryRoot: row.repository_root,
+        worktreePath: row.worktree_path,
+        branch: row.branch,
+        headCommit: row.head_commit,
+        remoteUrl: row.remote_url,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+      }))
+    },
+    scanGitWorktrees(entries) {
+      const now = new Date().toISOString()
+      for (const entry of entries) {
+        upsertGitWorktreeStatement.run(
+          entry.repositoryRoot,
+          entry.worktreePath,
+          entry.branch || '',
+          entry.headCommit || '',
+          entry.remoteUrl || '',
+          now,
+          now
+        )
+      }
+      return { total: entries.length }
+    },
+    listTools() {
+      return listToolsStatement.all().map((row) => ({
+        id: row.id,
+        name: row.name,
+        command: row.command,
+        version: row.version,
+        available: Boolean(row.available),
+        checkedAt: row.checked_at
+      }))
+    },
+    scanTools(entries) {
+      const now = new Date().toISOString()
+      for (const entry of entries) {
+        upsertToolStatement.run(
+          entry.name,
+          entry.command,
+          entry.version || '',
+          entry.available ? 1 : 0,
+          now
+        )
+      }
+      return { total: entries.length }
     },
     close() {
       connection.close()

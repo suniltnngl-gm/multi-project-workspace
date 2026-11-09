@@ -880,6 +880,98 @@ export function createApp(database, {
     }
   })
 
+  app.get('/api/git-worktrees', (_request, response) => {
+    response.json(database.listGitWorktrees())
+  })
+
+  app.post('/api/git-worktrees/scan', async (_request, response) => {
+    try {
+      const root = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+        cwd: process.cwd(),
+        encoding: 'utf8'
+      }).trim()
+      const remoteUrl = (() => {
+        try {
+          return execFileSync('git', ['-C', root, 'remote', 'get-url', 'origin'], {
+            encoding: 'utf8'
+          }).trim()
+        } catch {
+          return ''
+        }
+      })()
+      const output = execFileSync('git', ['-C', root, 'worktree', 'list', '--porcelain'], {
+        encoding: 'utf8'
+      })
+      const entries = []
+      let current = {}
+      for (const line of output.split(/\r?\n/)) {
+        if (line.startsWith('worktree ')) {
+          if (current.worktreePath) entries.push(current)
+          current = { repositoryRoot: root, worktreePath: line.slice(9).trim() }
+        } else if (line.startsWith('HEAD ')) {
+          current.headCommit = line.slice(5).trim()
+        } else if (line.startsWith('branch ')) {
+          current.branch = line.slice(7).trim().replace(/^refs\/heads\//, '')
+        } else if (line === '') {
+          if (current.worktreePath) entries.push(current)
+          current = {}
+        }
+      }
+      if (current.worktreePath) entries.push(current)
+      for (const entry of entries) {
+        entry.remoteUrl = remoteUrl
+      }
+      const result = database.scanGitWorktrees(entries)
+      response.json({ ...result, entries })
+    } catch (error) {
+      response.status(500).json({ error: 'Could not scan Git worktrees.' })
+    }
+  })
+
+  app.get('/api/tools', (_request, response) => {
+    response.json(database.listTools())
+  })
+
+  app.post('/api/tools/scan', async (_request, response) => {
+    const commands = [
+      { name: 'node', command: 'node' },
+      { name: 'npm', command: 'npm' },
+      { name: 'uv', command: 'uv' },
+      { name: 'python', command: 'python3' },
+      { name: 'git', command: 'git' },
+      { name: 'colab', command: 'colab' },
+      { name: 'kaggle', command: 'kaggle' }
+    ]
+    const entries = commands.map((item) => {
+      let available = false
+      let version = ''
+      try {
+        execFileSync('sh', ['-c', `command -v ${item.command}`], { stdio: 'ignore' })
+        available = true
+      } catch {
+        available = false
+      }
+      if (available) {
+        try {
+          version = execFileSync(item.command, ['--version'], {
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore']
+          }).trim().split(/\r?\n/)[0]
+        } catch {
+          version = ''
+        }
+      }
+      return {
+        name: item.name,
+        command: item.command,
+        version,
+        available
+      }
+    })
+    const result = database.scanTools(entries)
+    response.json({ ...result, entries })
+  })
+
   app.use((error, _request, response, _next) => {
     if (error instanceof SyntaxError && 'body' in error) {
       return response.status(400).json({ error: 'Request body contains invalid JSON.' })
