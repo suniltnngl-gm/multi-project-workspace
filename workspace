@@ -153,6 +153,9 @@ print_help() {
   printf '  %-24s %s\n' 'tools scan' 'Scan and track workflow tools'
   printf '  %-24s %s\n' 'tools list' 'List tracked workflow tools'
   printf '  %-24s %s\n' 'tools check' 'Verify tracked tools are available'
+  printf '  %-24s %s\n' 'environment scan' 'Scan and track runtime environment'
+  printf '  %-24s %s\n' 'environment list' 'List tracked environment facts'
+  printf '  %-24s %s\n' 'environment check' 'Verify environment facts are populated'
   printf '\n%sAI and remote%s\n' "$C_BOLD" "$C_RESET"
   printf '  %-24s %s\n' 'local-ai [all|0.5b|1.5b]' 'Start local models within memory limits'
   printf '  %-24s %s\n' 'colab [status|stop] [session]' 'Inspect or stop the reusable Colab session'
@@ -316,6 +319,28 @@ case "$command_name" in
       *)
         error "Unknown git-context subcommand: $subcommand"
         printf 'Usage: ./workspace git-context [scan|list|check]\n' >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  environment)
+    subcommand="${2:-scan}"
+    case "$subcommand" in
+      scan)
+        require_uv
+        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_environments.py" scan --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        ;;
+      list)
+        require_uv
+        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_environments.py" list --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        ;;
+      check)
+        require_uv
+        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_environments.py" check --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        ;;
+      *)
+        error "Unknown environment subcommand: $subcommand"
+        printf 'Usage: ./workspace environment [scan|list|check]\n' >&2
         exit 2
         ;;
     esac

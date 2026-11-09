@@ -972,6 +972,26 @@ export function createApp(database, {
     response.json({ ...result, entries })
   })
 
+  app.get('/api/environments', (_request, response) => {
+    response.json(database.listEnvironments())
+  })
+
+  app.post('/api/environments/scan', async (_request, response) => {
+    try {
+      const { execFileSync } = await import('node:child_process')
+      const entries = [
+        { name: 'os', value: process.platform, source: 'process.platform' },
+        { name: 'architecture', value: process.arch, source: 'process.arch' },
+        { name: 'node', value: process.version, source: 'process.version' },
+        { name: 'cwd', value: process.cwd(), source: 'process.cwd' }
+      ]
+      const result = database.scanEnvironments(entries)
+      response.json({ ...result, entries })
+    } catch (error) {
+      response.status(500).json({ error: 'Could not scan environments.' })
+    }
+  })
+
   app.use((error, _request, response, _next) => {
     if (error instanceof SyntaxError && 'body' in error) {
       return response.status(400).json({ error: 'Request body contains invalid JSON.' })

@@ -103,6 +103,15 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     );
   `)
   connection.exec(`
+    CREATE TABLE IF NOT EXISTS environments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      value TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT '',
+      checked_at TEXT NOT NULL
+    );
+  `)
+  connection.exec(`
     CREATE TABLE IF NOT EXISTS tools (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE,
@@ -523,6 +532,16 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
          checked_at = excluded.checked_at`
     )
 
+    const listEnvironmentsStatement = connection.prepare('SELECT * FROM environments ORDER BY name')
+    const upsertEnvironmentStatement = connection.prepare(
+      `INSERT INTO environments (name, value, source, checked_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(name) DO UPDATE SET
+         value = excluded.value,
+         source = excluded.source,
+         checked_at = excluded.checked_at`
+    )
+
     const listUserFilesStatement = connection.prepare(
       'SELECT * FROM user_files ORDER BY path COLLATE NOCASE'
     )
@@ -867,6 +886,22 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
           entry.available ? 1 : 0,
           now
         )
+      }
+      return { total: entries.length }
+    },
+    listEnvironments() {
+      return listEnvironmentsStatement.all().map((row) => ({
+        id: row.id,
+        name: row.name,
+        value: row.value,
+        source: row.source,
+        checkedAt: row.checked_at
+      }))
+    },
+    scanEnvironments(entries) {
+      const now = new Date().toISOString()
+      for (const entry of entries) {
+        upsertEnvironmentStatement.run(entry.name, entry.value || '', entry.source || '', now)
       }
       return { total: entries.length }
     },
