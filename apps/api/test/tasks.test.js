@@ -411,11 +411,13 @@ test('local task assistant pauses without contacting the model when any resource
   }
 })
 
-test('local task assistant permits only one generation at a time', async () => {
+test('local task assistant runs one generation per model concurrently', async () => {
   let releaseGeneration
-  let signalGenerationStarted
+  let startFirst
+  let startSecond
   let generationCount = 0
-  const generationStarted = new Promise((resolve) => { signalGenerationStarted = resolve })
+  const firstStarted = new Promise((resolve) => { startFirst = resolve })
+  const secondStarted = new Promise((resolve) => { startSecond = resolve })
   const generationGate = new Promise((resolve) => { releaseGeneration = resolve })
   const app = createApp(database, {
     getResourceMetrics: async () => ({
@@ -426,14 +428,15 @@ test('local task assistant permits only one generation at a time', async () => {
     fetchImpl: async (url) => {
       if (url.endsWith('/health')) return new Response('ok')
       generationCount += 1
-      signalGenerationStarted()
+      if (generationCount === 1) startFirst()
+      if (generationCount === 2) startSecond()
       await generationGate
       return Response.json({
         choices: [{
           message: {
             content: JSON.stringify({
-              description: 'Add a single-generation guard.',
-              acceptance_criteria: 'Concurrent drafts do not run in parallel.'
+              description: 'Add a per-model concurrency guard.',
+              acceptance_criteria: 'Each local model runs one request at a time.'
             })
           }
         }]
@@ -443,28 +446,34 @@ test('local task assistant permits only one generation at a time', async () => {
   const assistantServer = app.listen(0, '127.0.0.1')
   await new Promise((resolve) => assistantServer.once('listening', resolve))
   const assistantUrl = `http://127.0.0.1:${assistantServer.address().port}`
-  const draftRequest = () => fetch(`${assistantUrl}/api/local-ai/refine-task`, {
+  const draftRequest = (model) => fetch(`${assistantUrl}/api/local-ai/refine-task`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title: 'Serialize local inference' })
+    body: JSON.stringify({ title: 'Run local inference', model })
   })
 
   try {
-    const firstDraft = draftRequest()
-    await generationStarted
+    const firstDraft = draftRequest('local-0.5b')
+    await firstStarted
 
-    const status = await fetch(`${assistantUrl}/api/local-ai/status`)
-    assert.equal((await status.json()).state, 'busy')
-
-    const secondDraft = await draftRequest()
-    assert.equal(secondDraft.status, 503)
-    const busy = await secondDraft.json()
+    const sameModelDraft = await draftRequest('local-0.5b')
+    assert.equal(sameModelDraft.status, 503)
+    const busy = await sameModelDraft.json()
     assert.equal(busy.state, 'busy')
     assert.equal(busy.retryAfter, 5)
     assert.equal(generationCount, 1)
 
+    const otherModelDraft = draftRequest('local-1.5b')
+    await secondStarted
+    assert.equal(generationCount, 2)
+
+    const status = await (await fetch(`${assistantUrl}/api/local-ai/status`)).json()
+    assert.equal(status.models.find((model) => model.id === 'local-0.5b').state, 'busy')
+    assert.equal(status.models.find((model) => model.id === 'local-1.5b').state, 'busy')
+
     releaseGeneration()
     assert.equal((await firstDraft).status, 200)
+    assert.equal((await otherModelDraft).status, 200)
   } finally {
     releaseGeneration()
     await new Promise((resolve) => assistantServer.close(resolve))

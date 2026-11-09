@@ -2,6 +2,8 @@ import express from 'express'
 import { createResourceMonitor } from './resourceMonitor.js'
 import { createAdaptiveCpuLimit } from './adaptiveCpuLimit.js'
 import { buildTaskPrompt } from './localAiPrompt.js'
+import { createModelRegistry, publicModelDefinition } from './modelRegistry.js'
+import { createModelScheduler } from './modelScheduler.js'
 import { loadWorkspaceEnv } from '../../../scripts/env.mjs'
 
 loadWorkspaceEnv()
@@ -40,30 +42,6 @@ if (
 }
 if (!Number.isFinite(LOCAL_AI_TURN_COOLDOWN_MS) || LOCAL_AI_TURN_COOLDOWN_MS < 0) {
   throw new Error('LOCAL_AI_TURN_COOLDOWN_MS must be a non-negative number.')
-}
-
-function getBusyReasons(metrics, cpuLoadLimit) {
-  const reasons = []
-  if (!Number.isFinite(metrics.loadAverage)) {
-    reasons.push('CPU load is unavailable')
-  } else if (metrics.loadAverage >= cpuLoadLimit) {
-    reasons.push(`CPU load ${metrics.loadAverage.toFixed(2)} is at/above ${cpuLoadLimit}`)
-  }
-  if (!Number.isFinite(metrics.availableMemoryMb)) {
-    reasons.push('available memory is unavailable')
-  } else if (metrics.availableMemoryMb < LOCAL_AI_MIN_AVAILABLE_MEMORY_MB) {
-    reasons.push(
-      `available memory ${Math.floor(metrics.availableMemoryMb)} MB is below ${LOCAL_AI_MIN_AVAILABLE_MEMORY_MB} MB`
-    )
-  }
-  if (!Number.isFinite(metrics.diskBusyPercent)) {
-    reasons.push('disk activity is unavailable')
-  } else if (metrics.diskBusyPercent > LOCAL_AI_MAX_DISK_BUSY_PERCENT) {
-    reasons.push(
-      `disk busy time ${Math.round(metrics.diskBusyPercent)}% is above ${LOCAL_AI_MAX_DISK_BUSY_PERCENT}%`
-    )
-  }
-  return reasons
 }
 
 function isValidText(value, maxLength) {
@@ -202,11 +180,22 @@ export function createApp(database, {
     maxLoad: LOCAL_AI_MAX_LOAD
   }),
   localAiUrl = LOCAL_AI_URL,
-  localAiApiKey = LOCAL_AI_API_KEY
+  localAiApiKey = LOCAL_AI_API_KEY,
+  models = createModelRegistry({ localAiUrl })
 } = {}) {
   const app = express()
-  let generationInProgress = false
-  let nextGenerationAt = 0
+  const scheduler = createModelScheduler({
+    models,
+    getResourceMetrics,
+    getCpuLoadLimit,
+    fetchImpl,
+    apiKey: localAiApiKey,
+    minAvailableMemoryMb: LOCAL_AI_MIN_AVAILABLE_MEMORY_MB,
+    minCpuLoad: LOCAL_AI_MIN_LOAD,
+    maxCpuLoad: LOCAL_AI_MAX_LOAD,
+    maxDiskBusyPercent: LOCAL_AI_MAX_DISK_BUSY_PERCENT,
+    turnCooldownMs: LOCAL_AI_TURN_COOLDOWN_MS
+  })
   const localAiHeaders = {
     ...(localAiApiKey ? { Authorization: `Bearer ${localAiApiKey}` } : {})
   }
@@ -247,66 +236,18 @@ export function createApp(database, {
     response.json(['workspace', ...database.listProjects().filter((project) => project !== 'workspace')])
   })
 
+  app.get('/api/models', (_request, response) => {
+    response.json(models.map(publicModelDefinition))
+  })
+
   app.get('/api/local-ai/status', async (_request, response) => {
-    if (generationInProgress) {
-      return response.json({
-        state: 'busy',
-        busyReasons: ['A local model request is already in progress.'],
-        retryAfter: 5
-      })
-    }
-    if (Date.now() < nextGenerationAt) {
-      return response.json({
-        state: 'busy',
-        busyReasons: ['Cooling down between local model turns.'],
-        retryAfter: Math.ceil((nextGenerationAt - Date.now()) / 1000)
-      })
-    }
-
-    let metrics
     try {
-      metrics = await getResourceMetrics()
+      return response.json(await scheduler.status())
     } catch (error) {
-      console.error('Local AI resource monitoring failed:', error)
+      console.error('Local AI status failed:', error)
       return response.json({
         state: 'unavailable',
-        error: 'Local AI resource monitoring is unavailable.'
-      })
-    }
-    const cpuLoadLimit = getCpuLoadLimit(metrics.loadAverage)
-    const limits = {
-      cpuLoadLimit,
-      minCpuLoad: LOCAL_AI_MIN_LOAD,
-      maxCpuLoad: LOCAL_AI_MAX_LOAD,
-      minAvailableMemoryMb: LOCAL_AI_MIN_AVAILABLE_MEMORY_MB,
-      maxDiskBusyPercent: LOCAL_AI_MAX_DISK_BUSY_PERCENT
-    }
-    const busyReasons = getBusyReasons(metrics, cpuLoadLimit)
-    if (busyReasons.length > 0) {
-      return response.json({
-        state: 'busy',
-        metrics,
-        limits,
-        busyReasons
-      })
-    }
-
-    try {
-      const healthResponse = await fetchImpl(`${localAiUrl}/health`, {
-        headers: localAiHeaders,
-        signal: AbortSignal.timeout(5000)
-      })
-      if (!healthResponse.ok) throw new Error(`llama.cpp health returned ${healthResponse.status}`)
-      return response.json({
-        state: 'ready',
-        metrics,
-        limits
-      })
-    } catch (error) {
-      console.error('Local AI health check failed:', error)
-      return response.json({
-        state: 'unavailable',
-        error: 'Configured local AI endpoint is unavailable. Start the selected local model or reconnect Colab, then retry.'
+        error: 'Local AI status is unavailable.'
       })
     }
   })
@@ -316,7 +257,7 @@ export function createApp(database, {
     if (!input || typeof input !== 'object' || Array.isArray(input)) {
       return response.status(400).json({ error: 'Request body must be a JSON object.' })
     }
-    if (Object.keys(input).some((key) => !['title', 'description', 'acceptance_criteria', 'project', 'task_type'].includes(key))) {
+    if (Object.keys(input).some((key) => !['title', 'description', 'acceptance_criteria', 'project', 'task_type', 'model'].includes(key))) {
       return response.status(400).json({ error: 'Request includes an unsupported task field.' })
     }
     if (!isValidText(input.title, MAX_TITLE_LENGTH) || !input.title.trim()) {
@@ -334,56 +275,27 @@ export function createApp(database, {
     if (input.task_type !== undefined && !TASK_TYPES.has(input.task_type)) {
       return response.status(400).json({ error: `Task type must be one of: ${[...TASK_TYPES].join(', ')}.` })
     }
+    if (input.model !== undefined && (!isValidText(input.model, 80) || !input.model.trim())) {
+      return response.status(400).json({ error: 'Model must be a non-empty model ID of at most 80 characters.' })
+    }
 
-    if (generationInProgress) {
+    let selection
+    try {
+      selection = await scheduler.select(input.model?.trim())
+    } catch (error) {
+      console.error('Local AI model selection failed:', error)
       return response.status(503).json({
-        error: 'Another local model request is in progress.',
-        state: 'busy',
-        busyReasons: ['A local model request is already in progress.'],
-        retryAfter: 5
+        error: 'Local AI model selection failed.',
+        state: 'unavailable'
       })
     }
-    if (Date.now() < nextGenerationAt) {
-      return response.status(503).json({
-        error: 'Local AI is cooling down between model turns.',
-        state: 'busy',
-        busyReasons: ['Cooling down between local model turns.'],
-        retryAfter: Math.ceil((nextGenerationAt - Date.now()) / 1000)
-      })
+    if (selection.error) {
+      return response.status(selection.error.status).json(selection.error.body)
     }
-    generationInProgress = true
+
+    const model = selection.model
     let inferenceStarted = false
     try {
-      let metrics
-      try {
-        metrics = await getResourceMetrics()
-      } catch (error) {
-        console.error('Local AI resource monitoring failed:', error)
-        return response.status(503).json({
-          error: 'Local AI resource monitoring is unavailable.',
-          state: 'unavailable'
-        })
-      }
-      const cpuLoadLimit = getCpuLoadLimit(metrics.loadAverage)
-      const limits = {
-        cpuLoadLimit,
-        minCpuLoad: LOCAL_AI_MIN_LOAD,
-        maxCpuLoad: LOCAL_AI_MAX_LOAD,
-        minAvailableMemoryMb: LOCAL_AI_MIN_AVAILABLE_MEMORY_MB,
-        maxDiskBusyPercent: LOCAL_AI_MAX_DISK_BUSY_PERCENT
-      }
-      const busyReasons = getBusyReasons(metrics, cpuLoadLimit)
-      if (busyReasons.length > 0) {
-        return response.status(503).json({
-          error: 'Local AI is paused while the machine is busy.',
-          state: 'busy',
-          metrics,
-          limits,
-          busyReasons,
-          retryAfter: 5
-        })
-      }
-
       const prompt = buildTaskPrompt({
         title: input.title,
         project: input.project || 'workspace',
@@ -394,12 +306,12 @@ export function createApp(database, {
 
       try {
         inferenceStarted = true
-        const modelResponse = await fetchImpl(`${localAiUrl}/v1/chat/completions`, {
+        const modelResponse = await fetchImpl(`${model.url}/v1/chat/completions`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...localAiHeaders },
           signal: AbortSignal.timeout(120000),
           body: JSON.stringify({
-            model: 'local-model',
+            model: model.id,
             temperature: 0.2,
             max_tokens: prompt.maxTokens,
             response_format: { type: 'json_object' },
@@ -408,7 +320,7 @@ export function createApp(database, {
         })
 
         if (!modelResponse.ok) {
-          console.error(`Local AI request failed with status ${modelResponse.status}.`)
+          console.error(`Local AI request to ${model.id} failed with status ${modelResponse.status}.`)
           return response.status(502).json({ error: 'The local model rejected the request.' })
         }
 
@@ -431,14 +343,11 @@ export function createApp(database, {
         return response.status(status).json({
           error: status === 504
             ? 'The local model took too long to respond.'
-            : 'The configured local AI endpoint is unavailable. Start the selected model or reconnect Colab and retry.'
+            : `The configured endpoint for ${model.label} is unavailable. Start the selected local model and retry.`
         })
       }
     } finally {
-      generationInProgress = false
-      if (inferenceStarted) {
-        nextGenerationAt = Date.now() + LOCAL_AI_TURN_COOLDOWN_MS
-      }
+      selection.release({ inferenceStarted })
     }
   })
 
