@@ -70,7 +70,7 @@ app.innerHTML = `
           <textarea name="acceptance_criteria" maxlength="2000" rows="2" placeholder="What must be true for this task to be done?"></textarea>
         </label>
         <button type="submit">Add task</button>
-        <button id="draft-task" class="secondary-button field-wide" type="button">Draft brief with local AI</button>
+        <button id="draft-task" class="secondary-button field-wide" type="button">Draft brief with AI</button>
       </form>
 
       <section class="models-section" aria-labelledby="models-heading">
@@ -553,14 +553,14 @@ draftTaskButton.addEventListener('click', async () => {
     }
   } catch (error) {
     if (error.name === 'AbortError') {
-      showStatus('Local AI draft cancelled.')
+      showStatus('AI draft cancelled.')
     } else {
       showStatus(`Could not draft task: ${error.message}`, true)
     }
   } finally {
     if (draftController === controller) {
       draftController = null
-      draftTaskButton.textContent = 'Draft brief with local AI'
+      draftTaskButton.textContent = 'Draft brief with AI'
       draftTaskButton.removeAttribute('aria-label')
     }
   }

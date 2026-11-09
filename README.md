@@ -55,7 +55,7 @@ The web board supports adding, editing, filtering, searching, reprioritizing, mo
 
 ## Local task assistant
 
-The board's **Draft brief with local AI** action asks a local llama.cpp model to refine a task description and acceptance criteria. The result is only placed into the form for review; it is never saved automatically. Start the local models separately:
+The board's **Draft brief with AI** action asks a selected model to refine a task description and acceptance criteria. The result is only placed into the form for review; it is never saved automatically. Start the local models separately:
 
 ```sh
 ./workspace local-ai        # start every installed model within memory limits
