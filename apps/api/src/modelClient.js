@@ -83,6 +83,18 @@ async function defaultRunCommand(command, args, {
   }
 }
 
+function parseRetryAfter(value, now = Date.now()) {
+  if (value === null || value === undefined || value === '') return undefined
+  const text = String(value).trim()
+  const seconds = Number(text)
+  if (Number.isFinite(seconds)) return Math.max(0, Math.ceil(seconds))
+  const timestamp = Date.parse(text)
+  if (Number.isFinite(timestamp)) {
+    return Math.max(0, Math.ceil((timestamp - now) / 1000))
+  }
+  return undefined
+}
+
 function parseContent(result) {
   const content = result?.choices?.[0]?.message?.content
   if (typeof content !== 'string' || !content.trim()) {
@@ -116,7 +128,7 @@ export function createModelClient({
   }
 
   async function probeHttp(model) {
-    for (const path of ['/health', '/v1/models']) {
+    for (const path of ['/health', model.healthPath ?? '/v1/models']) {
       try {
         const response = await fetchImpl(`${model.url}${path}`, {
           headers: authHeaders(model),
@@ -194,18 +206,25 @@ export function createModelClient({
     const signal = request.signal
       ? AbortSignal.any([timeout, request.signal])
       : timeout
+    const payload = {
+      model: model.apiModel ?? model.id,
+      temperature: 0.2,
+      max_tokens: request.maxTokens,
+      messages: request.messages
+    }
+    // Existing llama.cpp/HTTP endpoints keep JSON mode by default. A provider
+    // that does not support response_format sets supportsJsonMode to false and
+    // relies on the prompt's "return only JSON" instruction instead.
+    if (model.supportsJsonMode !== false) {
+      payload.response_format = { type: 'json_object' }
+    }
+
     try {
-      response = await fetchImpl(`${model.url}/v1/chat/completions`, {
+      response = await fetchImpl(`${model.url}${model.chatPath ?? '/v1/chat/completions'}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders(model) },
         signal,
-        body: JSON.stringify({
-          model: model.id,
-          temperature: 0.2,
-          max_tokens: request.maxTokens,
-          response_format: { type: 'json_object' },
-          messages: request.messages
-        })
+        body: JSON.stringify(payload)
       })
     } catch (error) {
       if (request.signal?.aborted) {
@@ -218,6 +237,16 @@ export function createModelClient({
     }
 
     if (!response.ok) {
+      const retryAfter = parseRetryAfter(
+        response.headers?.get?.('retry-after')
+      )
+      if (response.status === 429) {
+        throw new ModelCallError(
+          `The model ${model.label} is rate-limited (HTTP 429).`,
+          429,
+          { retryAfter }
+        )
+      }
       throw new ModelCallError(
         `The model ${model.label} rejected the request (HTTP ${response.status}).`,
         502

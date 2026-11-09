@@ -185,6 +185,58 @@ test('external models become live when a URL is configured', () => {
   )
 })
 
+test('serverless slot is registered only when an endpoint is configured', () => {
+  assert.equal(
+    createModelRegistry({ env: {} }).some((model) => model.id === 'serverless'),
+    false
+  )
+
+  const models = createModelRegistry({
+    env: {
+      SERVERLESS_AI_URL: 'https://api.example/openai/',
+      SERVERLESS_AI_API_KEY: 'serverless-key',
+      SERVERLESS_AI_MODEL: 'provider/model-slug',
+      SERVERLESS_AI_TIMEOUT_MS: '15000',
+      SERVERLESS_AI_AUTO_SELECT: 'true',
+      SERVERLESS_AI_SUPPORTS_JSON_MODE: 'true',
+      SERVERLESS_AI_CHAT_PATH: 'chat/completions',
+      SERVERLESS_AI_HEALTH_PATH: 'models'
+    }
+  })
+
+  assert.deepEqual(models.map((model) => model.id), [
+    'local-0.5b', 'local-1.5b', 'serverless', 'colab-3b', 'kaggle-3b'
+  ])
+  const serverless = models.find((model) => model.id === 'serverless')
+  assert.equal(serverless.url, 'https://api.example/openai')
+  assert.equal(serverless.apiKey, 'serverless-key')
+  assert.equal(serverless.apiModel, 'provider/model-slug')
+  assert.equal(serverless.timeoutMs, 15000)
+  assert.equal(serverless.autoSelect, true)
+  assert.equal(serverless.supportsJsonMode, true)
+  assert.equal(serverless.chatPath, '/chat/completions')
+  assert.equal(serverless.healthPath, '/models')
+  assert.equal(serverless.remote, true)
+  assert.equal(serverless.callable, true)
+  assert.equal(serverless.minAvailableMemoryMb, 0)
+  assert.equal(serverless.priority, 9)
+})
+
+test('serverless defaults avoid implicit selection and JSON mode', () => {
+  const models = createModelRegistry({
+    env: { SERVERLESS_AI_URL: 'https://api.example/openai' }
+  })
+  const serverless = models.find((model) => model.id === 'serverless')
+
+  assert.equal(serverless.autoSelect, false)
+  assert.equal(serverless.supportsJsonMode, false)
+  assert.equal(serverless.apiModel, undefined)
+  assert.equal(serverless.apiKey, undefined)
+  assert.equal(serverless.timeoutMs, 60000)
+  assert.equal(serverless.chatPath, '/v1/chat/completions')
+  assert.equal(serverless.healthPath, '/v1/models')
+})
+
 test('CLI remote models opt out of automatic selection unless enabled', () => {
   const defaults = createModelRegistry({ env: {} })
   assert.equal(defaults.find((model) => model.id === 'colab-3b').autoSelect, false)
@@ -561,5 +613,53 @@ test('model responses include a persisted daily budget when configured', async (
     assert.equal(kaggle.budget.limit, 3)
     assert.equal(kaggle.budget.used, 2)
     assert.equal(kaggle.budget.remaining, 1)
+  })
+})
+
+test('serverless requests use the same persisted daily budget', () => {
+  const rows = new Map()
+  const modelBudget = createModelBudget({
+    env: { SERVERLESS_AI_MAX_REQUESTS_PER_DAY: '2' },
+    repository: {
+      getBudget: (model, day) => rows.get(`${model}:${day}`) ?? 0,
+      incrementBudget: (model, day) => {
+        const key = `${model}:${day}`
+        const used = (rows.get(key) ?? 0) + 1
+        rows.set(key, used)
+        return used
+      },
+      pruneBudgetBefore: () => {}
+    }
+  })
+
+  assert.equal(modelBudget.check('serverless').ok, true)
+  modelBudget.record('serverless')
+  modelBudget.record('serverless')
+  const check = modelBudget.check('serverless')
+  assert.equal(check.ok, false)
+  assert.equal(check.budget.limit, 2)
+  assert.equal(check.budget.used, 2)
+  assert.equal(check.budget.remaining, 0)
+})
+
+test('rate-limited responses keep the 429 status and retry delay', async () => {
+  await withApp({
+    getResourceMetrics: async () => idleMetrics(),
+    modelClient: {
+      probe: async () => ({ ok: true }),
+      complete: async () => {
+        throw new ModelCallError(
+          'The model Serverless is rate-limited (HTTP 429).',
+          429,
+          { retryAfter: 17 }
+        )
+      }
+    }
+  }, async (url) => {
+    const response = await refine(url, { model: 'local-small' })
+    assert.equal(response.status, 429)
+    const payload = await response.json()
+    assert.match(payload.error, /rate-limited/)
+    assert.equal(payload.retryAfter, 17)
   })
 })

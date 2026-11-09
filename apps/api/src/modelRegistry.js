@@ -51,6 +51,33 @@ export const LOCAL_MODEL_DEFINITIONS = Object.freeze([
 ])
 
 /**
+ * A provider-agnostic OpenAI-compatible slot. The provider slug and endpoint
+ * stay in environment variables so no vendor-specific branch enters the code.
+ * It is registered only when SERVERLESS_AI_URL is set.
+ */
+export const SERVERLESS_MODEL_DEFINITION = Object.freeze({
+  id: 'serverless',
+  label: 'Serverless API model',
+  provider: 'serverless',
+  execution: 'live',
+  backend: 'http',
+  callable: true,
+  remote: true,
+  priority: 9,
+  urlEnv: 'SERVERLESS_AI_URL',
+  apiKeyEnv: 'SERVERLESS_AI_API_KEY',
+  apiModelEnv: 'SERVERLESS_AI_MODEL',
+  timeoutEnv: 'SERVERLESS_AI_TIMEOUT_MS',
+  autoSelectEnv: 'SERVERLESS_AI_AUTO_SELECT',
+  jsonModeEnv: 'SERVERLESS_AI_SUPPORTS_JSON_MODE',
+  chatPathEnv: 'SERVERLESS_AI_CHAT_PATH',
+  healthPathEnv: 'SERVERLESS_AI_HEALTH_PATH',
+  defaultTimeoutMs: 60000,
+  minAvailableMemoryMb: 0,
+  notes: 'OpenAI-compatible endpoint configured by SERVERLESS_AI_URL; set SERVERLESS_AI_MODEL to the provider model slug.'
+})
+
+/**
  * Web models call the Colab/Kaggle CLIs by default. Setting an HTTP URL opts
  * the model into a faster live endpoint instead; the CLI backend is skipped.
  */
@@ -141,6 +168,11 @@ function resolvePort(definition, env, url) {
   return definition.defaultPort
 }
 
+function readPath(env, key, fallback) {
+  const value = readText(env, key, fallback)
+  return value.startsWith('/') ? value : `/${value}`
+}
+
 function readUrl(env, key) {
   const value = env[key]
   if (value === undefined || value === '') return undefined
@@ -184,6 +216,33 @@ function createCliConfig(env) {
       pollIntervalSeconds: readNumber(env, 'KAGGLE_AI_POLL_INTERVAL_SECONDS', 30),
       cancelFallback: readText(env, 'KAGGLE_AI_CANCEL_FALLBACK', 'none')
     }
+  }
+}
+
+function createServerlessModel(env) {
+  const definition = SERVERLESS_MODEL_DEFINITION
+  const url = readUrl(env, definition.urlEnv)
+  if (!url) return null
+
+  const apiModel = readText(env, definition.apiModelEnv, '')
+  const apiKey = env[definition.apiKeyEnv]
+
+  return {
+    ...definition,
+    url,
+    callable: true,
+    // An explicitly configured serverless endpoint is still opt-in: a missing
+    // model does not silently spend a third-party quota.
+    autoSelect: readBoolean(env, definition.autoSelectEnv, false),
+    timeoutMs: readNumber(env, definition.timeoutEnv, definition.defaultTimeoutMs),
+    minAvailableMemoryMb: 0,
+    // Existing local/HTTP models keep JSON mode by default; a new provider
+    // opts in explicitly because not every API supports response_format.
+    supportsJsonMode: readBoolean(env, definition.jsonModeEnv, false),
+    chatPath: readPath(env, definition.chatPathEnv, '/v1/chat/completions'),
+    healthPath: readPath(env, definition.healthPathEnv, '/v1/models'),
+    ...(apiModel ? { apiModel } : {}),
+    ...(apiKey ? { apiKey } : {})
   }
 }
 
@@ -244,7 +303,12 @@ export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
     return model
   })
 
-  return [...localModels, ...externalModels]
+  const serverless = createServerlessModel(env)
+  return [
+    ...localModels,
+    ...(serverless ? [serverless] : []),
+    ...externalModels
+  ]
 }
 
 /**

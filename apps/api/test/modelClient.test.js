@@ -637,3 +637,112 @@ test('HTTP completions report timeouts and rejection statuses', async () => {
     (error) => error instanceof ModelCallError && error.status === 502
   )
 })
+
+test('HTTP completions send the provider model and gate JSON mode', async () => {
+  const bodies = []
+  const urls = []
+  const client = createModelClient({
+    fetchImpl: async (url, options) => {
+      urls.push(url)
+      bodies.push(JSON.parse(options.body))
+      return Response.json({
+        choices: [{
+          message: {
+            content: JSON.stringify({ description: 'ok', acceptance_criteria: 'done' })
+          }
+        }]
+      })
+    }
+  })
+
+  await client.complete({
+    id: 'serverless',
+    label: 'Serverless',
+    backend: 'http',
+    url: 'https://api.test',
+    apiModel: 'provider/model-slug',
+    supportsJsonMode: false,
+    timeoutMs: 1000
+  }, REQUEST)
+
+  assert.deepEqual(urls, ['https://api.test/v1/chat/completions'])
+  assert.equal(bodies[0].model, 'provider/model-slug')
+  assert.equal('response_format' in bodies[0], false)
+
+  await client.complete({
+    id: 'serverless',
+    label: 'Serverless',
+    backend: 'http',
+    url: 'https://api.test',
+    chatPath: '/chat/completions',
+    timeoutMs: 1000
+  }, REQUEST)
+
+  assert.deepEqual(urls, [
+    'https://api.test/v1/chat/completions',
+    'https://api.test/chat/completions'
+  ])
+  assert.equal(bodies[1].model, 'serverless')
+  assert.deepEqual(bodies[1].response_format, { type: 'json_object' })
+})
+
+test('HTTP 429 responses expose a numeric Retry-After', async () => {
+  const client = createModelClient({
+    fetchImpl: async () => new Response('', {
+      status: 429,
+      headers: { 'Retry-After': '17' }
+    })
+  })
+
+  await assert.rejects(
+    () => client.complete(
+      { id: 'x', label: 'X', backend: 'http', url: 'http://x', timeoutMs: 10 },
+      REQUEST
+    ),
+    (error) => error instanceof ModelCallError
+      && error.status === 429
+      && error.retryAfter === 17
+      && /rate-limited/.test(error.message)
+  )
+})
+
+test('HTTP 429 responses parse an HTTP-date Retry-After', async () => {
+  const client = createModelClient({
+    fetchImpl: async () => new Response('', {
+      status: 429,
+      headers: { 'Retry-After': new Date(Date.now() + 30000).toUTCString() }
+    })
+  })
+
+  await assert.rejects(
+    () => client.complete(
+      { id: 'x', label: 'X', backend: 'http', url: 'http://x', timeoutMs: 10 },
+      REQUEST
+    ),
+    (error) => error instanceof ModelCallError
+      && error.status === 429
+      && error.retryAfter >= 25
+      && error.retryAfter <= 31
+  )
+})
+
+test('HTTP probes honour a configured health path', async () => {
+  const urls = []
+  const client = createModelClient({
+    fetchImpl: async (url) => {
+      urls.push(url)
+      return new Response('', { status: url.endsWith('/models') ? 200 : 404 })
+    }
+  })
+
+  const result = await client.probe({
+    id: 'serverless',
+    label: 'Serverless',
+    backend: 'http',
+    url: 'https://api.test',
+    healthPath: '/models'
+  })
+
+  assert.deepEqual(result, { ok: true })
+  assert.deepEqual(urls, ['https://api.test/health', 'https://api.test/models'])
+})

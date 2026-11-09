@@ -30,6 +30,7 @@ function msUntilNextDay(now) {
 export function createModelBudget({ env = process.env, now = Date.now, repository } = {}) {
   const limits = new Map()
   for (const [id, key] of [
+    ['serverless', 'SERVERLESS_AI_MAX_REQUESTS_PER_DAY'],
     ['colab-3b', 'COLAB_AI_MAX_REQUESTS_PER_DAY'],
     ['kaggle-3b', 'KAGGLE_AI_MAX_REQUESTS_PER_DAY']
   ]) {
