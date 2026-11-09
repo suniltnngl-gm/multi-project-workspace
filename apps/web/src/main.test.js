@@ -28,13 +28,14 @@ function jsonResponse(payload) {
 }
 
 const models = [
-  { id: 'local-0.5b', label: 'Qwen2.5-Coder 0.5B (local)', provider: 'local', execution: 'live', autoSelect: true },
-  { id: 'local-1.5b', label: 'Qwen2.5-Coder 1.5B (local)', provider: 'local', execution: 'live', autoSelect: true },
+  { id: 'local-0.5b', label: 'Qwen2.5-Coder 0.5B (local)', provider: 'local', execution: 'live', callable: true, autoSelect: true },
+  { id: 'local-1.5b', label: 'Qwen2.5-Coder 1.5B (local)', provider: 'local', execution: 'live', callable: true, autoSelect: true },
   {
     id: 'colab-3b',
     label: 'Qwen2.5-Coder 3B (Colab)',
     provider: 'colab',
     execution: 'live',
+    callable: true,
     autoSelect: false,
     notes: 'Calls a reusable Colab session through the colab CLI.'
   },
@@ -43,6 +44,7 @@ const models = [
     label: 'Qwen2.5-Coder 3B (Kaggle)',
     provider: 'kaggle',
     execution: 'batch',
+    callable: true,
     autoSelect: false,
     notes: 'Submits a private Kaggle notebook through the kaggle CLI.'
   }
@@ -94,5 +96,22 @@ describe('development board', () => {
         'Calls a reusable Colab session through the colab CLI. · explicit selection only',
         'Submits a private Kaggle notebook through the kaggle CLI. · explicit selection only'
       ])
+  })
+
+  it('offers callable models in the draft picker', async () => {
+    await vi.waitFor(() => {
+      expect(document.querySelectorAll('#draft-model option')).toHaveLength(5)
+    })
+
+    expect([...document.querySelectorAll('#draft-model option')].map((option) => [
+      option.value,
+      option.textContent
+    ])).toEqual([
+      ['', 'Auto (local models first)'],
+      ['local-0.5b', 'Qwen2.5-Coder 0.5B (local)'],
+      ['local-1.5b', 'Qwen2.5-Coder 1.5B (local)'],
+      ['colab-3b', 'Qwen2.5-Coder 3B (Colab) — explicit'],
+      ['kaggle-3b', 'Qwen2.5-Coder 3B (Kaggle) — explicit']
+    ])
   })
 })

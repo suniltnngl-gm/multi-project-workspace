@@ -55,6 +55,12 @@ app.innerHTML = `
             <option value="urgent">Urgent</option>
           </select>
         </label>
+        <label>
+          <span>Draft model</span>
+          <select id="draft-model">
+            <option value="">Auto</option>
+          </select>
+        </label>
         <label class="field-wide">
           <span>Description <small>(optional)</small></span>
           <textarea name="description" maxlength="2000" rows="2" placeholder="Implementation notes or context"></textarea>
@@ -151,6 +157,7 @@ const taskStatus = document.querySelector('#task-status')
 const taskCount = document.querySelector('#task-count')
 const projectOptions = document.querySelector('#project-options')
 const draftTaskButton = document.querySelector('#draft-task')
+const draftModel = document.querySelector('#draft-model')
 const modelRoster = document.querySelector('#model-roster')
 const modelRosterStatus = document.querySelector('#model-roster-status')
 let tasks = []
@@ -196,10 +203,24 @@ function renderModelRoster(models) {
   }
 }
 
+function populateDraftModels(models) {
+  const selected = draftModel.value
+  draftModel.replaceChildren(new Option('Auto (local models first)', ''))
+  for (const model of models) {
+    if (model.callable === false) continue
+    const suffix = model.autoSelect === false ? ' — explicit' : ''
+    draftModel.append(new Option(`${model.label}${suffix}`, model.id))
+  }
+  if ([...draftModel.options].some((option) => option.value === selected)) {
+    draftModel.value = selected
+  }
+}
+
 async function loadModels() {
   try {
     const models = await request('/api/models')
     renderModelRoster(models)
+    populateDraftModels(models)
     modelRosterStatus.textContent = `${models.length} registered`
     modelRosterStatus.classList.remove('is-error')
   } catch (error) {
@@ -427,6 +448,22 @@ taskForm.addEventListener('submit', async (event) => {
   }
 })
 
+async function waitForJob(jobId, signal) {
+  let delay = 2000
+  while (true) {
+    const job = await request(`/api/local-ai/jobs/${jobId}`, { signal })
+    if (job.state === 'done') return job.result
+    if (job.state === 'error') {
+      const error = new Error(job.error || 'The batch job failed.')
+      error.status = job.status
+      throw error
+    }
+    showStatus(`Batch job ${job.id} is ${job.state}. Waiting…`)
+    await waitForRetry(delay, signal)
+    delay = Math.min(10000, Math.round(delay * 1.5))
+  }
+}
+
 draftTaskButton.addEventListener('click', async () => {
   if (draftController) {
     draftController.abort()
@@ -436,7 +473,7 @@ draftTaskButton.addEventListener('click', async () => {
   const title = taskForm.elements.title.value.trim()
   if (!title) {
     taskForm.elements.title.focus()
-    showStatus('Enter a task title before asking the local model to draft it.')
+    showStatus('Enter a task title before asking the model to draft it.')
     return
   }
 
@@ -455,25 +492,51 @@ draftTaskButton.addEventListener('click', async () => {
         modelRosterStatus.textContent = status.state
         modelRosterStatus.classList.toggle('is-error', status.state === 'unavailable')
       }
-      if (status.state === 'unavailable') {
-        throw new Error(status.error || 'Local AI resource monitoring is unavailable.')
+
+      const selectedId = draftModel.value
+      const selected = selectedId
+        ? status.models?.find((model) => model.id === selectedId)
+        : undefined
+      if (selectedId && !selected) {
+        throw new Error(`The selected model (${selectedId}) is not registered.`)
+      }
+      const targetState = selected ? selected.state : status.state
+      if (targetState === 'unavailable') {
+        throw new Error(
+          selected?.error || status.error || 'The selected model is unavailable.'
+        )
       }
 
-      if (status.state === 'busy') {
-        const retryAfter = status.retryAfter ?? 5
-        showStatus(formatBusyMessage(status.busyReasons, retryAfter))
+      if (targetState === 'busy') {
+        const retryAfter = (selected ? selected.retryAfter : status.retryAfter) ?? 5
+        const reasons = selected ? selected.busyReasons : status.busyReasons
+        showStatus(formatBusyMessage(reasons, retryAfter))
         await waitForRetry(retryAfter * 1000, signal)
         continue
       }
 
-      showStatus('Local model is idle. Drafting a task brief…')
+      const body = Object.fromEntries(new FormData(taskForm))
+      if (selectedId) body.model = selectedId
+      showStatus(selected ? `Drafting with ${selected.label}…` : 'Local model is idle. Drafting a task brief…')
+
       try {
-        draft = await request('/api/local-ai/refine-task', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(Object.fromEntries(new FormData(taskForm))),
-          signal
-        })
+        if (selected?.execution === 'batch') {
+          const job = await request('/api/local-ai/jobs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal
+          })
+          showStatus(`Submitted batch job ${job.id}. Waiting for ${job.model}…`)
+          draft = await waitForJob(job.id, signal)
+        } else {
+          draft = await request('/api/local-ai/refine-task', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal
+          })
+        }
         break
       } catch (error) {
         if (error.state !== 'busy') throw error
