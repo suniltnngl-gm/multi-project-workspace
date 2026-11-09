@@ -178,6 +178,11 @@ h2 {
   color: #86efac;
 }
 
+.model-state-live {
+  background: rgba(34, 197, 94, 0.18);
+  color: #86efac;
+}
+
 .model-state-busy {
   background: rgba(250, 204, 21, 0.18);
   color: #fde68a;
