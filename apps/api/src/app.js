@@ -196,9 +196,6 @@ export function createApp(database, {
     maxDiskBusyPercent: LOCAL_AI_MAX_DISK_BUSY_PERCENT,
     turnCooldownMs: LOCAL_AI_TURN_COOLDOWN_MS
   })
-  const localAiHeaders = {
-    ...(localAiApiKey ? { Authorization: `Bearer ${localAiApiKey}` } : {})
-  }
   app.use(express.json({ limit: '16kb' }))
 
   app.get('/health', (_request, response) => {
@@ -306,9 +303,11 @@ export function createApp(database, {
 
       try {
         inferenceStarted = true
+        const modelKey = model.apiKey || (model.remote ? '' : localAiApiKey)
+        const modelHeaders = modelKey ? { Authorization: `Bearer ${modelKey}` } : {}
         const modelResponse = await fetchImpl(`${model.url}/v1/chat/completions`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...localAiHeaders },
+          headers: { 'Content-Type': 'application/json', ...modelHeaders },
           signal: AbortSignal.timeout(120000),
           body: JSON.stringify({
             model: model.id,

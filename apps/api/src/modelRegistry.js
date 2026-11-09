@@ -41,8 +41,9 @@ export const LOCAL_MODEL_DEFINITIONS = Object.freeze([
 ])
 
 /**
- * Web models are tracked by the workspace but stay manual/batch: they do not
- * expose a live endpoint, so the API never tries to call them.
+ * Web models default to manual/batch. Setting a URL (for example a
+ * user-managed tunnel to an OpenAI-compatible server in the notebook) opts the
+ * model into live calls; without one the API never contacts it.
  */
 export const EXTERNAL_MODEL_DEFINITIONS = Object.freeze([
   {
@@ -50,16 +51,26 @@ export const EXTERNAL_MODEL_DEFINITIONS = Object.freeze([
     label: 'Qwen2.5-Coder 3B (Colab)',
     provider: 'colab',
     execution: 'manual',
-    priority: 0,
-    notes: 'Run notebooks/colab-qwen-coder-free-tier.ipynb in Colab. No live workspace endpoint.'
+    defaultExecution: 'manual',
+    remote: true,
+    priority: 8,
+    urlEnv: 'COLAB_AI_URL',
+    apiKeyEnv: 'COLAB_AI_API_KEY',
+    minAvailableMemoryMb: 0,
+    notes: 'Run notebooks/colab-qwen-coder-free-tier.ipynb in Colab, or set COLAB_AI_URL to a live endpoint.'
   },
   {
     id: 'kaggle-3b',
     label: 'Qwen2.5-Coder 3B (Kaggle)',
     provider: 'kaggle',
     execution: 'batch',
-    priority: 0,
-    notes: 'Submit notebooks/kaggle-qwen-coder.ipynb with scripts/kaggle_run.py. Not a live endpoint.'
+    defaultExecution: 'batch',
+    remote: true,
+    priority: 7,
+    urlEnv: 'KAGGLE_AI_URL',
+    apiKeyEnv: 'KAGGLE_AI_API_KEY',
+    minAvailableMemoryMb: 0,
+    notes: 'Submit notebooks/kaggle-qwen-coder.ipynb with scripts/kaggle_run.py, or set KAGGLE_AI_URL to a live endpoint.'
   }
 ])
 
@@ -83,7 +94,9 @@ function trimUrl(url) {
 }
 
 function resolvePort(definition, env, url) {
-  const explicitPort = readNumber(env, definition.portEnv, undefined)
+  const explicitPort = definition.portEnv
+    ? readNumber(env, definition.portEnv, undefined)
+    : undefined
   if (explicitPort !== undefined) return explicitPort
   if (url) {
     try {
@@ -94,6 +107,21 @@ function resolvePort(definition, env, url) {
     }
   }
   return definition.defaultPort
+}
+
+function readUrl(env, key) {
+  const value = env[key]
+  if (value === undefined || value === '') return undefined
+  let parsed
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw new Error(`${key} must be a valid http(s) URL.`)
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`${key} must be a valid http(s) URL.`)
+  }
+  return trimUrl(value)
 }
 
 /**
@@ -113,6 +141,7 @@ export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
 
     return {
       ...definition,
+      execution: 'live',
       port: resolvePort(definition, env, url),
       url,
       minAvailableMemoryMb: readNumber(
@@ -123,7 +152,26 @@ export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
     }
   })
 
-  return [...localModels, ...EXTERNAL_MODEL_DEFINITIONS]
+  const externalModels = EXTERNAL_MODEL_DEFINITIONS.map((definition) => {
+    const url = readUrl(env, definition.urlEnv)
+    if (!url) {
+      return {
+        ...definition,
+        execution: definition.defaultExecution,
+        minAvailableMemoryMb: definition.minAvailableMemoryMb ?? 0
+      }
+    }
+    const apiKey = definition.apiKeyEnv ? env[definition.apiKeyEnv] : undefined
+    return {
+      ...definition,
+      execution: 'live',
+      url,
+      ...(apiKey ? { apiKey } : {}),
+      minAvailableMemoryMb: definition.minAvailableMemoryMb ?? 0
+    }
+  })
+
+  return [...localModels, ...externalModels]
 }
 
 /**

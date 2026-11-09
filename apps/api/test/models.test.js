@@ -47,6 +47,18 @@ const MODELS = [
   }
 ]
 
+const LIVE_EXTERNAL_MODELS = MODELS.map((model) => (
+  model.execution === 'live'
+    ? model
+    : {
+        ...model,
+        execution: 'live',
+        remote: true,
+        minAvailableMemoryMb: 0,
+        url: `http://${model.id}.test`
+      }
+))
+
 const DRAFT = {
   description: 'Draft from the selected model.',
   acceptance_criteria: 'The draft is returned without being saved.'
@@ -110,6 +122,32 @@ test('registry contains two live local models and two external web models', () =
   const custom = createModelRegistry({ env: { LOCAL_AI_URL: 'http://127.0.0.1:9090/' } })
   assert.equal(custom[0].url, 'http://127.0.0.1:9090')
   assert.equal(custom[0].port, 9090)
+})
+
+test('external models become live when a URL is configured', () => {
+  const models = createModelRegistry({
+    env: {
+      COLAB_AI_URL: 'https://colab.example/',
+      COLAB_AI_API_KEY: 'colab-key',
+      KAGGLE_AI_URL: 'https://kaggle.example'
+    }
+  })
+  const colab = models.find((model) => model.id === 'colab-3b')
+  const kaggle = models.find((model) => model.id === 'kaggle-3b')
+
+  assert.equal(colab.execution, 'live')
+  assert.equal(colab.url, 'https://colab.example')
+  assert.equal(colab.apiKey, 'colab-key')
+  assert.equal(colab.minAvailableMemoryMb, 0)
+  assert.equal(kaggle.execution, 'live')
+  assert.equal(kaggle.url, 'https://kaggle.example')
+  assert.equal(kaggle.apiKey, undefined)
+  assert.equal(kaggle.minAvailableMemoryMb, 0)
+
+  assert.throws(
+    () => createModelRegistry({ env: { COLAB_AI_URL: 'ftp://colab.example' } }),
+    /must be a valid http\(s\) URL/
+  )
 })
 
 test('launch planning starts both models only when memory permits', () => {
@@ -179,7 +217,7 @@ test('scheduler falls back when the preferred model is unhealthy', async () => {
   await withApp({
     getResourceMetrics: async () => idleMetrics(),
     fetchImpl: async (url) => {
-      if (url === 'http://large.test/health') return new Response('', { status: 503 })
+      if (url.startsWith('http://large.test/')) return new Response('', { status: 503 })
       if (url.endsWith('/health')) return new Response('ok')
       completions.push(url)
       return draftResponse()
@@ -220,7 +258,114 @@ test('scheduler respects per-model memory thresholds', async () => {
   })
 })
 
-test('external models cannot be selected for live inference', async () => {
+test('scheduler calls live external models when local models are unavailable', async () => {
+  const completions = []
+  await withApp({
+    models: LIVE_EXTERNAL_MODELS,
+    getResourceMetrics: async () => idleMetrics(),
+    fetchImpl: async (url) => {
+      if (url.startsWith('http://local-')) return new Response('', { status: 503 })
+      if (url.endsWith('/health')) return new Response('ok')
+      completions.push(url)
+      return draftResponse()
+    }
+  }, async (url) => {
+    const response = await refine(url, { model: 'kaggle' })
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), DRAFT)
+    assert.deepEqual(completions, ['http://kaggle.test/v1/chat/completions'])
+  })
+})
+
+test('live external models can use an OpenAI-compatible health probe', async () => {
+  const completions = []
+  await withApp({
+    models: LIVE_EXTERNAL_MODELS,
+    getResourceMetrics: async () => idleMetrics(),
+    fetchImpl: async (url) => {
+      if (url.endsWith('/health')) return new Response('', { status: 404 })
+      if (url.endsWith('/v1/models')) return Response.json({ data: [] })
+      completions.push(url)
+      return draftResponse()
+    }
+  }, async (url) => {
+    const response = await refine(url, { model: 'colab' })
+    assert.equal(response.status, 200)
+    assert.deepEqual(completions, ['http://colab.test/v1/chat/completions'])
+  })
+})
+
+test('live external model calls use their configured bearer token', async () => {
+  const models = LIVE_EXTERNAL_MODELS.map((model) => (
+    model.id === 'colab' ? { ...model, apiKey: 'external-secret' } : model
+  ))
+  let authorization
+  await withApp({
+    models,
+    getResourceMetrics: async () => idleMetrics(),
+    fetchImpl: async (url, options) => {
+      if (url.endsWith('/health')) return new Response('ok')
+      if (url === 'http://colab.test/v1/chat/completions') {
+        authorization = options.headers.Authorization
+      }
+      return draftResponse()
+    }
+  }, async (url) => {
+    const response = await refine(url, { model: 'colab' })
+    assert.equal(response.status, 200)
+    assert.equal(authorization, 'Bearer external-secret')
+  })
+})
+
+test('remote models stay ready when local resources are constrained', async () => {
+  const completions = []
+  await withApp({
+    models: LIVE_EXTERNAL_MODELS,
+    getResourceMetrics: async () => ({
+      loadAverage: 8,
+      availableMemoryMb: 100,
+      diskBusyPercent: 90
+    }),
+    fetchImpl: async (url) => {
+      if (url.endsWith('/health')) return new Response('ok')
+      completions.push(url)
+      return draftResponse()
+    }
+  }, async (url) => {
+    const status = await (await fetch(`${url}/api/local-ai/status`)).json()
+    assert.equal(status.state, 'ready')
+    assert.equal(status.models.find((model) => model.id === 'local-small').state, 'busy')
+    assert.equal(status.models.find((model) => model.id === 'local-large').state, 'busy')
+    assert.equal(status.models.find((model) => model.id === 'colab').state, 'ready')
+    assert.equal(status.models.find((model) => model.id === 'kaggle').state, 'ready')
+
+    const response = await refine(url)
+    assert.equal(response.status, 200)
+    assert.deepEqual(completions, ['http://colab.test/v1/chat/completions'])
+  })
+})
+
+test('local API key is not forwarded to external models', async () => {
+  let authorization = 'unset'
+  await withApp({
+    models: LIVE_EXTERNAL_MODELS,
+    localAiApiKey: 'local-secret',
+    getResourceMetrics: async () => idleMetrics(),
+    fetchImpl: async (url, options) => {
+      if (url.endsWith('/health')) return new Response('ok')
+      if (url === 'http://colab.test/v1/chat/completions') {
+        authorization = options.headers.Authorization
+      }
+      return draftResponse()
+    }
+  }, async (url) => {
+    const response = await refine(url, { model: 'colab' })
+    assert.equal(response.status, 200)
+    assert.equal(authorization, undefined)
+  })
+})
+
+test('models without a live endpoint cannot be selected', async () => {
   let modelCalled = false
   await withApp({
     getResourceMetrics: async () => idleMetrics(),

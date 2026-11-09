@@ -58,8 +58,14 @@ export function createModelScheduler({
 }) {
   const liveModels = models.filter((model) => model.execution === 'live')
   const states = new Map(liveModels.map((model) => [model.id, { inFlight: false }]))
-  const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
   let nextGenerationAt = 0
+
+  function headersFor(model) {
+    // Never send the local llama.cpp key to an external endpoint; remote
+    // models must configure their own COLAB_AI_API_KEY/KAGGLE_AI_API_KEY.
+    const key = model.apiKey || (model.remote ? '' : apiKey)
+    return key ? { Authorization: `Bearer ${key}` } : {}
+  }
 
   function limitsFor(cpuLoadLimit) {
     return {
@@ -72,15 +78,20 @@ export function createModelScheduler({
   }
 
   async function checkHealth(model) {
-    try {
-      const response = await fetchImpl(`${model.url}/health`, {
-        headers,
-        signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS)
-      })
-      return response.ok
-    } catch {
-      return false
+    // llama.cpp exposes /health, while generic OpenAI-compatible servers may
+    // only expose /v1/models. Accept either so tunnels can be used as-is.
+    for (const path of ['/health', '/v1/models']) {
+      try {
+        const response = await fetchImpl(`${model.url}${path}`, {
+          headers: headersFor(model),
+          signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS)
+        })
+        if (response.ok) return true
+      } catch {
+        // Try the next probe.
+      }
     }
+    return false
   }
 
   async function evaluate() {
@@ -100,7 +111,7 @@ export function createModelScheduler({
       if (model.execution !== 'live') {
         return modelStatus(model, { state: model.execution, available: false })
       }
-      if (metricsError) {
+      if (metricsError && !model.remote) {
         return modelStatus(model, {
           state: 'unavailable',
           available: false,
@@ -122,9 +133,11 @@ export function createModelScheduler({
         })
       }
 
-      const busyReasons = getModelBusyReasons(model, metrics, cpuLoadLimit, {
-        maxDiskBusyPercent
-      })
+      // Remote models do not consume this machine's CPU, memory, or disk, so
+      // only the shared turn cooldown and per-model in-flight state apply.
+      const busyReasons = model.remote
+        ? []
+        : getModelBusyReasons(model, metrics, cpuLoadLimit, { maxDiskBusyPercent })
       if (busyReasons.length > 0) {
         return modelStatus(model, { state: 'busy', available: false, busyReasons })
       }
