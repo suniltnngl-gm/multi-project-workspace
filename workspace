@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
+# Objective: Provide the Bash entry point for the workspace workflow.
+# Requirements: Support dev, test, build, lint, dependency, and service commands consistently.
+# Decisions: Use Bash orchestration with Node and Python service commands.
+# Relevant Files: workspace
+# Important Context: User file. Vendor and transient artifacts are excluded from tracking.
+# Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
+# Optional user-local toolchains.
 if ! command -v npm >/dev/null 2>&1; then
   NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
   if [[ -s "$NVM_DIR/nvm.sh" ]]; then
@@ -18,23 +25,42 @@ if ! command -v uv >/dev/null 2>&1 && [[ -x "$HOME/.local/bin/uv" ]]; then
   export PATH
 fi
 
+# Colors are enabled only for interactive terminals.
+if [[ -t 1 ]]; then
+  C_RESET=$'\033[0m'
+  C_BOLD=$'\033[1m'
+  C_BLUE=$'\033[34m'
+  C_GREEN=$'\033[32m'
+  C_YELLOW=$'\033[33m'
+  C_RED=$'\033[31m'
+else
+  C_RESET=''
+  C_BOLD=''
+  C_BLUE=''
+  C_GREEN=''
+  C_YELLOW=''
+  C_RED=''
+fi
+
+log() { printf '%s\n' "$*"; }
+info() { printf '%s%s%s\n' "$C_BLUE" "$*" "$C_RESET"; }
+success() { printf '%s%s%s\n' "$C_GREEN" "$*" "$C_RESET"; }
+warn() { printf '%s%s%s\n' "$C_YELLOW" "$*" "$C_RESET" >&2; }
+error() { printf '%s%s%s\n' "$C_RED" "$*" "$C_RESET" >&2; }
+
 command_name="${1:-help}"
 
 require_npm() {
   if ! command -v npm >/dev/null 2>&1; then
-    printf 'npm is required for this command. Install Node.js/npm first.\n' >&2
+    error 'npm is required for this command. Install Node.js/npm first.'
     exit 1
   fi
-}
-
-run_with_env() {
-  exec node "$ROOT_DIR/scripts/with-env.mjs" "$@"
 }
 
 require_uv() {
   UV_BIN="${UV:-uv}"
   if ! command -v "$UV_BIN" >/dev/null 2>&1; then
-    printf 'uv is required. Install it with: wget -qO- https://astral.sh/uv/install.sh | sh\n' >&2
+    error 'uv is required. Install it with: wget -qO- https://astral.sh/uv/install.sh | sh'
     exit 1
   fi
   export UV="$UV_BIN"
@@ -49,10 +75,109 @@ require_uv() {
   export UV_PROJECT_ENVIRONMENT
 }
 
+run_with_env() {
+  exec node "$ROOT_DIR/scripts/with-env.mjs" "$@"
+}
+
+port_in_use() {
+  local port="$1"
+  (exec 3<>"/dev/tcp/127.0.0.1/${port}") >/dev/null 2>&1
+}
+
+check_ports() {
+  local port
+  for port in 5173 3001 3002; do
+    if port_in_use "$port"; then
+      error "Port $port is already in use. Stop the existing process or run ./workspace stop."
+      return 1
+    fi
+  done
+}
+
+stop_ports() {
+  local port stopped=0
+  if command -v fuser >/dev/null 2>&1; then
+    for port in 5173 3001 3002; do
+      if fuser -k "${port}/tcp" >/dev/null 2>&1; then
+        stopped=1
+      fi
+    done
+  else
+    warn 'fuser is not available; cannot stop processes automatically.'
+    return 1
+  fi
+  if [[ "$stopped" -eq 1 ]]; then
+    success 'Stopped processes on ports 5173, 3001, and 3002.'
+  else
+    info 'No processes were stopped on ports 5173, 3001, or 3002.'
+  fi
+}
+
+clean_artifacts() {
+  rm -rf "$ROOT_DIR/apps/web/dist"
+  find "$ROOT_DIR" -type d \( -name '__pycache__' -o -name '.pytest_cache' \) -prune -exec rm -rf {} + 2>/dev/null || true
+  success 'Removed frontend build output and Python caches.'
+}
+
+print_status() {
+  info 'Tool versions:'
+  printf '  node: %s\n' "$(command -v node >/dev/null 2>&1 && node --version || echo missing)"
+  printf '  npm:  %s\n' "$(command -v npm >/dev/null 2>&1 && npm --version || echo missing)"
+  printf '  uv:   %s\n' "$(command -v uv >/dev/null 2>&1 && uv --version || echo missing)"
+  printf '  python: %s\n' "$(command -v python3 >/dev/null 2>&1 && python3 --version || echo missing)"
+  info 'Service ports:'
+  for port in 5173 3001 3002; do
+    if port_in_use "$port"; then
+      printf '  %s: in use\n' "$port"
+    else
+      printf '  %s: free\n' "$port"
+    fi
+  done
+}
+
+print_help() {
+  printf '%s%sWorkspace commands%s\n\n' "$C_BOLD" "$C_BLUE" "$C_RESET"
+  printf 'Usage: ./workspace <command> [arguments]\n\n'
+  printf '%sCore%s\n' "$C_BOLD" "$C_RESET"
+  printf '  %-24s %s\n' 'dev' 'Start frontend, Node API, and Python satellite'
+  printf '  %-24s %s\n' 'web' 'Start only the Vite frontend'
+  printf '  %-24s %s\n' 'node, api' 'Start only the Node API'
+  printf '  %-24s %s\n' 'python' 'Start only the Python satellite'
+  printf '  %-24s %s\n' 'stop' 'Stop processes on the dev service ports'
+  printf '  %-24s %s\n' 'restart' 'Stop, then start all services'
+  printf '  %-24s %s\n' 'status' 'Show tool versions and service port state'
+  printf '\n%sAI and remote%s\n' "$C_BOLD" "$C_RESET"
+  printf '  %-24s %s\n' 'local-ai [all|0.5b|1.5b]' 'Start local models within memory limits'
+  printf '  %-24s %s\n' 'colab [status|stop] [session]' 'Inspect or stop the reusable Colab session'
+  printf '  %-24s %s\n' 'ai doctor [...]' 'Check local and remote model configuration'
+  printf '  %-24s %s\n' 'doctor' 'Alias for ai doctor'
+  printf '\n%sDependencies%s\n' "$C_BOLD" "$C_RESET"
+  printf '  %-24s %s\n' 'install' 'Install npm dependencies and sync the Python project'
+  printf '  %-24s %s\n' 'python-add <pkg...>' 'Add managed Python dependencies with uv'
+  printf '  %-24s %s\n' 'python-pip <cmd...>' 'Run uv pip against the workspace Python environment'
+  printf '\n%sBuild, test, and quality%s\n' "$C_BOLD" "$C_RESET"
+  printf '  %-24s %s\n' 'build' 'Build the frontend'
+  printf '  %-24s %s\n' 'build:web' 'Alias for build'
+  printf '  %-24s %s\n' 'lint' 'Lint the frontend'
+  printf '  %-24s %s\n' 'lint:web' 'Alias for lint'
+  printf '  %-24s %s\n' 'test' 'Run frontend, Node, and Python tests'
+  printf '  %-24s %s\n' 'test:web' 'Run frontend tests only'
+  printf '  %-24s %s\n' 'test:api, test:node' 'Run Node API tests only'
+  printf '  %-24s %s\n' 'test:python' 'Run Python tests only'
+  printf '  %-24s %s\n' 'check' 'Run lint, tests, and build'
+  printf '  %-24s %s\n' 'clean' 'Remove frontend build output and Python caches'
+  printf '\n%sExamples%s\n' "$C_BOLD" "$C_RESET"
+  printf '  ./workspace dev\n'
+  printf '  ./workspace test:api\n'
+  printf '  ./workspace local-ai 0.5b\n'
+  printf '  ./workspace ai doctor --strict\n'
+}
+
 case "$command_name" in
   dev)
     require_npm
     require_uv
+    check_ports
     run_with_env npm run dev
     ;;
   web)
@@ -82,10 +207,15 @@ case "$command_name" in
         run_with_env node "$ROOT_DIR/scripts/ai-doctor.mjs" "$@"
         ;;
       *)
+        error "Unknown ai subcommand: $subcommand"
         printf 'Usage: ./workspace ai doctor [--json] [--strict]\n' >&2
         exit 2
         ;;
     esac
+    ;;
+  doctor)
+    shift || true
+    run_with_env node "$ROOT_DIR/scripts/ai-doctor.mjs" "$@"
     ;;
   install)
     require_npm
@@ -97,8 +227,7 @@ case "$command_name" in
   python-add)
     require_uv
     if [[ $# -lt 2 ]]; then
-      printf 'Usage: ./workspace python-add <package> [package ...]\n' >&2
-      printf 'Adds project dependencies and updates apps/python/uv.lock.\n' >&2
+      error 'Usage: ./workspace python-add <package> [package ...]'
       exit 2
     fi
     shift
@@ -107,7 +236,7 @@ case "$command_name" in
   python-pip)
     require_uv
     if [[ $# -lt 2 ]]; then
-      printf 'Usage: ./workspace python-pip <uv-pip-command> [arguments ...]\n' >&2
+      error 'Usage: ./workspace python-pip <uv-pip-command> [arguments ...]'
       printf 'Example: ./workspace python-pip install <package>\n' >&2
       exit 2
     fi
@@ -115,37 +244,58 @@ case "$command_name" in
     "$UV" sync --project apps/python
     exec "$UV" pip "$@" --python "$UV_PROJECT_ENVIRONMENT/bin/python"
     ;;
-  build)
+  build|build:web)
     require_npm
     run_with_env npm run build
+    ;;
+  lint|lint:web)
+    require_npm
+    run_with_env npm run lint
     ;;
   test)
     require_npm
     require_uv
     run_with_env npm test
     ;;
-  lint)
+  test:web)
     require_npm
-    run_with_env npm run lint
+    run_with_env npm run test --workspace apps/web
+    ;;
+  test:api|test:node)
+    require_npm
+    run_with_env npm run test --workspace apps/api
+    ;;
+  test:python)
+    require_uv
+    PYTHONPATH="$ROOT_DIR/apps/python/src" run_with_env "$UV" run --project apps/python python -m unittest discover -s apps/python/tests
+    ;;
+  check)
+    require_npm
+    require_uv
+    node "$ROOT_DIR/scripts/with-env.mjs" npm run lint
+    "$ROOT_DIR/workspace" test
+    ;;
+  clean)
+    clean_artifacts
+    ;;
+  status)
+    print_status
+    ;;
+  stop)
+    stop_ports
+    ;;
+  restart)
+    stop_ports || true
+    require_npm
+    require_uv
+    check_ports
+    run_with_env npm run dev
     ;;
   help|-h|--help)
-    printf 'Usage: ./workspace <command>\n\n'
-    printf '  dev      Start frontend, Node API, and Python satellite\n'
-    printf '  web      Start only the Vite frontend\n'
-    printf '  node     Start only the Node API (api is an alias)\n'
-    printf '  python   Start only the Python satellite\n'
-    printf '  local-ai [all|0.5b|1.5b]  Start local models within memory limits (default: all)\n'
-    printf '  colab [status|stop] [session]  Inspect or stop the reusable Colab session\n'
-    printf '  ai doctor [--json] [--strict]  Check local and remote model configuration\n'
-    printf '  install  Install npm dependencies and sync the uv Python project\n'
-    printf '  python-add  Add a managed Python dependency with uv\n'
-    printf '  python-pip  Run uv pip against the workspace Python environment\n'
-    printf '  build    Build the frontend\n'
-    printf '  test     Run frontend, Node, and Python tests\n'
-    printf '  lint     Lint the frontend\n'
+    print_help
     ;;
   *)
-    printf 'Unknown command: %s\n\n' "$command_name" >&2
+    error "Unknown command: $command_name"
     printf 'Run ./workspace help for available commands.\n' >&2
     exit 2
     ;;
