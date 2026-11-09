@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -204,6 +204,33 @@ export function createModelClient({
     state.ready = true
   }
 
+  async function writeColabAudit(model, entry) {
+    const directory = model.cli.auditDir
+    if (!directory) return
+
+    try {
+      await mkdir(directory, { recursive: true, mode: 0o700 })
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      const target = join(directory, `${id}.json`)
+      const temporary = `${target}.tmp`
+      const payload = {
+        id,
+        at: new Date().toISOString(),
+        model: model.id,
+        session: model.cli.session,
+        ...entry
+      }
+      await writeFile(temporary, `${JSON.stringify(payload, null, 2)}\n`, {
+        encoding: 'utf8',
+        mode: 0o600
+      })
+      await rename(temporary, target)
+    } catch (error) {
+      // Auditing is best-effort and must never break inference.
+      console.error(`Could not write the Colab audit file: ${error.message}`)
+    }
+  }
+
   async function completeColab(model, request) {
     await ensureColabSession(model)
     const state = colabState(model)
@@ -214,39 +241,63 @@ export function createModelClient({
       max_tokens: request.maxTokens,
       response_format: { type: 'json_object' }
     })).toString('base64')
+    const audit = {
+      request: {
+        messages: request.messages,
+        maxTokens: request.maxTokens
+      }
+    }
+    const startedAt = Date.now()
 
-    let stdout
     try {
-      ({ stdout } = await runCommand(command, [
-        'exec',
-        '-s', session,
-        '-f', join(scriptsDir, 'colab_model_client.py'),
-        '--timeout', String(Math.max(30, Math.ceil(timeoutMs / 1000))),
-        '--env', `WORKSPACE_MODEL_PORT=${port}`,
-        '--env', `WORKSPACE_MODEL_REQUEST=${payload}`
-      ], { timeoutMs: timeoutMs + 60000 }))
+      let stdout
+      try {
+        ({ stdout } = await runCommand(command, [
+          'exec',
+          '-s', session,
+          '-f', join(scriptsDir, 'colab_model_client.py'),
+          '--timeout', String(Math.max(30, Math.ceil(timeoutMs / 1000))),
+          '--env', `WORKSPACE_MODEL_PORT=${port}`,
+          '--env', `WORKSPACE_MODEL_REQUEST=${payload}`
+        ], { timeoutMs: timeoutMs + 60000 }))
+      } catch (error) {
+        // The session may have expired or the server thread may have died.
+        // Force a bootstrap on the next call.
+        state.ready = false
+        throw error
+      }
+
+      const line = stdout
+        .split('\n')
+        .map((value) => value.trim())
+        .findLast((value) => value.startsWith(RESULT_SENTINEL))
+      if (!line) {
+        throw new ModelCallError(`The ${model.label} CLI returned no model output.`, 502)
+      }
+
+      let result
+      try {
+        result = JSON.parse(line.slice(RESULT_SENTINEL.length))
+      } catch {
+        throw new ModelCallError(`The ${model.label} CLI returned invalid output.`, 502)
+      }
+      const content = parseContent(result)
+      await writeColabAudit(model, {
+        ...audit,
+        status: 'ok',
+        response: { content },
+        durationMs: Date.now() - startedAt
+      })
+      return content
     } catch (error) {
-      // The session may have expired or the server thread may have died.
-      // Force a bootstrap on the next call.
-      state.ready = false
+      await writeColabAudit(model, {
+        ...audit,
+        status: 'error',
+        error: error.message,
+        durationMs: Date.now() - startedAt
+      })
       throw error
     }
-
-    const line = stdout
-      .split('\n')
-      .map((value) => value.trim())
-      .findLast((value) => value.startsWith(RESULT_SENTINEL))
-    if (!line) {
-      throw new ModelCallError(`The ${model.label} CLI returned no model output.`, 502)
-    }
-
-    let result
-    try {
-      result = JSON.parse(line.slice(RESULT_SENTINEL.length))
-    } catch {
-      throw new ModelCallError(`The ${model.label} CLI returned invalid output.`, 502)
-    }
-    return parseContent(result)
   }
 
   async function completeKaggle(model, request) {

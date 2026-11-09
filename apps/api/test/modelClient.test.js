@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { createModelClient, ModelCallError } from '../src/modelClient.js'
@@ -212,6 +213,72 @@ test('Colab re-bootstraps after a failed completion call', async () => {
   await assert.rejects(() => client.complete(colabModel(), REQUEST), /session expired/)
   await client.complete(colabModel(), REQUEST)
   assert.deepEqual(calls.map((args) => args[0]), ['exec', 'exec', 'exec', 'exec'])
+})
+
+test('Colab writes optional request and response audit files', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'workspace-colab-audit-'))
+  const runCommand = async (command, args) => {
+    if (args.includes(join(SCRIPTS, 'colab_model_server.py'))) {
+      return { stdout: '', stderr: '' }
+    }
+    return {
+      stdout: `${RESULT_SENTINEL}${JSON.stringify({
+        choices: [{ message: { content: '{"description":"ok","acceptance_criteria":"done"}' } }]
+      })}`,
+      stderr: ''
+    }
+  }
+
+  try {
+    const client = createModelClient({ runCommand, scriptsDir: SCRIPTS })
+    const model = colabModel({
+      cli: { ...colabModel().cli, auditDir: directory }
+    })
+    await client.complete(model, REQUEST)
+
+    const files = await readdir(directory)
+    assert.equal(files.length, 1)
+    const entry = JSON.parse(await readFile(join(directory, files[0]), 'utf8'))
+    assert.equal(entry.model, 'colab-3b')
+    assert.equal(entry.session, 'workspace-qwen')
+    assert.equal(entry.status, 'ok')
+    assert.deepEqual(entry.request.messages, REQUEST.messages)
+    assert.equal(entry.request.maxTokens, REQUEST.maxTokens)
+    assert.match(entry.response.content, /"description":"ok"/)
+    assert.equal(typeof entry.durationMs, 'number')
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('Colab audits failed completions without breaking the error', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'workspace-colab-audit-error-'))
+  const runCommand = async (command, args) => {
+    if (args.includes(join(SCRIPTS, 'colab_model_server.py'))) {
+      return { stdout: '', stderr: '' }
+    }
+    throw new ModelCallError('session expired', 504)
+  }
+
+  try {
+    const client = createModelClient({ runCommand, scriptsDir: SCRIPTS })
+    const model = colabModel({
+      cli: { ...colabModel().cli, auditDir: directory }
+    })
+    await assert.rejects(
+      () => client.complete(model, REQUEST),
+      (error) => error instanceof ModelCallError && /session expired/.test(error.message)
+    )
+
+    const files = await readdir(directory)
+    assert.equal(files.length, 1)
+    const entry = JSON.parse(await readFile(join(directory, files[0]), 'utf8'))
+    assert.equal(entry.status, 'error')
+    assert.equal(entry.error, 'session expired')
+    assert.equal(entry.response, undefined)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })
 
 test('Kaggle writes the task, runs the batch runner, and reads its response', async () => {

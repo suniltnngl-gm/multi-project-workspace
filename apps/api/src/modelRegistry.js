@@ -153,6 +153,7 @@ function createCliConfig(env) {
       command: 'colab',
       probeArgs: ['sessions'],
       session: readText(env, 'COLAB_AI_SESSION', 'workspace-qwen'),
+      auditDir: readText(env, 'COLAB_AI_AUDIT_DIR', ''),
       gpu: readText(env, 'COLAB_AI_GPU', 'T4'),
       port: readNumber(env, 'COLAB_AI_PORT', 8765),
       modelId: readText(env, 'COLAB_AI_MODEL', 'Qwen/Qwen2.5-Coder-3B-Instruct'),

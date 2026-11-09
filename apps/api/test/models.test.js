@@ -122,12 +122,18 @@ test('registry contains two callable local models and two CLI-backed remote mode
   assert.equal(models[3].callable, true)
   assert.equal(models[2].cli.session, 'workspace-qwen')
   assert.deepEqual(models[2].cli.probeArgs, ['sessions'])
+  assert.equal(models[2].cli.auditDir, '')
   assert.equal(models[3].cli.command, 'kaggle')
   assert.deepEqual(models[3].cli.probeArgs, ['config', 'view'])
 
   const custom = createModelRegistry({ env: { LOCAL_AI_URL: 'http://127.0.0.1:9090/' } })
   assert.equal(custom[0].url, 'http://127.0.0.1:9090')
   assert.equal(custom[0].port, 9090)
+
+  const audited = createModelRegistry({
+    env: { COLAB_AI_AUDIT_DIR: '/tmp/workspace-colab-audit' }
+  })
+  assert.equal(audited[2].cli.auditDir, '/tmp/workspace-colab-audit')
 })
 
 test('external models become live when a URL is configured', () => {
