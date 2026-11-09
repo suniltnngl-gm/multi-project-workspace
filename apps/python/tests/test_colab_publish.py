@@ -12,6 +12,7 @@ from unittest import mock
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
 PUBLISH_PATH = ROOT_DIR / "scripts" / "colab_publish_kaggle.py"
+NOTEBOOK_PATH = ROOT_DIR / "notebooks" / "colab-qwen-coder-free-tier.ipynb"
 
 
 def load_module(name, path):
@@ -179,6 +180,25 @@ class ColabPublishTests(unittest.TestCase):
             payload = json.loads(output.getvalue())
             self.assertTrue(payload["dryRun"])
             self.assertTrue(payload["metadata"]["isPrivate"])
+
+
+    def test_notebook_publish_cell_is_safe_and_runs_before_cleanup(self):
+        notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
+        ids = [cell.get("id") for cell in notebook["cells"]]
+        publish_index = ids.index("publish-artifacts-code")
+        cleanup_index = next(
+            index
+            for index, cell in enumerate(notebook["cells"])
+            if cell.get("cell_type") == "markdown"
+            and "Stop Colab resource usage" in "".join(cell.get("source", []))
+        )
+        self.assertLess(publish_index, cleanup_index)
+
+        source = "".join(notebook["cells"][publish_index]["source"])
+        compile(source, str(NOTEBOOK_PATH), "exec")
+        self.assertIn("DRY_RUN = True", source)
+        self.assertIn("colab_publish_kaggle.py", source)
+        self.assertIn('DATASET.startswith("your-user/")', source)
 
 
 if __name__ == "__main__":
