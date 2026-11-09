@@ -217,20 +217,8 @@ test('background jobs expose their current phase', async () => {
 })
 
 test('remote daily budgets reject requests and are exposed in the model registry', async () => {
-  const rows = new Map()
-  const repository = {
-    getBudget: (model, day) => rows.get(`${model}:${day}`) ?? 0,
-    incrementBudget: (model, day) => {
-      const key = `${model}:${day}`
-      const used = (rows.get(key) ?? 0) + 1
-      rows.set(key, used)
-      return used
-    },
-    pruneBudgetBefore: () => {}
-  }
   const modelBudget = createModelBudget({
-    env: { KAGGLE_AI_MAX_REQUESTS_PER_DAY: '1' },
-    repository
+    env: { KAGGLE_AI_MAX_REQUESTS_PER_DAY: '1' }
   })
 
   await withApp({

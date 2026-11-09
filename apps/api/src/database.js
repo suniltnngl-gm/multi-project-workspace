@@ -80,6 +80,25 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       used INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (model, day)
     );
+
+    CREATE TABLE IF NOT EXISTS ai_quota (
+      model TEXT NOT NULL,
+      policy TEXT NOT NULL,
+      bucket INTEGER NOT NULL,
+      used REAL NOT NULL DEFAULT 0,
+      PRIMARY KEY (model, policy, bucket)
+    );
+  `)
+
+  // Carry the legacy daily counters into the generalized quota table. The old
+  // table is kept so an interrupted upgrade can be retried, and the copy is
+  // idempotent.
+  connection.exec(`
+    INSERT OR IGNORE INTO ai_quota (model, policy, bucket, used)
+    SELECT model, '0:requests:day:fixed',
+           CAST(strftime('%s', day || 'T00:00:00Z') AS INTEGER) * 1000,
+           used
+    FROM ai_budget;
   `)
 
   const existingColumns = new Set(
@@ -142,16 +161,22 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     SET state = 'error', phase = 'finished', error = ?, finished_at = ?
     WHERE state IN ('queued', 'running')
   `)
-  const getBudgetStatement = connection.prepare(
-    'SELECT used FROM ai_budget WHERE model = ? AND day = ?'
+  const getQuotaStatement = connection.prepare(
+    'SELECT used FROM ai_quota WHERE model = ? AND policy = ? AND bucket = ?'
   )
-  const incrementBudgetStatement = connection.prepare(`
-    INSERT INTO ai_budget (model, day, used)
-    VALUES (?, ?, 1)
-    ON CONFLICT(model, day) DO UPDATE SET used = used + 1
+  const addQuotaStatement = connection.prepare(`
+    INSERT INTO ai_quota (model, policy, bucket, used)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(model, policy, bucket) DO UPDATE SET used = used + excluded.used
   `)
-  const pruneBudgetStatement = connection.prepare(
-    'DELETE FROM ai_budget WHERE day < ?'
+  const latestQuotaStatement = connection.prepare(`
+    SELECT bucket, used FROM ai_quota
+    WHERE model = ? AND policy = ?
+    ORDER BY bucket DESC
+    LIMIT 1
+  `)
+  const pruneQuotaStatement = connection.prepare(
+    'DELETE FROM ai_quota WHERE bucket < ?'
   )
 
   return {
@@ -247,15 +272,19 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     markInterruptedJobs(message, finishedAt = Date.now()) {
       return interruptJobsStatement.run(message, finishedAt).changes
     },
-    getBudget(model, day) {
-      return getBudgetStatement.get(model, day)?.used ?? 0
+    getQuota(model, policy, bucket) {
+      return getQuotaStatement.get(model, policy, bucket)?.used ?? 0
     },
-    incrementBudget(model, day) {
-      incrementBudgetStatement.run(model, day)
-      return getBudgetStatement.get(model, day)?.used ?? 0
+    addQuota(model, policy, bucket, amount) {
+      addQuotaStatement.run(model, policy, bucket, amount)
+      return getQuotaStatement.get(model, policy, bucket)?.used ?? 0
     },
-    pruneBudgetBefore(day) {
-      return pruneBudgetStatement.run(day).changes
+    getLatestQuota(model, policy) {
+      const row = latestQuotaStatement.get(model, policy)
+      return row ? { bucket: row.bucket, used: row.used } : null
+    },
+    pruneQuotaBefore(cutoff) {
+      return pruneQuotaStatement.run(cutoff).changes
     },
     close() {
       connection.close()

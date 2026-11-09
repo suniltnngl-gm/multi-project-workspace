@@ -587,19 +587,8 @@ test('capacity failures keep their retry delay in the API response', async () =>
 })
 
 test('model responses include a persisted daily budget when configured', async () => {
-  const rows = new Map()
   const modelBudget = createModelBudget({
-    env: { KAGGLE_AI_MAX_REQUESTS_PER_DAY: '3' },
-    repository: {
-      getBudget: (model, day) => rows.get(`${model}:${day}`) ?? 0,
-      incrementBudget: (model, day) => {
-        const key = `${model}:${day}`
-        const used = (rows.get(key) ?? 0) + 1
-        rows.set(key, used)
-        return used
-      },
-      pruneBudgetBefore: () => {}
-    }
+    env: { KAGGLE_AI_MAX_REQUESTS_PER_DAY: '3' }
   })
   modelBudget.record('kaggle-3b')
   modelBudget.record('kaggle-3b')
@@ -617,19 +606,8 @@ test('model responses include a persisted daily budget when configured', async (
 })
 
 test('serverless requests use the same persisted daily budget', () => {
-  const rows = new Map()
   const modelBudget = createModelBudget({
-    env: { SERVERLESS_AI_MAX_REQUESTS_PER_DAY: '2' },
-    repository: {
-      getBudget: (model, day) => rows.get(`${model}:${day}`) ?? 0,
-      incrementBudget: (model, day) => {
-        const key = `${model}:${day}`
-        const used = (rows.get(key) ?? 0) + 1
-        rows.set(key, used)
-        return used
-      },
-      pruneBudgetBefore: () => {}
-    }
+    env: { SERVERLESS_AI_MAX_REQUESTS_PER_DAY: '2' }
   })
 
   assert.equal(modelBudget.check('serverless').ok, true)

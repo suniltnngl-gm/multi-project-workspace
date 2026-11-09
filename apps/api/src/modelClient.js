@@ -111,6 +111,33 @@ function reportPhase(request, phase) {
   }
 }
 
+function parseUsage(result) {
+  const usage = result?.usage
+  if (!usage || typeof usage !== 'object') return undefined
+  const promptTokens = Number(usage.prompt_tokens ?? usage.input_tokens)
+  const completionTokens = Number(usage.completion_tokens ?? usage.output_tokens)
+  const totalTokens = Number(usage.total_tokens)
+  const normalized = {}
+  if (Number.isFinite(promptTokens)) normalized.promptTokens = promptTokens
+  if (Number.isFinite(completionTokens)) normalized.completionTokens = completionTokens
+  if (Number.isFinite(totalTokens)) {
+    normalized.totalTokens = totalTokens
+  } else if (Number.isFinite(promptTokens) && Number.isFinite(completionTokens)) {
+    normalized.totalTokens = promptTokens + completionTokens
+  }
+  return Object.keys(normalized).length > 0 ? normalized : undefined
+}
+
+function reportUsage(request, usage) {
+  try {
+    // Always call the hook, even without usage, so the budget can flag a
+    // provider that omits token accounting.
+    request?.onUsage?.(usage)
+  } catch {
+    // Usage reporting must never break inference.
+  }
+}
+
 export function createModelClient({
   fetchImpl = fetch,
   runCommand = defaultRunCommand,
@@ -252,7 +279,11 @@ export function createModelClient({
         502
       )
     }
-    return parseContent(await response.json().catch(() => null))
+    const result = await response.json().catch(() => null)
+    // Settle usage before validating content so a malformed draft still counts
+    // against the provider quota.
+    reportUsage(request, parseUsage(result))
+    return parseContent(result)
   }
 
   function colabState(model) {

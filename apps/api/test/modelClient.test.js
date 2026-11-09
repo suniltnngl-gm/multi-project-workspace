@@ -746,3 +746,38 @@ test('HTTP probes honour a configured health path', async () => {
   assert.deepEqual(result, { ok: true })
   assert.deepEqual(urls, ['https://api.test/health', 'https://api.test/models'])
 })
+
+test('HTTP completions report token usage to the caller', async () => {
+  const usages = []
+  const client = createModelClient({
+    fetchImpl: async () => Response.json({
+      choices: [{ message: { content: 'draft' } }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }
+    })
+  })
+
+  await client.complete(
+    { id: 'x', label: 'X', backend: 'http', url: 'http://x', timeoutMs: 10 },
+    { ...REQUEST, onUsage: (usage) => usages.push(usage) }
+  )
+
+  assert.deepEqual(usages, [
+    { promptTokens: 10, completionTokens: 5, totalTokens: 15 }
+  ])
+})
+
+test('HTTP completions report missing usage instead of guessing', async () => {
+  const usages = []
+  const client = createModelClient({
+    fetchImpl: async () => Response.json({
+      choices: [{ message: { content: 'draft' } }]
+    })
+  })
+
+  await client.complete(
+    { id: 'x', label: 'X', backend: 'http', url: 'http://x', timeoutMs: 10 },
+    { ...REQUEST, onUsage: (usage) => usages.push(usage) }
+  )
+
+  assert.deepEqual(usages, [undefined])
+})

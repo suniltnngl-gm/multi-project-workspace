@@ -217,6 +217,21 @@ function parseId(value) {
   return Number.isSafeInteger(id) ? id : null
 }
 
+function quotaLimitLabel(budget) {
+  const limiter = budget?.budget
+  if (!limiter) return 'configured quota'
+  if (limiter.unit === 'requests' && limiter.window === 'day') {
+    return 'daily request limit'
+  }
+  const unit = limiter.unit === 'compute_seconds' ? 'compute' : limiter.unit
+  return `${limiter.window} ${unit} limit`
+}
+
+function applyCooldown(modelBudget, model, error) {
+  if (error?.status !== 429 || error.retryAfter === undefined) return
+  modelBudget.cooldown?.(model.id, error.retryAfter)
+}
+
 export function createApp(database, {
   fetchImpl = fetch,
   getResourceMetrics = createResourceMonitor(),
@@ -339,7 +354,7 @@ export function createApp(database, {
     if (!budget.ok) {
       selection.release({ inferenceStarted: false })
       return response.status(429).json({
-        error: `${model.label} reached its daily request limit (${budget.budget.used}/${budget.budget.limit}).`,
+        error: `${model.label} reached its ${quotaLimitLabel(budget)} (${budget.budget.used}/${budget.budget.limit}).`,
         ...budget
       })
     }
@@ -358,7 +373,8 @@ export function createApp(database, {
         const content = await modelClient.complete(model, {
           messages: prompt.messages,
           maxTokens: prompt.maxTokens,
-          task
+          task,
+          onUsage: (usage) => modelBudget.recordUsage?.(model.id, usage)
         })
         modelMetrics.recordSuccess(model.id, { durationMs: Date.now() - startedAt })
 
@@ -369,6 +385,7 @@ export function createApp(database, {
           return response.status(502).json({ error: 'The local model returned an invalid task draft. Please retry.' })
         }
       } catch (error) {
+        applyCooldown(modelBudget, model, error)
         modelMetrics.recordError(model.id, error, {
           durationMs: startedAt === undefined ? undefined : Date.now() - startedAt
         })
@@ -429,7 +446,7 @@ export function createApp(database, {
     if (!budget.ok) {
       selection.release({ inferenceStarted: false })
       return response.status(429).json({
-        error: `${model.label} reached its daily request limit (${budget.budget.used}/${budget.budget.limit}).`,
+        error: `${model.label} reached its ${quotaLimitLabel(budget)} (${budget.budget.used}/${budget.budget.limit}).`,
         ...budget
       })
     }
@@ -452,11 +469,13 @@ export function createApp(database, {
             maxTokens: prompt.maxTokens,
             task,
             signal,
-            onPhase
+            onPhase,
+            onUsage: (usage) => modelBudget.recordUsage?.(model.id, usage)
           })
           modelMetrics.recordSuccess(model.id, { durationMs: Date.now() - startedAt })
           return parseAssistantDraft(content)
         } catch (error) {
+          applyCooldown(modelBudget, model, error)
           modelMetrics.recordError(model.id, error, {
             durationMs: startedAt === undefined ? undefined : Date.now() - startedAt
           })
