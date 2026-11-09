@@ -657,6 +657,23 @@ button:hover {
   overflow-wrap: anywhere;
 }
 
+.folder-list {
+  list-style: none;
+  display: grid;
+  gap: 6px;
+  padding: 0;
+  margin: 12px 0 0;
+}
+
+.folder-item {
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 10px;
+  padding: 8px 10px;
+  color: #cbd5e1;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
 .project-card {
   display: flex;
   flex-direction: column;

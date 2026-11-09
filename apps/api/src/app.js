@@ -304,6 +304,42 @@ function validateUserFileInput(body, { partial = false } = {}) {
   return null
 }
 
+function validateFolderInput(body, { partial = false } = {}) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return 'Request body must be a JSON object.'
+  }
+
+  const allowedFields = new Set(['path', 'objective', 'important_context'])
+  if (Object.keys(body).some((key) => !allowedFields.has(key))) {
+    return 'Request includes an unsupported folder field.'
+  }
+
+  if (!partial || Object.hasOwn(body, 'path')) {
+    if (typeof body.path !== 'string' || !body.path.trim()) {
+      return 'Path must be a non-empty string.'
+    }
+    if (body.path.trim().length > 500) {
+      return 'Path must be at most 500 characters.'
+    }
+  }
+
+  for (const field of ['objective', 'important_context']) {
+    if (!Object.hasOwn(body, field)) continue
+    if (typeof body[field] !== 'string') {
+      return `${field === 'objective' ? 'Objective' : 'Important context'} must be a string.`
+    }
+    if (body[field].length > MAX_PLANNING_TEXT_LENGTH) {
+      return `${field === 'objective' ? 'Objective' : 'Important context'} must be at most ${MAX_PLANNING_TEXT_LENGTH} characters.`
+    }
+  }
+
+  if (partial && Object.keys(body).length === 0) {
+    return 'Provide at least one field to update.'
+  }
+
+  return null
+}
+
 function parseId(value) {
   if (!/^[1-9]\d*$/.test(value)) return null
   const id = Number(value)
@@ -769,6 +805,83 @@ export function createApp(database, {
       response.json({ ...result, paths })
     } catch (error) {
       response.status(500).json({ error: 'Could not scan user files.' })
+    }
+  })
+
+  app.get('/api/folders', (_request, response) => {
+    response.json(database.listFolders())
+  })
+
+  app.get('/api/folders/:id', (request, response) => {
+    const id = parseId(request.params.id)
+    if (id === null) return response.status(400).json({ error: 'Folder ID must be a positive integer.' })
+    const folder = database.getFolder(id)
+    if (!folder) return response.status(404).json({ error: 'Folder not found.' })
+    return response.json(folder)
+  })
+
+  app.post('/api/folders', (request, response) => {
+    const validationError = validateFolderInput(request.body)
+    if (validationError) return response.status(400).json({ error: validationError })
+
+    if (database.getFolderByPath(request.body.path.trim())) {
+      return response.status(409).json({ error: 'A tracked folder already uses this path.' })
+    }
+
+    const folder = database.createFolder({
+      path: request.body.path.trim(),
+      objective: (request.body.objective ?? '').trim(),
+      important_context: (request.body.important_context ?? '').trim()
+    })
+    return response.status(201).json(folder)
+  })
+
+  app.patch('/api/folders/:id', (request, response) => {
+    const id = parseId(request.params.id)
+    if (id === null) return response.status(400).json({ error: 'Folder ID must be a positive integer.' })
+
+    const validationError = validateFolderInput(request.body, { partial: true })
+    if (validationError) return response.status(400).json({ error: validationError })
+
+    const changes = { ...request.body }
+    if (Object.hasOwn(changes, 'path')) changes.path = changes.path.trim()
+    for (const field of ['objective', 'important_context']) {
+      if (Object.hasOwn(changes, field)) changes[field] = changes[field].trim()
+    }
+
+    const folder = database.updateFolder(id, changes)
+    if (!folder) return response.status(404).json({ error: 'Folder not found.' })
+    return response.json(folder)
+  })
+
+  app.delete('/api/folders/:id', (request, response) => {
+    const id = parseId(request.params.id)
+    if (id === null) return response.status(400).json({ error: 'Folder ID must be a positive integer.' })
+    if (!database.deleteFolder(id)) return response.status(404).json({ error: 'Folder not found.' })
+    return response.status(204).end()
+  })
+
+  app.post('/api/folders/scan', async (_request, response) => {
+    try {
+      const { readdirSync } = await import('node:fs')
+      const root = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+        cwd: process.cwd(),
+        encoding: 'utf8'
+      }).trim()
+      const entries = readdirSync(root, { recursive: true, withFileTypes: true })
+      const paths = [...new Set(
+        entries
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => {
+            const parent = entry.parentPath || entry.path
+            return relative(root, join(parent, entry.name)).replace(/\\\\/g, '/')
+          })
+          .filter((folderPath) => folderPath && !folderPath.includes('node_modules') && !folderPath.includes('.git'))
+      )]
+      const result = database.scanFolders(paths)
+      response.json({ ...result, paths })
+    } catch (error) {
+      response.status(500).json({ error: 'Could not scan folders.' })
     }
   })
 

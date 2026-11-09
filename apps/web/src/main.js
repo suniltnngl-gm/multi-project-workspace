@@ -197,6 +197,19 @@ app.innerHTML = `
       <ul id="file-list" class="file-list"></ul>
     </section>
 
+    <section class="folders-section" aria-labelledby="folders-heading">
+      <div class="section-heading">
+        <div>
+          <h2 id="folders-heading">Folders</h2>
+          <p>Centralized folder-level objectives; vendor and transient paths are excluded.</p>
+        </div>
+        <span id="folder-count" class="task-count" aria-live="polite"></span>
+      </div>
+      <button id="scan-folders" class="secondary-button" type="button">Scan folders</button>
+      <p id="folder-status" class="task-status" role="status" aria-live="polite"></p>
+      <ul id="folder-list" class="folder-list"></ul>
+    </section>
+
     <section class="satellite-section" aria-labelledby="satellite-heading">
       <div class="section-heading">
         <div>
@@ -223,6 +236,10 @@ const fileList = document.querySelector('#file-list')
 const fileCount = document.querySelector('#file-count')
 const fileStatus = document.querySelector('#file-status')
 const scanFilesButton = document.querySelector('#scan-files')
+const folderList = document.querySelector('#folder-list')
+const folderCount = document.querySelector('#folder-count')
+const folderStatus = document.querySelector('#folder-status')
+const scanFoldersButton = document.querySelector('#scan-folders')
 const taskCount = document.querySelector('#task-count')
 const projectOptions = document.querySelector('#project-options')
 const draftTaskButton = document.querySelector('#draft-task')
@@ -695,6 +712,30 @@ async function loadFiles() {
   }
 }
 
+async function loadFolders() {
+  try {
+    const folders = await request('/api/folders')
+    folderList.replaceChildren()
+    folderCount.textContent = `${folders.length} tracked`
+    if (folders.length === 0) {
+      const empty = document.createElement('li')
+      empty.className = 'empty-state'
+      empty.textContent = 'No tracked folders yet. Run Scan folders.'
+      folderList.append(empty)
+      return
+    }
+    for (const folder of folders) {
+      const item = document.createElement('li')
+      item.className = 'folder-item'
+      item.textContent = folder.path
+      folderList.append(item)
+    }
+  } catch (error) {
+    folderStatus.textContent = `Could not load folders: ${error.message}`
+    folderStatus.classList.add('is-error')
+  }
+}
+
 async function loadSatelliteSummary() {
   const status = document.querySelector('#satellite-status')
   const summary = document.querySelector('#satellite-summary')
@@ -1003,6 +1044,7 @@ loadTasks()
 loadProjects()
 loadSatelliteSummary()
 loadFiles()
+loadFolders()
 loadModels()
 
 scanFilesButton.addEventListener('click', async () => {
@@ -1014,5 +1056,17 @@ scanFilesButton.addEventListener('click', async () => {
   } catch (error) {
     fileStatus.textContent = `Could not scan user files: ${error.message}`
     fileStatus.classList.add('is-error')
+  }
+})
+
+scanFoldersButton.addEventListener('click', async () => {
+  try {
+    const result = await request('/api/folders/scan', { method: 'POST' })
+    folderStatus.textContent = `Scanned ${result.paths.length} folders (${result.inserted} new).`
+    folderStatus.classList.remove('is-error')
+    await loadFolders()
+  } catch (error) {
+    folderStatus.textContent = `Could not scan folders: ${error.message}`
+    folderStatus.classList.add('is-error')
   }
 })

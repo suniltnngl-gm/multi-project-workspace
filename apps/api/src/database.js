@@ -91,6 +91,16 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
   connection.pragma('journal_mode = WAL')
   connection.pragma('foreign_keys = ON')
   connection.exec(`
+    CREATE TABLE IF NOT EXISTS folders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      path TEXT NOT NULL UNIQUE CHECK(length(trim(path)) BETWEEN 1 AND 500),
+      objective TEXT NOT NULL DEFAULT '',
+      important_context TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `)
+  connection.exec(`
     CREATE TABLE IF NOT EXISTS user_files (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       path TEXT NOT NULL UNIQUE CHECK(length(trim(path)) BETWEEN 1 AND 500),
@@ -441,6 +451,19 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     return readTask(id)
   })
 
+    const listFoldersStatement = connection.prepare(
+      'SELECT * FROM folders ORDER BY path COLLATE NOCASE'
+    )
+    const getFolderStatement = connection.prepare('SELECT * FROM folders WHERE id = ?')
+    const getFolderByPathStatement = connection.prepare('SELECT * FROM folders WHERE path = ?')
+    const insertFolderStatement = connection.prepare(
+      'INSERT INTO folders (path, objective, important_context, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
+    )
+    const updateFolderStatement = connection.prepare(
+      'UPDATE folders SET path = ?, objective = ?, important_context = ?, updated_at = ? WHERE id = ?'
+    )
+    const deleteFolderStatement = connection.prepare('DELETE FROM folders WHERE id = ?')
+
     const listUserFilesStatement = connection.prepare(
       'SELECT * FROM user_files ORDER BY path COLLATE NOCASE'
     )
@@ -680,6 +703,76 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
         } else {
           insertUserFileStatement.run(path, '', '', '', '', '', '', '', '', '', now, now)
           inserted += 1
+        }
+      }
+      return { inserted, updated, total: paths.length }
+    },
+    listFolders() {
+      return listFoldersStatement.all().map((row) => ({
+        id: row.id,
+        path: row.path,
+        objective: row.objective,
+        importantContext: row.important_context,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+      }))
+    },
+    getFolder(id) {
+      const row = getFolderStatement.get(id)
+      if (!row) return null
+      return {
+        id: row.id,
+        path: row.path,
+        objective: row.objective,
+        importantContext: row.important_context,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+      }
+    },
+    getFolderByPath(path) {
+      const row = getFolderByPathStatement.get(path)
+      if (!row) return null
+      return {
+        id: row.id,
+        path: row.path,
+        objective: row.objective,
+        importantContext: row.important_context,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+      }
+    },
+    createFolder({ path, objective = '', important_context = '' }) {
+      const now = new Date().toISOString()
+      const result = insertFolderStatement.run(path, objective, important_context, now, now)
+      return this.getFolder(Number(result.lastInsertRowid))
+    },
+    updateFolder(id, changes) {
+      const current = this.getFolder(id)
+      if (!current) return null
+      const next = {
+        path: changes.path ?? current.path,
+        objective: changes.objective ?? current.objective,
+        important_context: changes.important_context ?? current.importantContext
+      }
+      const now = new Date().toISOString()
+      updateFolderStatement.run(next.path, next.objective, next.important_context, now, id)
+      return this.getFolder(id)
+    },
+    deleteFolder(id) {
+      return deleteFolderStatement.run(id).changes > 0
+    },
+    scanFolders(paths) {
+      const now = new Date().toISOString()
+      const existing = new Set(listFoldersStatement.all().map((row) => row.path))
+      let inserted = 0
+      let updated = 0
+      for (const path of paths) {
+        if (existing.has(path)) {
+          updated += 1
+        } else {
+          insertFolderStatement.run(path, '', '', now, now)
+          inserted += 1
+          existing.add(path)
         }
       }
       return { inserted, updated, total: paths.length }

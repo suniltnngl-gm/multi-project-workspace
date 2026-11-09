@@ -144,6 +144,9 @@ print_help() {
   printf '  %-24s %s\n' 'files scan' 'Scan and register user files in SQLite'
   printf '  %-24s %s\n' 'files list' 'List centrally tracked user files'
   printf '  %-24s %s\n' 'files check' 'Verify every user file is tracked'
+  printf '  %-24s %s\n' 'folders scan' 'Scan and register folders in SQLite'
+  printf '  %-24s %s\n' 'folders list' 'List centrally tracked folders'
+  printf '  %-24s %s\n' 'folders check' 'Verify every folder is tracked'
   printf '\n%sAI and remote%s\n' "$C_BOLD" "$C_RESET"
   printf '  %-24s %s\n' 'local-ai [all|0.5b|1.5b]' 'Start local models within memory limits'
   printf '  %-24s %s\n' 'colab [status|stop] [session]' 'Inspect or stop the reusable Colab session'
@@ -288,6 +291,28 @@ case "$command_name" in
     require_uv
     check_ports
     run_with_env npm run dev
+    ;;
+  folders)
+    subcommand="${2:-scan}"
+    case "$subcommand" in
+      scan)
+        require_uv
+        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_folders.py" scan --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        ;;
+      list)
+        require_uv
+        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_folders.py" list --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        ;;
+      check)
+        require_uv
+        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_folders.py" check --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        ;;
+      *)
+        error "Unknown folders subcommand: $subcommand"
+        printf 'Usage: ./workspace folders [scan|list|check]\n' >&2
+        exit 2
+        ;;
+    esac
     ;;
   files)
     subcommand="${2:-scan}"
