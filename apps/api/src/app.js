@@ -1,5 +1,6 @@
 import express from 'express'
 import { execFileSync } from 'node:child_process'
+import { join, relative } from 'node:path'
 import { createResourceMonitor } from './resourceMonitor.js'
 import { createAdaptiveCpuLimit } from './adaptiveCpuLimit.js'
 import { buildTaskPrompt } from './localAiPrompt.js'
@@ -748,19 +749,21 @@ export function createApp(database, {
     return response.status(204).end()
   })
 
-  app.post('/api/files/scan', (_request, response) => {
+  app.post('/api/files/scan', async (_request, response) => {
     try {
+      const { readdirSync } = await import('node:fs')
       const root = execFileSync('git', ['rev-parse', '--show-toplevel'], {
         cwd: process.cwd(),
         encoding: 'utf8'
       }).trim()
-      const output = execFileSync('git', ['-C', root, 'ls-files'], {
-        encoding: 'utf8'
-      })
-      const paths = output
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter(Boolean)
+      const entries = readdirSync(root, { recursive: true, withFileTypes: true })
+      const paths = entries
+        .filter((entry) => entry.isFile())
+        .map((entry) => {
+          const parent = entry.parentPath || entry.path
+          return relative(root, join(parent, entry.name))
+        })
+        .map((filePath) => filePath.replace(/\\\\/g, '/'))
         .filter(isTrackedUserFile)
       const result = database.scanUserFiles(paths)
       response.json({ ...result, paths })

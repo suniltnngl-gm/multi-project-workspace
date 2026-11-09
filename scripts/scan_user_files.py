@@ -36,11 +36,26 @@ def user_file(path):
     return extension in ALLOWED_EXTENSIONS
 
 
+NOISE_DIRECTORIES = {
+    "node_modules", ".venv", "dist", ".git", "__pycache__",
+    ".pytest_cache", "data",
+}
+
+
 def tracked_files():
-    output = subprocess.check_output(
-        ["git", "-C", str(ROOT_DIR), "ls-files"], text=True
-    )
-    return [line.strip() for line in output.splitlines() if line.strip() and user_file(line.strip())]
+    result = []
+    for dirpath, dirnames, filenames in os.walk(ROOT_DIR):
+        dirnames[:] = [
+            name for name in dirnames
+            if name not in NOISE_DIRECTORIES
+            and not (name.startswith(".") and name != ".github")
+        ]
+        for name in filenames:
+            full_path = Path(dirpath) / name
+            relative = full_path.relative_to(ROOT_DIR).as_posix()
+            if user_file(relative):
+                result.append(relative)
+    return sorted(set(result))
 
 
 def connect(database):
