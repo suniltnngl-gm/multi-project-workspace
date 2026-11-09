@@ -71,6 +71,9 @@ case "$command_name" in
     model="${2:-all}"
     run_with_env node "$ROOT_DIR/scripts/local-models.mjs" "$model"
     ;;
+  colab)
+    run_with_env node "$ROOT_DIR/scripts/colab-session.mjs" "${2:-status}" "${3:-}"
+    ;;
   install)
     require_npm
     require_uv
@@ -119,6 +122,7 @@ case "$command_name" in
     printf '  node     Start only the Node API (api is an alias)\n'
     printf '  python   Start only the Python satellite\n'
     printf '  local-ai [all|0.5b|1.5b]  Start local models within memory limits (default: all)\n'
+    printf '  colab [status|stop] [session]  Inspect or stop the reusable Colab session\n'
     printf '  install  Install npm dependencies and sync the uv Python project\n'
     printf '  python-add  Add a managed Python dependency with uv\n'
     printf '  python-pip  Run uv pip against the workspace Python environment\n'
