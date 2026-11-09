@@ -9,6 +9,7 @@ import { createModelBudget } from '../src/modelBudget.js'
 import { ModelCallError } from '../src/modelClient.js'
 import {
   createModelRegistry,
+  modelQuotaProfiles,
   planLocalModelLaunches
 } from '../src/modelRegistry.js'
 
@@ -235,6 +236,158 @@ test('serverless defaults avoid implicit selection and JSON mode', () => {
   assert.equal(serverless.timeoutMs, 60000)
   assert.equal(serverless.chatPath, '/v1/chat/completions')
   assert.equal(serverless.healthPath, '/v1/models')
+})
+
+test('multiple serverless slots register independently', () => {
+  const models = createModelRegistry({
+    env: {
+      SERVERLESS_AI_SLOTS: JSON.stringify([
+        {
+          id: 'slot-a',
+          label: 'Slot A',
+          url: 'https://a.example/openai/',
+          apiKeyEnv: 'SLOT_A_KEY',
+          apiModel: 'provider/a',
+          timeoutMs: 12000,
+          autoSelect: true,
+          supportsJsonMode: true,
+          chatPath: 'chat/completions',
+          healthPath: 'models',
+          priority: 4,
+          limits: [{ unit: 'requests', limit: 5, window: 'minute', reset: 'rolling' }]
+        },
+        {
+          id: 'slot-b',
+          url: 'https://b.example/v1'
+        }
+      ]),
+      SLOT_A_KEY: 'key-a'
+    }
+  })
+
+  assert.deepEqual(models.map((model) => model.id), [
+    'local-0.5b', 'local-1.5b', 'slot-a', 'slot-b', 'colab-3b', 'kaggle-3b'
+  ])
+
+  const slotA = models.find((model) => model.id === 'slot-a')
+  assert.equal(slotA.label, 'Slot A')
+  assert.equal(slotA.provider, 'serverless')
+  assert.equal(slotA.remote, true)
+  assert.equal(slotA.callable, true)
+  assert.equal(slotA.minAvailableMemoryMb, 0)
+  assert.equal(slotA.url, 'https://a.example/openai')
+  assert.equal(slotA.apiKey, 'key-a')
+  assert.equal(slotA.apiModel, 'provider/a')
+  assert.equal(slotA.timeoutMs, 12000)
+  assert.equal(slotA.autoSelect, true)
+  assert.equal(slotA.supportsJsonMode, true)
+  assert.equal(slotA.chatPath, '/chat/completions')
+  assert.equal(slotA.healthPath, '/models')
+  assert.equal(slotA.priority, 4)
+  assert.deepEqual(slotA.quotaLimits, [
+    { unit: 'requests', limit: 5, window: 'minute', reset: 'rolling' }
+  ])
+
+  const slotB = models.find((model) => model.id === 'slot-b')
+  assert.equal(slotB.label, 'Serverless slot-b')
+  assert.equal(slotB.url, 'https://b.example/v1')
+  assert.equal(slotB.apiKey, undefined)
+  assert.equal(slotB.apiModel, undefined)
+  assert.equal(slotB.timeoutMs, 60000)
+  assert.equal(slotB.autoSelect, false)
+  assert.equal(slotB.supportsJsonMode, false)
+  assert.equal(slotB.chatPath, '/v1/chat/completions')
+  assert.equal(slotB.healthPath, '/v1/models')
+  assert.equal(slotB.priority, 9)
+  assert.equal(slotB.quotaLimits, undefined)
+})
+
+test('legacy serverless variables coexist with JSON slots', () => {
+  const models = createModelRegistry({
+    env: {
+      SERVERLESS_AI_URL: 'https://legacy.example/openai',
+      SERVERLESS_AI_SLOTS: JSON.stringify([
+        { id: 'slot-a', url: 'https://a.example/openai' }
+      ])
+    }
+  })
+
+  assert.deepEqual(models.map((model) => model.id), [
+    'local-0.5b', 'local-1.5b', 'serverless', 'slot-a', 'colab-3b', 'kaggle-3b'
+  ])
+})
+
+test('slot quota limiters become budget profiles', () => {
+  const limits = [{ unit: 'requests', limit: 5, window: 'minute', reset: 'rolling' }]
+  const models = createModelRegistry({
+    env: {
+      SERVERLESS_AI_SLOTS: JSON.stringify([
+        { id: 'slot-a', url: 'https://a.example', limits },
+        { id: 'slot-b', url: 'https://b.example' }
+      ])
+    }
+  })
+
+  assert.deepEqual(modelQuotaProfiles(models), { 'slot-a': limits })
+})
+
+test('invalid serverless slot config is rejected', () => {
+  const withSlots = (slots) => () => createModelRegistry({
+    env: {
+      SERVERLESS_AI_SLOTS: typeof slots === 'string' ? slots : JSON.stringify(slots)
+    }
+  })
+
+  assert.throws(withSlots('{not json'), /must be valid JSON/)
+  assert.throws(withSlots({ id: 'slot-a' }), /must be a JSON array/)
+  assert.throws(withSlots([null]), /must be an object/)
+  assert.throws(withSlots([{ url: 'https://a.example' }]), /needs a non-empty string id/)
+  assert.throws(
+    withSlots([{ id: 'bad id', url: 'https://a.example' }]),
+    /may contain only letters/
+  )
+  assert.throws(withSlots([{ id: 'slot-a' }]), /url must be a valid http\(s\) URL/)
+  assert.throws(
+    withSlots([{ id: 'slot-a', url: 'ftp://a.example' }]),
+    /url must be a valid http\(s\) URL/
+  )
+  assert.throws(
+    withSlots([{ id: 'slot-a', url: 'https://a.example', timeoutMs: -1 }]),
+    /timeoutMs must be a non-negative number/
+  )
+  assert.throws(
+    withSlots([{ id: 'slot-a', url: 'https://a.example', autoSelect: 1 }]),
+    /autoSelect must be a boolean/
+  )
+  assert.throws(
+    withSlots([{ id: 'slot-a', url: 'https://a.example', limits: {} }]),
+    /limits must be an array/
+  )
+  assert.throws(
+    withSlots([
+      { id: 'slot-a', url: 'https://a.example' },
+      { id: 'slot-a', url: 'https://b.example' }
+    ]),
+    /duplicates the serverless slot id/
+  )
+  assert.throws(
+    withSlots([{ id: 'local-0.5b', url: 'https://a.example' }]),
+    /registered more than once/
+  )
+})
+
+test('a JSON slot cannot reuse the legacy serverless id', () => {
+  assert.throws(
+    () => createModelRegistry({
+      env: {
+        SERVERLESS_AI_URL: 'https://legacy.example/openai',
+        SERVERLESS_AI_SLOTS: JSON.stringify([
+          { id: 'serverless', url: 'https://a.example' }
+        ])
+      }
+    }),
+    /registered more than once/
+  )
 })
 
 test('CLI remote models opt out of automatic selection unless enabled', () => {
@@ -639,5 +792,47 @@ test('rate-limited responses keep the 429 status and retry delay', async () => {
     const payload = await response.json()
     assert.match(payload.error, /rate-limited/)
     assert.equal(payload.retryAfter, 17)
+  })
+})
+
+test('slot quota limiters configure the default model budget', async () => {
+  const models = [{
+    id: 'slot-a',
+    label: 'Slot A',
+    provider: 'serverless',
+    execution: 'live',
+    backend: 'http',
+    callable: true,
+    remote: true,
+    autoSelect: true,
+    priority: 9,
+    minAvailableMemoryMb: 0,
+    url: 'http://slot.test',
+    timeoutMs: 1000,
+    quotaLimits: [
+      { unit: 'requests', limit: 1, window: 'minute', reset: 'rolling' }
+    ]
+  }]
+
+  await withApp({
+    models,
+    turnCooldownMs: 0,
+    getResourceMetrics: async () => idleMetrics(),
+    fetchImpl: async (url) => {
+      if (url.endsWith('/health')) return new Response('ok')
+      return draftResponse()
+    }
+  }, async (url) => {
+    const first = await refine(url, { model: 'slot-a' })
+    assert.equal(first.status, 200)
+
+    const second = await refine(url, { model: 'slot-a' })
+    assert.equal(second.status, 429)
+    const payload = await second.json()
+    assert.match(payload.error, /minute requests limit/)
+    assert.equal(payload.budget.unit, 'requests')
+    assert.equal(payload.budget.window, 'minute')
+    assert.equal(payload.budget.limit, 1)
+    assert.equal(payload.budget.used, 1)
   })
 })

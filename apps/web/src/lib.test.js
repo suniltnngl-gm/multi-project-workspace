@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   buildTaskQuery,
+  formatBudget,
   formatBusyMessage,
   formatDuration,
   formatJobProgress,
@@ -34,6 +35,25 @@ describe('formatModelMeta', () => {
 
   it('returns an empty string without details', () => {
     expect(formatModelMeta({ id: 'local' })).toBe('')
+  })
+})
+
+describe('formatBudget', () => {
+  it('labels daily limits as today', () => {
+    expect(formatBudget({ used: 2, limit: 10, window: 'day', unit: 'requests' }))
+      .toBe('budget 2/10 today')
+  })
+
+  it('names non-daily windows and units', () => {
+    expect(formatBudget({ used: 1, limit: 30, window: 'minute', unit: 'requests' }))
+      .toBe('budget 1/30 minute requests')
+    expect(formatBudget({ used: 500, limit: 6000, window: 'hour', unit: 'tokens' }))
+      .toBe('budget 500/6000 hour tokens')
+  })
+
+  it('labels depleting pools without a window', () => {
+    expect(formatBudget({ used: 10, limit: 10, window: 'none', unit: 'compute_seconds' }))
+      .toBe('budget 10/10 compute pool')
   })
 })
 

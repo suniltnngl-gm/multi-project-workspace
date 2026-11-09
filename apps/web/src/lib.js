@@ -24,10 +24,21 @@ export function formatDuration(milliseconds) {
   return `${hours}h ${minutes % 60}m`
 }
 
+export function formatBudget(budget) {
+  if (!budget) return ''
+  const used = budget.used ?? 0
+  const limit = budget.limit ?? 0
+  const window = budget.window ?? 'day'
+  const unit = budget.unit === 'compute_seconds' ? 'compute' : (budget.unit ?? 'requests')
+  if (window === 'day') return `budget ${used}/${limit} today`
+  if (window === 'none') return `budget ${used}/${limit} ${unit} pool`
+  return `budget ${used}/${limit} ${window} ${unit}`
+}
+
 export function formatModelMeta(model) {
   const parts = []
   if (model.budget) {
-    parts.push(`budget ${model.budget.used}/${model.budget.limit} today`)
+    parts.push(formatBudget(model.budget))
   }
   if (model.sessionState) parts.push(`session ${model.sessionState}`)
   if (model.requests) {

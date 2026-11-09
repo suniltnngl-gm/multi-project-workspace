@@ -50,10 +50,14 @@ export const LOCAL_MODEL_DEFINITIONS = Object.freeze([
   }
 ])
 
+const SERVERLESS_SLOTS_ENV = 'SERVERLESS_AI_SLOTS'
+const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
 /**
  * A provider-agnostic OpenAI-compatible slot. The provider slug and endpoint
  * stay in environment variables so no vendor-specific branch enters the code.
- * It is registered only when SERVERLESS_AI_URL is set.
+ * It is registered only when SERVERLESS_AI_URL is set. Additional slots can be
+ * declared as JSON in SERVERLESS_AI_SLOTS; the legacy variables keep working.
  */
 export const SERVERLESS_MODEL_DEFINITION = Object.freeze({
   id: 'serverless',
@@ -219,31 +223,170 @@ function createCliConfig(env) {
   }
 }
 
+function readSlotUrl(value, label) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(`${label} must be a valid http(s) URL.`)
+  }
+  let parsed
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw new Error(`${label} must be a valid http(s) URL.`)
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`${label} must be a valid http(s) URL.`)
+  }
+  return trimUrl(value.trim())
+}
+
+function readSlotNumber(value, label, fallback) {
+  if (value === undefined || value === null) return fallback
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${label} must be a non-negative number.`)
+  }
+  return parsed
+}
+
+function readSlotBoolean(value, label, fallback) {
+  if (value === undefined || value === null) return fallback
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'string') {
+    return !['0', 'false', 'no', 'off'].includes(value.toLowerCase())
+  }
+  throw new Error(`${label} must be a boolean.`)
+}
+
+function readSlotPath(value, label, fallback) {
+  if (value === undefined || value === null || value === '') return fallback
+  if (typeof value !== 'string') {
+    throw new Error(`${label} must be a path string.`)
+  }
+  return value.startsWith('/') ? value : `/${value}`
+}
+
+function readSlotText(value, label) {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string') {
+    throw new Error(`${label} must be a string.`)
+  }
+  const text = value.trim()
+  return text === '' ? undefined : text
+}
+
+function buildServerlessModel(definition, config) {
+  return {
+    ...definition,
+    id: config.id,
+    label: config.label,
+    priority: config.priority,
+    url: config.url,
+    callable: true,
+    // An explicitly configured serverless endpoint is still opt-in: a missing
+    // model does not silently spend a third-party quota.
+    autoSelect: config.autoSelect,
+    timeoutMs: config.timeoutMs,
+    minAvailableMemoryMb: 0,
+    // Existing local/HTTP models keep JSON mode by default; a new provider
+    // opts in explicitly because not every API supports response_format.
+    supportsJsonMode: config.supportsJsonMode,
+    chatPath: config.chatPath,
+    healthPath: config.healthPath,
+    ...(config.apiModel ? { apiModel: config.apiModel } : {}),
+    ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+    ...(config.quotaLimits ? { quotaLimits: config.quotaLimits } : {})
+  }
+}
+
 function createServerlessModel(env) {
   const definition = SERVERLESS_MODEL_DEFINITION
   const url = readUrl(env, definition.urlEnv)
   if (!url) return null
 
-  const apiModel = readText(env, definition.apiModelEnv, '')
-  const apiKey = env[definition.apiKeyEnv]
-
-  return {
-    ...definition,
+  return buildServerlessModel(definition, {
+    id: definition.id,
+    label: definition.label,
+    priority: definition.priority,
     url,
-    callable: true,
-    // An explicitly configured serverless endpoint is still opt-in: a missing
-    // model does not silently spend a third-party quota.
-    autoSelect: readBoolean(env, definition.autoSelectEnv, false),
+    apiModel: readText(env, definition.apiModelEnv, ''),
+    apiKey: env[definition.apiKeyEnv],
     timeoutMs: readNumber(env, definition.timeoutEnv, definition.defaultTimeoutMs),
-    minAvailableMemoryMb: 0,
-    // Existing local/HTTP models keep JSON mode by default; a new provider
-    // opts in explicitly because not every API supports response_format.
+    autoSelect: readBoolean(env, definition.autoSelectEnv, false),
     supportsJsonMode: readBoolean(env, definition.jsonModeEnv, false),
     chatPath: readPath(env, definition.chatPathEnv, '/v1/chat/completions'),
-    healthPath: readPath(env, definition.healthPathEnv, '/v1/models'),
-    ...(apiModel ? { apiModel } : {}),
-    ...(apiKey ? { apiKey } : {})
+    healthPath: readPath(env, definition.healthPathEnv, '/v1/models')
+  })
+}
+
+function createServerlessSlots(env) {
+  const raw = env[SERVERLESS_SLOTS_ENV]
+  if (raw === undefined || raw === '') return []
+
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error(`${SERVERLESS_SLOTS_ENV} must be valid JSON.`)
   }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`${SERVERLESS_SLOTS_ENV} must be a JSON array of slot objects.`)
+  }
+
+  const seen = new Set()
+  return parsed.map((entry, index) => {
+    const at = `${SERVERLESS_SLOTS_ENV}[${index}]`
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`${at} must be an object.`)
+    }
+
+    const id = readSlotText(entry.id, `${at}.id`)
+    if (!id) {
+      throw new Error(`${at} needs a non-empty string id.`)
+    }
+    if (!MODEL_ID_PATTERN.test(id)) {
+      throw new Error(`${at}.id "${id}" may contain only letters, numbers, dot, underscore, and dash.`)
+    }
+    if (seen.has(id)) {
+      throw new Error(`${at} duplicates the serverless slot id "${id}".`)
+    }
+    seen.add(id)
+
+    const apiKeyEnv = readSlotText(entry.apiKeyEnv, `${at}.apiKeyEnv`)
+    const apiKey = apiKeyEnv ? env[apiKeyEnv] : entry.apiKey
+    if (apiKey !== undefined && typeof apiKey !== 'string') {
+      throw new Error(`${at}.apiKey must be a string.`)
+    }
+    if (entry.limits !== undefined && !Array.isArray(entry.limits)) {
+      throw new Error(`${at}.limits must be an array of quota limiters.`)
+    }
+
+    return buildServerlessModel(SERVERLESS_MODEL_DEFINITION, {
+      id,
+      label: readSlotText(entry.label, `${at}.label`) ?? `Serverless ${id}`,
+      priority: readSlotNumber(entry.priority, `${at}.priority`, SERVERLESS_MODEL_DEFINITION.priority),
+      url: readSlotUrl(entry.url, `${at}.url`),
+      apiModel: readSlotText(entry.apiModel, `${at}.apiModel`),
+      apiKey: apiKey || undefined,
+      timeoutMs: readSlotNumber(
+        entry.timeoutMs,
+        `${at}.timeoutMs`,
+        SERVERLESS_MODEL_DEFINITION.defaultTimeoutMs
+      ),
+      autoSelect: readSlotBoolean(entry.autoSelect, `${at}.autoSelect`, false),
+      supportsJsonMode: readSlotBoolean(
+        entry.supportsJsonMode,
+        `${at}.supportsJsonMode`,
+        false
+      ),
+      chatPath: readSlotPath(
+        entry.chatPath,
+        `${at}.chatPath`,
+        '/v1/chat/completions'
+      ),
+      healthPath: readSlotPath(entry.healthPath, `${at}.healthPath`, '/v1/models'),
+      quotaLimits: entry.limits
+    })
+  })
 }
 
 /**
@@ -303,12 +446,38 @@ export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
     return model
   })
 
-  const serverless = createServerlessModel(env)
-  return [
+  const legacyServerless = createServerlessModel(env)
+  const serverlessModels = [
+    ...(legacyServerless ? [legacyServerless] : []),
+    ...createServerlessSlots(env)
+  ]
+  const models = [
     ...localModels,
-    ...(serverless ? [serverless] : []),
+    ...serverlessModels,
     ...externalModels
   ]
+
+  const seen = new Set()
+  for (const model of models) {
+    if (seen.has(model.id)) {
+      throw new Error(`Model id "${model.id}" is registered more than once.`)
+    }
+    seen.add(model.id)
+  }
+  return models
+}
+
+/**
+ * Collect per-slot quota limiters from the registry. The budget receives these
+ * as explicit profiles, so a slot can carry its own quota shape without a
+ * second environment variable keyed by id.
+ */
+export function modelQuotaProfiles(models) {
+  return Object.fromEntries(
+    models
+      .filter((model) => Array.isArray(model.quotaLimits) && model.quotaLimits.length > 0)
+      .map((model) => [model.id, model.quotaLimits])
+  )
 }
 
 /**

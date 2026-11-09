@@ -2,7 +2,7 @@ import express from 'express'
 import { createResourceMonitor } from './resourceMonitor.js'
 import { createAdaptiveCpuLimit } from './adaptiveCpuLimit.js'
 import { buildTaskPrompt } from './localAiPrompt.js'
-import { createModelRegistry, publicModelDefinition } from './modelRegistry.js'
+import { createModelRegistry, modelQuotaProfiles, publicModelDefinition } from './modelRegistry.js'
 import { createModelScheduler } from './modelScheduler.js'
 import { createModelClient } from './modelClient.js'
 import { createTaskJobStore } from './taskJobStore.js'
@@ -244,7 +244,10 @@ export function createApp(database, {
   models = createModelRegistry({ localAiUrl }),
   modelClient = createModelClient({ fetchImpl, apiKey: localAiApiKey }),
   modelMetrics = createModelMetrics(),
-  modelBudget = createModelBudget({ repository: database }),
+  modelBudget = createModelBudget({
+    repository: database,
+    profiles: modelQuotaProfiles(models)
+  }),
   turnCooldownMs = LOCAL_AI_TURN_COOLDOWN_MS
 } = {}) {
   const app = express()
