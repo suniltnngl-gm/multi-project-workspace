@@ -163,23 +163,16 @@ export function createModelClient({
     return state
   }
 
-  async function ensureColabSession(model) {
-    const state = colabState(model)
-    if (state.ready) return
+  function isMissingSessionError(error) {
+    const message = String(error?.message || '').toLowerCase()
+    return (
+      (message.includes('session') && message.includes('not found'))
+      || message.includes('no active sessions')
+    )
+  }
 
-    const { command, session, gpu, port, modelId, bootstrapTimeoutMs } = model.cli
-    let exists = true
-    try {
-      await runCommand(command, ['status', '-s', session], { timeoutMs: 60000 })
-    } catch {
-      exists = false
-    }
-    if (!exists) {
-      await runCommand(command, ['new', '-s', session, '--gpu', gpu], {
-        timeoutMs: 300000
-      })
-    }
-
+  async function bootstrapColab(model) {
+    const { command, session, port, modelId, bootstrapTimeoutMs } = model.cli
     const bootstrapSeconds = Math.max(60, Math.ceil(bootstrapTimeoutMs / 1000))
     await runCommand(command, [
       'exec',
@@ -189,6 +182,25 @@ export function createModelClient({
       '--env', `WORKSPACE_MODEL_PORT=${port}`,
       '--env', `WORKSPACE_MODEL_ID=${modelId}`
     ], { timeoutMs: bootstrapTimeoutMs + 60000 })
+  }
+
+  async function ensureColabSession(model) {
+    const state = colabState(model)
+    if (state.ready) return
+
+    const { command, session, gpu } = model.cli
+    try {
+      // `colab status` exits successfully even when the session is missing, so
+      // probe by bootstrapping and create a session only for that specific
+      // failure. Other errors (pip, model download) should surface as-is.
+      await bootstrapColab(model)
+    } catch (error) {
+      if (!isMissingSessionError(error)) throw error
+      await runCommand(command, ['new', '-s', session, '--gpu', gpu], {
+        timeoutMs: 300000
+      })
+      await bootstrapColab(model)
+    }
     state.ready = true
   }
 

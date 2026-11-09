@@ -63,16 +63,21 @@ function envValue(args, key) {
   return undefined
 }
 
-test('Colab calls bootstrap a session once and reuse it for later requests', async () => {
+test('Colab creates a missing session, bootstraps once, and reuses it', async () => {
   const calls = []
   let bootstraps = 0
   let completions = 0
   const runCommand = async (command, args, options) => {
     calls.push({ command, args, options })
-    if (args[0] === 'status') throw new Error('session not found')
     if (args[0] === 'new') return { stdout: '', stderr: '' }
     if (args[0] === 'exec' && args.includes(join(SCRIPTS, 'colab_model_server.py'))) {
       bootstraps += 1
+      if (bootstraps === 1) {
+        throw new ModelCallError(
+          "colab failed: [colab] Session 'workspace-qwen' not found.",
+          502
+        )
+      }
       return { stdout: 'WORKSPACE_COLAB_READY\n', stderr: '' }
     }
     if (args[0] === 'exec' && args.includes(join(SCRIPTS, 'colab_model_client.py'))) {
@@ -95,8 +100,8 @@ test('Colab calls bootstrap a session once and reuse it for later requests', asy
 
   const first = await client.complete(model, REQUEST)
   assert.match(first, /"description":"ok"/)
-  assert.deepEqual(calls.map((call) => call.args[0]), ['status', 'new', 'exec', 'exec'])
-  assert.equal(bootstraps, 1)
+  assert.deepEqual(calls.map((call) => call.args[0]), ['exec', 'new', 'exec', 'exec'])
+  assert.equal(bootstraps, 2)
   assert.equal(completions, 1)
 
   const bootstrapCall = calls[2]
@@ -119,9 +124,9 @@ test('Colab calls bootstrap a session once and reuse it for later requests', asy
 
   await client.complete(model, REQUEST)
   assert.deepEqual(calls.map((call) => call.args[0]), [
-    'status', 'new', 'exec', 'exec', 'exec'
+    'exec', 'new', 'exec', 'exec', 'exec'
   ])
-  assert.equal(bootstraps, 1)
+  assert.equal(bootstraps, 2)
   assert.equal(completions, 2)
 })
 
@@ -129,7 +134,6 @@ test('Colab reuses an existing session without creating a new one', async () => 
   const calls = []
   const runCommand = async (command, args) => {
     calls.push(args)
-    if (args[0] === 'status') return { stdout: 'active', stderr: '' }
     if (args[0] === 'exec' && args.includes(join(SCRIPTS, 'colab_model_server.py'))) {
       return { stdout: '', stderr: '' }
     }
@@ -143,13 +147,29 @@ test('Colab reuses an existing session without creating a new one', async () => 
 
   const client = createModelClient({ runCommand, scriptsDir: SCRIPTS })
   await client.complete(colabModel(), REQUEST)
-  assert.deepEqual(calls.map((args) => args[0]), ['status', 'exec', 'exec'])
+  assert.deepEqual(calls.map((args) => args[0]), ['exec', 'exec'])
   assert.equal(calls.some((args) => args[0] === 'new'), false)
+})
+
+test('Colab surfaces bootstrap failures without creating a session', async () => {
+  const calls = []
+  const client = createModelClient({
+    runCommand: async (command, args) => {
+      calls.push(args)
+      throw new ModelCallError('pip install failed', 502)
+    },
+    scriptsDir: SCRIPTS
+  })
+
+  await assert.rejects(
+    () => client.complete(colabModel(), REQUEST),
+    (error) => error instanceof ModelCallError && /pip install failed/.test(error.message)
+  )
+  assert.deepEqual(calls.map((args) => args[0]), ['exec'])
 })
 
 test('Colab reports missing or invalid sentinel output', async () => {
   const runCommand = async (command, args) => {
-    if (args[0] === 'status') return { stdout: '', stderr: '' }
     if (args.includes(join(SCRIPTS, 'colab_model_server.py'))) return { stdout: '', stderr: '' }
     return { stdout: 'no result here', stderr: '' }
   }
@@ -160,7 +180,6 @@ test('Colab reports missing or invalid sentinel output', async () => {
   )
 
   const invalidRunCommand = async (command, args) => {
-    if (args[0] === 'status') return { stdout: '', stderr: '' }
     if (args.includes(join(SCRIPTS, 'colab_model_server.py'))) return { stdout: '', stderr: '' }
     return { stdout: `${RESULT_SENTINEL}{not-json`, stderr: '' }
   }
@@ -176,7 +195,6 @@ test('Colab re-bootstraps after a failed completion call', async () => {
   let failCompletion = true
   const runCommand = async (command, args) => {
     calls.push(args)
-    if (args[0] === 'status') return { stdout: '', stderr: '' }
     if (args.includes(join(SCRIPTS, 'colab_model_server.py'))) return { stdout: '', stderr: '' }
     if (failCompletion) {
       failCompletion = false
@@ -193,7 +211,7 @@ test('Colab re-bootstraps after a failed completion call', async () => {
   const client = createModelClient({ runCommand, scriptsDir: SCRIPTS })
   await assert.rejects(() => client.complete(colabModel(), REQUEST), /session expired/)
   await client.complete(colabModel(), REQUEST)
-  assert.deepEqual(calls.map((args) => args[0]), ['status', 'exec', 'exec', 'status', 'exec', 'exec'])
+  assert.deepEqual(calls.map((args) => args[0]), ['exec', 'exec', 'exec', 'exec'])
 })
 
 test('Kaggle writes the task, runs the batch runner, and reads its response', async () => {
