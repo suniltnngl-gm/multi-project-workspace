@@ -1,3 +1,11 @@
+/**
+ * Objective: Verify behavior and regressions for apps/api/test/env.test.js.
+ * Requirements: Keep the implementation aligned with the documented API, tests, and repository conventions.
+ * Decisions: Follow existing patterns and avoid changing unrelated behavior.
+ * Relevant Files: apps/api/test/env.test.js
+ * Important Context: User file. Vendor and transient artifacts are excluded from tracking.
+ * Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
+ */
 import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'

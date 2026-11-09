@@ -1,3 +1,11 @@
+/**
+ * Objective: Implement and maintain apps/api/src/localAiPrompt.js.
+ * Requirements: Keep the implementation aligned with the documented API, tests, and repository conventions.
+ * Decisions: Follow existing patterns and avoid changing unrelated behavior.
+ * Relevant Files: apps/api/src/localAiPrompt.js
+ * Important Context: User file. Vendor and transient artifacts are excluded from tracking.
+ * Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
+ */
 const MAX_USER_PROMPT_CHARS = 2200
 const DETAILED_ROUTE_THRESHOLD = 600
 const BRIEF_MAX_TOKENS = 180

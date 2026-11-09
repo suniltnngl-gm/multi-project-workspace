@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# Objective: Implement and maintain this Python module.
+# Requirements: Keep behavior aligned with tests and documented APIs.
+# Decisions: Follow existing repository conventions.
+# Relevant Files: scripts/colab_model_client.py
+# Important Context: User file. Vendor and transient artifacts are excluded from tracking.
+# Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
+
 """Send one chat request to the Colab-hosted model server.
 
 The request is base64-encoded JSON in ``WORKSPACE_MODEL_REQUEST`` so the Colab

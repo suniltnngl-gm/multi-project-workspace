@@ -1,3 +1,11 @@
+<!--
+Objective: Document workspace usage and APIs.
+Requirements: Keep the implementation aligned with the documented API, tests, and repository conventions.
+Decisions: Follow existing patterns and avoid changing unrelated behavior.
+Relevant Files: README.md
+Important Context: User file. Vendor and transient artifacts are excluded from tracking.
+Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
+-->
 # Multi-project workspace
 
 This workspace contains a Vite frontend, an Express/Node.js API, a Python analytics satellite, and shared utilities. Both backend services read the same SQLite task store at `apps/api/data/workspace.sqlite` by default; the database is created automatically by the Node API and ignored by Git.
