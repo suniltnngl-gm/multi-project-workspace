@@ -18,7 +18,8 @@ const MAX_PROJECT_LENGTH = 80
 const MAX_ACCEPTANCE_CRITERIA_LENGTH = 2000
 const MAX_PLANNING_TEXT_LENGTH = 2000
 const PLANNING_TEXT_FIELDS = [
-  'objectives', 'requirements', 'decisions', 'relevant_files', 'important_context'
+  'objectives', 'requirements', 'decisions', 'relevant_files', 'important_context',
+  'work_completed', 'work_active', 'work_blocked', 'next_move'
 ]
 const TASK_TEXT_LIMITS = {
   description: MAX_DESCRIPTION_LENGTH,
@@ -34,7 +35,11 @@ const TASK_TEXT_LABELS = {
   requirements: 'Requirements',
   decisions: 'Decisions',
   relevant_files: 'Relevant files',
-  important_context: 'Important context'
+  important_context: 'Important context',
+  work_completed: 'Work completed',
+  work_active: 'Active work',
+  work_blocked: 'Blocked work',
+  next_move: 'Next move'
 }
 const TASK_STATUSES = new Set(['todo', 'in_progress', 'blocked', 'done'])
 const TASK_PRIORITIES = new Set(['low', 'medium', 'high', 'urgent'])
@@ -169,7 +174,11 @@ function taskFromRefineInput(input) {
     requirements: input.requirements || '',
     decisions: input.decisions || '',
     relevant_files: input.relevant_files || '',
-    important_context: input.important_context || ''
+    important_context: input.important_context || '',
+    work_completed: input.work_completed || '',
+    work_active: input.work_active || '',
+    work_blocked: input.work_blocked || '',
+    next_move: input.next_move || ''
   }
 }
 
@@ -575,7 +584,11 @@ export function createApp(database, {
       requirements: (request.body.requirements ?? '').trim(),
       decisions: (request.body.decisions ?? '').trim(),
       relevant_files: (request.body.relevant_files ?? '').trim(),
-      important_context: (request.body.important_context ?? '').trim()
+      important_context: (request.body.important_context ?? '').trim(),
+      work_completed: (request.body.work_completed ?? '').trim(),
+      work_active: (request.body.work_active ?? '').trim(),
+      work_blocked: (request.body.work_blocked ?? '').trim(),
+      next_move: (request.body.next_move ?? '').trim()
     })
     return response.status(201).json(task)
   })

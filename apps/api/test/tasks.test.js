@@ -78,7 +78,11 @@ test('tasks can be created, listed, updated, and deleted', async () => {
       requirements: 'Keep the service loopback-only',
       decisions: 'Store planning fields in SQLite',
       relevant_files: 'apps/api/src/database.js',
-      important_context: 'No live remote calls during tests'
+      important_context: 'No live remote calls during tests',
+      work_completed: 'Schema and API tests pass',
+      work_active: 'Final review',
+      work_blocked: 'None',
+      next_move: 'Commit the change'
     })
   })
   assert.equal(createResponse.status, 201)
@@ -96,6 +100,10 @@ test('tasks can be created, listed, updated, and deleted', async () => {
   assert.equal(created.decisions, 'Store planning fields in SQLite')
   assert.equal(created.relevant_files, 'apps/api/src/database.js')
   assert.equal(created.important_context, 'No live remote calls during tests')
+  assert.equal(created.work_completed, 'Schema and API tests pass')
+  assert.equal(created.work_active, 'Final review')
+  assert.equal(created.work_blocked, 'None')
+  assert.equal(created.next_move, 'Commit the change')
 
   const listResponse = await fetch(`${baseUrl}/api/tasks`)
   assert.equal(listResponse.status, 200)
@@ -110,6 +118,9 @@ test('tasks can be created, listed, updated, and deleted', async () => {
   const planningResponse = await fetch(`${baseUrl}/api/tasks?search=loopback`)
   assert.deepEqual(await planningResponse.json(), [created])
 
+  const workStateResponse = await fetch(`${baseUrl}/api/tasks?search=Commit`)
+  assert.deepEqual(await workStateResponse.json(), [created])
+
   const statusResponse = await fetch(`${baseUrl}/api/tasks/${created.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
@@ -120,13 +131,14 @@ test('tasks can be created, listed, updated, and deleted', async () => {
   const updateResponse = await fetch(`${baseUrl}/api/tasks/${created.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ completed: true, important_context: 'Updated context' })
+    body: JSON.stringify({ completed: true, important_context: 'Updated context', next_move: 'Ship it' })
   })
   assert.equal(updateResponse.status, 200)
   const completed = await updateResponse.json()
   assert.equal(completed.completed, true)
   assert.equal(completed.status, 'done')
   assert.equal(completed.important_context, 'Updated context')
+  assert.equal(completed.next_move, 'Ship it')
 
   const invalidResponse = await fetch(`${baseUrl}/api/tasks`, {
     method: 'POST',
@@ -206,7 +218,8 @@ test('existing task databases are migrated without losing completion state', () 
   assert.equal(migratedDatabase.getTask(2).status, 'todo')
   assert.equal(migratedDatabase.getTask(2).project, 'workspace')
   for (const field of [
-    'objectives', 'requirements', 'decisions', 'relevant_files', 'important_context'
+    'objectives', 'requirements', 'decisions', 'relevant_files', 'important_context',
+    'work_completed', 'work_active', 'work_blocked', 'next_move'
   ]) {
     assert.equal(migratedDatabase.getTask(2)[field], '')
   }
@@ -230,7 +243,9 @@ test('task detail records field-level activity newest first', async () => {
       description: 'Original notes',
       priority: 'medium',
       objectives: 'Original objective',
-      decisions: 'Original decision'
+      decisions: 'Original decision',
+      work_completed: 'Initial setup',
+      next_move: 'Start implementation'
     })
   })
   assert.equal(createResponse.status, 201)
@@ -251,18 +266,22 @@ test('task detail records field-level activity newest first', async () => {
         status: 'in_progress',
         priority: 'high',
         objectives: 'Updated objective',
-        requirements: 'Trace every planning field'
+        requirements: 'Trace every planning field',
+        work_blocked: 'Waiting on review',
+        next_move: 'Finish tests'
       })
     })
     assert.equal(updateResponse.status, 200)
 
     const detail = await (await fetch(`${baseUrl}/api/tasks/${created.id}`)).json()
-    assert.equal(detail.activity.length, 6)
+    assert.equal(detail.activity.length, 8)
     assert.deepEqual(
-      detail.activity.slice(0, 5).map(({ action, field, oldValue, newValue }) => ({
+      detail.activity.slice(0, 7).map(({ action, field, oldValue, newValue }) => ({
         action, field, oldValue, newValue
       })),
       [
+        { action: 'updated', field: 'next_move', oldValue: 'Start implementation', newValue: 'Finish tests' },
+        { action: 'updated', field: 'work_blocked', oldValue: '', newValue: 'Waiting on review' },
         { action: 'updated', field: 'requirements', oldValue: '', newValue: 'Trace every planning field' },
         { action: 'updated', field: 'objectives', oldValue: 'Original objective', newValue: 'Updated objective' },
         { action: 'updated', field: 'priority', oldValue: 'medium', newValue: 'high' },
@@ -270,7 +289,7 @@ test('task detail records field-level activity newest first', async () => {
         { action: 'updated', field: 'description', oldValue: 'Original notes', newValue: 'Updated notes' }
       ]
     )
-    assert.equal(detail.activity[5].action, 'created')
+    assert.equal(detail.activity[7].action, 'created')
 
     await fetch(`${baseUrl}/api/tasks/${created.id}`, {
       method: 'PATCH',
@@ -278,12 +297,12 @@ test('task detail records field-level activity newest first', async () => {
       body: JSON.stringify({ status: 'in_progress', priority: 'high' })
     })
     const unchanged = await (await fetch(`${baseUrl}/api/tasks/${created.id}`)).json()
-    assert.equal(unchanged.activity.length, 6)
+    assert.equal(unchanged.activity.length, 8)
 
     const limited = await (await fetch(`${baseUrl}/api/tasks/${created.id}?activity_limit=2`)).json()
     assert.equal(limited.activity.length, 2)
-    assert.equal(limited.activity[0].field, 'requirements')
-    assert.equal(limited.activity[1].field, 'objectives')
+    assert.equal(limited.activity[0].field, 'next_move')
+    assert.equal(limited.activity[1].field, 'work_blocked')
 
     const invalidLimit = await fetch(`${baseUrl}/api/tasks/${created.id}?activity_limit=0`)
     assert.equal(invalidLimit.status, 400)
@@ -389,7 +408,11 @@ test('task prompt router uses compact and detailed routes within the context bud
     requirements: 'Keep the endpoint unauthenticated.',
     decisions: 'Use the existing Express app.',
     relevant_files: 'apps/api/src/app.js',
-    important_context: 'Health checks must stay loopback-only.'
+    important_context: 'Health checks must stay loopback-only.',
+    work_completed: 'Endpoint implemented.',
+    work_active: 'Adding tests.',
+    work_blocked: 'None.',
+    next_move: 'Review the diff.'
   })
   assert.equal(brief.route, 'brief')
   assert.equal(brief.maxTokens, 180)
@@ -399,6 +422,8 @@ test('task prompt router uses compact and detailed routes within the context bud
   assert.match(brief.messages[1].content, /Objectives:\nMake readiness observable\./)
   assert.match(brief.messages[1].content, /Relevant files:\napps\/api\/src\/app\.js/)
   assert.match(brief.messages[1].content, /Important context:\nHealth checks must stay loopback-only\./)
+  assert.match(brief.messages[1].content, /Work completed:\nEndpoint implemented\./)
+  assert.match(brief.messages[1].content, /Next move:\nReview the diff\./)
 
   const detailed = buildTaskPrompt({
     title: 'Add API validation',
@@ -476,7 +501,8 @@ test('local task assistant waits for low load and returns an unsaved draft', asy
         project: 'api',
         task_type: 'feature',
         objectives: 'Let the board draft implementation briefs.',
-        relevant_files: 'apps/api/src/app.js'
+        relevant_files: 'apps/api/src/app.js',
+        next_move: 'Wire the prompt.'
       })
     })
     assert.equal(response.status, 200)
@@ -489,6 +515,7 @@ test('local task assistant waits for low load and returns an unsaved draft', asy
     assert.equal(prompts[0].max_tokens, 180)
     assert.match(prompts[0].messages[1].content, /Objectives:\nLet the board draft implementation briefs\./)
     assert.match(prompts[0].messages[1].content, /Relevant files:\napps\/api\/src\/app\.js/)
+    assert.match(prompts[0].messages[1].content, /Next move:\nWire the prompt\./)
     assert.deepEqual(database.listTasks(), [])
 
     const cooldownResponse = await fetch(`${assistantUrl}/api/local-ai/status`)

@@ -54,12 +54,17 @@ const ACTIVITY_FIELD_LABELS = {
   requirements: 'Requirements',
   decisions: 'Decisions',
   relevant_files: 'Relevant files',
-  important_context: 'Important context'
+  important_context: 'Important context',
+  work_completed: 'Work completed',
+  work_active: 'Active work',
+  work_blocked: 'Blocked work',
+  next_move: 'Next move'
 }
 
 const ACTIVITY_TEXT_FIELDS = new Set([
   'description', 'acceptance_criteria', 'objectives', 'requirements',
-  'decisions', 'relevant_files', 'important_context'
+  'decisions', 'relevant_files', 'important_context', 'work_completed',
+  'work_active', 'work_blocked', 'next_move'
 ])
 
 function formatActivityValue(value) {
@@ -157,7 +162,8 @@ export function buildTaskQuery(formData) {
 
 const DRAFT_FIELDS = new Set([
   'title', 'description', 'acceptance_criteria', 'objectives', 'requirements',
-  'decisions', 'relevant_files', 'important_context', 'project', 'task_type'
+  'decisions', 'relevant_files', 'important_context', 'work_completed',
+  'work_active', 'work_blocked', 'next_move', 'project', 'task_type'
 ])
 
 export function buildDraftInput(formData) {

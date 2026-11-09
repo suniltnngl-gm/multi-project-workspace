@@ -14,7 +14,11 @@ const TASK_COLUMNS = {
   requirements: "TEXT NOT NULL DEFAULT ''",
   decisions: "TEXT NOT NULL DEFAULT ''",
   relevant_files: "TEXT NOT NULL DEFAULT ''",
-  important_context: "TEXT NOT NULL DEFAULT ''"
+  important_context: "TEXT NOT NULL DEFAULT ''",
+  work_completed: "TEXT NOT NULL DEFAULT ''",
+  work_active: "TEXT NOT NULL DEFAULT ''",
+  work_blocked: "TEXT NOT NULL DEFAULT ''",
+  next_move: "TEXT NOT NULL DEFAULT ''"
 }
 
 function toTask(row) {
@@ -102,6 +106,10 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       decisions TEXT NOT NULL DEFAULT '',
       relevant_files TEXT NOT NULL DEFAULT '',
       important_context TEXT NOT NULL DEFAULT '',
+      work_completed TEXT NOT NULL DEFAULT '',
+      work_active TEXT NOT NULL DEFAULT '',
+      work_blocked TEXT NOT NULL DEFAULT '',
+      next_move TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -206,16 +214,16 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     );
   `)
 
-  const taskFields = 'id, title, description, completed, project, status, priority, task_type, acceptance_criteria, objectives, requirements, decisions, relevant_files, important_context, created_at, updated_at'
+  const taskFields = 'id, title, description, completed, project, status, priority, task_type, acceptance_criteria, objectives, requirements, decisions, relevant_files, important_context, work_completed, work_active, work_blocked, next_move, created_at, updated_at'
   const taskOrder = "ORDER BY CASE status WHEN 'in_progress' THEN 0 WHEN 'todo' THEN 1 WHEN 'blocked' THEN 2 ELSE 3 END, CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, updated_at DESC"
   const getStatement = connection.prepare(
     `SELECT ${taskFields} FROM tasks WHERE id = ?`
   )
   const insertStatement = connection.prepare(
-    'INSERT INTO tasks (title, description, project, status, priority, task_type, acceptance_criteria, objectives, requirements, decisions, relevant_files, important_context, completed, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO tasks (title, description, project, status, priority, task_type, acceptance_criteria, objectives, requirements, decisions, relevant_files, important_context, work_completed, work_active, work_blocked, next_move, completed, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
   )
   const updateStatement = connection.prepare(
-    'UPDATE tasks SET title = ?, description = ?, project = ?, status = ?, priority = ?, task_type = ?, acceptance_criteria = ?, objectives = ?, requirements = ?, decisions = ?, relevant_files = ?, important_context = ?, completed = ?, updated_at = ? WHERE id = ?'
+    'UPDATE tasks SET title = ?, description = ?, project = ?, status = ?, priority = ?, task_type = ?, acceptance_criteria = ?, objectives = ?, requirements = ?, decisions = ?, relevant_files = ?, important_context = ?, work_completed = ?, work_active = ?, work_blocked = ?, next_move = ?, completed = ?, updated_at = ? WHERE id = ?'
   )
   const deleteStatement = connection.prepare('DELETE FROM tasks WHERE id = ?')
   const listTaskEventsStatement = connection.prepare(`
@@ -292,7 +300,8 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
   const TASK_ACTIVITY_FIELDS = [
     'title', 'description', 'project', 'status', 'priority', 'task_type',
     'acceptance_criteria', 'objectives', 'requirements', 'decisions',
-    'relevant_files', 'important_context'
+    'relevant_files', 'important_context', 'work_completed', 'work_active',
+    'work_blocked', 'next_move'
   ]
 
   function readTask(id) {
@@ -330,6 +339,10 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       fields.decisions,
       fields.relevant_files,
       fields.important_context,
+      fields.work_completed,
+      fields.work_active,
+      fields.work_blocked,
+      fields.next_move,
       fields.status === 'done' ? 1 : 0,
       now,
       now
@@ -365,7 +378,11 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       requirements: changes.requirements ?? current.requirements,
       decisions: changes.decisions ?? current.decisions,
       relevant_files: changes.relevant_files ?? current.relevant_files,
-      important_context: changes.important_context ?? current.important_context
+      important_context: changes.important_context ?? current.important_context,
+      work_completed: changes.work_completed ?? current.work_completed,
+      work_active: changes.work_active ?? current.work_active,
+      work_blocked: changes.work_blocked ?? current.work_blocked,
+      next_move: changes.next_move ?? current.next_move
     }
     const changedFields = TASK_ACTIVITY_FIELDS.filter(
       (field) => current[field] !== next[field]
@@ -386,6 +403,10 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       next.decisions,
       next.relevant_files,
       next.important_context,
+      next.work_completed,
+      next.work_active,
+      next.work_blocked,
+      next.next_move,
       next.status === 'done' ? 1 : 0,
       updatedAt,
       id
@@ -416,7 +437,8 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       if (filters.search) {
         const searchFields = [
           'title', 'description', 'acceptance_criteria', 'objectives',
-          'requirements', 'decisions', 'relevant_files', 'important_context'
+          'requirements', 'decisions', 'relevant_files', 'important_context',
+          'work_completed', 'work_active', 'work_blocked', 'next_move'
         ]
         conditions.push(
           `(${searchFields.map((field) => `${field} LIKE ? ESCAPE '\\'`).join(' OR ')})`
@@ -464,7 +486,11 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       requirements = '',
       decisions = '',
       relevant_files = '',
-      important_context = ''
+      important_context = '',
+      work_completed = '',
+      work_active = '',
+      work_blocked = '',
+      next_move = ''
     }) {
       const id = insertTaskRecord({
         title,
@@ -478,7 +504,11 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
         requirements,
         decisions,
         relevant_files,
-        important_context
+        important_context,
+        work_completed,
+        work_active,
+        work_blocked,
+        next_move
       })
       return readTask(id)
     },

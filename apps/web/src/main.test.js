@@ -15,6 +15,10 @@ const tasks = [
     decisions: 'Use dedicated SQLite columns.',
     relevant_files: 'apps/web/src/main.js',
     important_context: 'Keep services loopback-only.',
+    work_completed: 'Card rendering works.',
+    work_active: 'Updating tests.',
+    work_blocked: 'None.',
+    next_move: 'Review and commit.',
     created_at: '2026-11-09T10:00:00.000Z',
     updated_at: '2026-11-09T12:00:00.000Z'
   },
@@ -178,6 +182,10 @@ describe('development board', () => {
         'Decisions',
         'Relevant files',
         'Important context',
+        'Work completed',
+        'Active work',
+        'Blocked work',
+        'Next move',
         'Acceptance criteria'
       ])
     expect([...item.querySelectorAll('.task-notes p')].map((node) => node.textContent))
@@ -187,6 +195,10 @@ describe('development board', () => {
         'Use dedicated SQLite columns.',
         'apps/web/src/main.js',
         'Keep services loopback-only.',
+        'Card rendering works.',
+        'Updating tests.',
+        'None.',
+        'Review and commit.',
         'Tasks render.'
       ])
   })
@@ -361,6 +373,7 @@ describe('development board', () => {
     const form = item.querySelector('.task-edit-form')
     expect(form.elements.objectives.value).toBe('Make the board useful.')
     expect(form.elements.important_context.value).toBe('Keep services loopback-only.')
+    expect(form.elements.next_move.value).toBe('Review and commit.')
     form.querySelector('button[data-action="draft-edit"]').click()
 
     await vi.waitFor(() => {
@@ -372,6 +385,7 @@ describe('development board', () => {
     expect(draftBody.title).toBe('Ship board')
     expect(draftBody.objectives).toBe('Make the board useful.')
     expect(draftBody.relevant_files).toBe('apps/web/src/main.js')
+    expect(draftBody.next_move).toBe('Review and commit.')
     expect(draftBody.priority).toBeUndefined()
 
     await vi.waitFor(() => {

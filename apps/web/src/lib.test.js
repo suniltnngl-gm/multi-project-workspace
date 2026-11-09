@@ -172,6 +172,10 @@ describe('buildDraftInput', () => {
     data.set('decisions', 'Use dedicated columns')
     data.set('relevant_files', 'apps/web/src/lib.js')
     data.set('important_context', 'Keep services loopback-only')
+    data.set('work_completed', 'Tests pass')
+    data.set('work_active', 'Reviewing')
+    data.set('work_blocked', 'None')
+    data.set('next_move', 'Commit')
     data.set('project', 'web')
     data.set('task_type', 'feature')
     data.set('priority', 'high')
@@ -186,6 +190,10 @@ describe('buildDraftInput', () => {
       decisions: 'Use dedicated columns',
       relevant_files: 'apps/web/src/lib.js',
       important_context: 'Keep services loopback-only',
+      work_completed: 'Tests pass',
+      work_active: 'Reviewing',
+      work_blocked: 'None',
+      next_move: 'Commit',
       project: 'web',
       task_type: 'feature'
     })

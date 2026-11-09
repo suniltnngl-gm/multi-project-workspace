@@ -9,7 +9,11 @@ const PROMPT_TEXT_FIELDS = [
   ['acceptance_criteria', 'Acceptance criteria'],
   ['decisions', 'Decisions'],
   ['relevant_files', 'Relevant files'],
-  ['important_context', 'Important context']
+  ['important_context', 'Important context'],
+  ['work_completed', 'Work completed'],
+  ['work_active', 'Active work'],
+  ['work_blocked', 'Blocked work'],
+  ['next_move', 'Next move']
 ]
 
 function truncateText(value, maxLength) {

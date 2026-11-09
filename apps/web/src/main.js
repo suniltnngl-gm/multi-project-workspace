@@ -100,6 +100,27 @@ app.innerHTML = `
             </label>
           </div>
         </details>
+        <details class="task-planning field-wide">
+          <summary>Work state <small>(optional)</small></summary>
+          <div class="task-planning-fields">
+            <label>
+              <span>Work completed</span>
+              <textarea name="work_completed" maxlength="2000" rows="2" placeholder="What is already finished or verified"></textarea>
+            </label>
+            <label>
+              <span>Active work</span>
+              <textarea name="work_active" maxlength="2000" rows="2" placeholder="What is currently in progress"></textarea>
+            </label>
+            <label>
+              <span>Blocked work</span>
+              <textarea name="work_blocked" maxlength="2000" rows="2" placeholder="What is stalled and why"></textarea>
+            </label>
+            <label>
+              <span>Next move</span>
+              <textarea name="next_move" maxlength="2000" rows="2" placeholder="The immediate next action"></textarea>
+            </label>
+          </div>
+        </details>
         <button type="submit">Add task</button>
         <button id="draft-task" class="secondary-button field-wide" type="button">Draft brief with AI</button>
       </form>
@@ -351,6 +372,28 @@ function createEditForm(task) {
       wide: true
     }, planningFields)
   }
+
+  const workState = document.createElement('details')
+  workState.className = 'task-planning field-wide'
+  const workStateSummary = document.createElement('summary')
+  workStateSummary.textContent = 'Work state'
+  const workStateFields = document.createElement('div')
+  workStateFields.className = 'task-planning-fields'
+  workState.append(workStateSummary, workStateFields)
+  form.append(workState)
+  for (const [labelText, name] of [
+    ['Work completed', 'work_completed'],
+    ['Active work', 'work_active'],
+    ['Blocked work', 'work_blocked'],
+    ['Next move', 'next_move']
+  ]) {
+    addField(form, labelText, name, {
+      value: task[name] ?? '',
+      type: 'textarea',
+      wide: true
+    }, workStateFields)
+  }
+
   const actions = document.createElement('div')
   actions.className = 'task-actions field-wide'
   const save = document.createElement('button')
@@ -371,6 +414,10 @@ const TASK_CARD_SECTIONS = [
   ['decisions', 'Decisions'],
   ['relevant_files', 'Relevant files'],
   ['important_context', 'Important context'],
+  ['work_completed', 'Work completed'],
+  ['work_active', 'Active work'],
+  ['work_blocked', 'Blocked work'],
+  ['next_move', 'Next move'],
   ['acceptance_criteria', 'Acceptance criteria']
 ]
 
