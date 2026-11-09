@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# Objective: Provide the Bash entry point for the workspace workflow.
-# Requirements: Support dev, test, build, lint, dependency, and service commands consistently.
-# Decisions: Use Bash orchestration with Node and Python service commands.
-# Relevant Files: workspace
-# Important Context: User file. Vendor and transient artifacts are excluded from tracking.
-# Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -146,6 +140,10 @@ print_help() {
   printf '  %-24s %s\n' 'stop' 'Stop processes on the dev service ports'
   printf '  %-24s %s\n' 'restart' 'Stop, then start all services'
   printf '  %-24s %s\n' 'status' 'Show tool versions and service port state'
+  printf '\n%sUser files%s\n' "$C_BOLD" "$C_RESET"
+  printf '  %-24s %s\n' 'files scan' 'Scan and register user files in SQLite'
+  printf '  %-24s %s\n' 'files list' 'List centrally tracked user files'
+  printf '  %-24s %s\n' 'files check' 'Verify every user file is tracked'
   printf '\n%sAI and remote%s\n' "$C_BOLD" "$C_RESET"
   printf '  %-24s %s\n' 'local-ai [all|0.5b|1.5b]' 'Start local models within memory limits'
   printf '  %-24s %s\n' 'colab [status|stop] [session]' 'Inspect or stop the reusable Colab session'
@@ -290,6 +288,28 @@ case "$command_name" in
     require_uv
     check_ports
     run_with_env npm run dev
+    ;;
+  files)
+    subcommand="${2:-scan}"
+    case "$subcommand" in
+      scan)
+        require_uv
+        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_user_files.py" scan --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        ;;
+      list)
+        require_uv
+        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_user_files.py" list --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        ;;
+      check)
+        require_uv
+        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_user_files.py" check --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        ;;
+      *)
+        error "Unknown files subcommand: $subcommand"
+        printf 'Usage: ./workspace files [scan|list|check]\n' >&2
+        exit 2
+        ;;
+    esac
     ;;
   help|-h|--help)
     print_help

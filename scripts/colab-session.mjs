@@ -1,11 +1,3 @@
-/**
- * Objective: Support the colab-session.mjs workflow.
- * Requirements: Keep the implementation aligned with the documented API, tests, and repository conventions.
- * Decisions: Follow existing patterns and avoid changing unrelated behavior.
- * Relevant Files: scripts/colab-session.mjs
- * Important Context: User file. Vendor and transient artifacts are excluded from tracking.
- * Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
- */
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process'
 import { loadWorkspaceEnv } from './env.mjs'

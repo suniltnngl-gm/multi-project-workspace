@@ -1,11 +1,3 @@
-/**
- * Objective: Implement and maintain apps/web/src/main.js.
- * Requirements: Keep the implementation aligned with the documented API, tests, and repository conventions.
- * Decisions: Follow existing patterns and avoid changing unrelated behavior.
- * Relevant Files: apps/web/src/main.js
- * Important Context: User file. Vendor and transient artifacts are excluded from tracking.
- * Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
- */
 import './style.css'
 import { getProjectCards, workspaceSummary } from '../../../packages/shared/index.js'
 import {
@@ -192,6 +184,19 @@ app.innerHTML = `
       <ul id="task-list" class="task-list"></ul>
     </section>
 
+    <section class="files-section" aria-labelledby="files-heading">
+      <div class="section-heading">
+        <div>
+          <h2 id="files-heading">User files</h2>
+          <p>Centralized metadata for tracked user files; vendor and transient paths are excluded.</p>
+        </div>
+        <span id="file-count" class="task-count" aria-live="polite"></span>
+      </div>
+      <button id="scan-files" class="secondary-button" type="button">Scan user files</button>
+      <p id="file-status" class="task-status" role="status" aria-live="polite"></p>
+      <ul id="file-list" class="file-list"></ul>
+    </section>
+
     <section class="satellite-section" aria-labelledby="satellite-heading">
       <div class="section-heading">
         <div>
@@ -214,6 +219,10 @@ const taskForm = document.querySelector('#task-form')
 const filterForm = document.querySelector('#filter-form')
 const taskList = document.querySelector('#task-list')
 const taskStatus = document.querySelector('#task-status')
+const fileList = document.querySelector('#file-list')
+const fileCount = document.querySelector('#file-count')
+const fileStatus = document.querySelector('#file-status')
+const scanFilesButton = document.querySelector('#scan-files')
 const taskCount = document.querySelector('#task-count')
 const projectOptions = document.querySelector('#project-options')
 const draftTaskButton = document.querySelector('#draft-task')
@@ -662,6 +671,30 @@ async function loadTasks() {
   }
 }
 
+async function loadFiles() {
+  try {
+    const files = await request('/api/files')
+    fileList.replaceChildren()
+    fileCount.textContent = `${files.length} tracked`
+    if (files.length === 0) {
+      const empty = document.createElement('li')
+      empty.className = 'empty-state'
+      empty.textContent = 'No tracked user files yet. Run Scan user files.'
+      fileList.append(empty)
+      return
+    }
+    for (const file of files) {
+      const item = document.createElement('li')
+      item.className = 'file-item'
+      item.textContent = file.path
+      fileList.append(item)
+    }
+  } catch (error) {
+    fileStatus.textContent = `Could not load user files: ${error.message}`
+    fileStatus.classList.add('is-error')
+  }
+}
+
 async function loadSatelliteSummary() {
   const status = document.querySelector('#satellite-status')
   const summary = document.querySelector('#satellite-summary')
@@ -969,4 +1002,17 @@ taskList.addEventListener('submit', async (event) => {
 loadTasks()
 loadProjects()
 loadSatelliteSummary()
+loadFiles()
 loadModels()
+
+scanFilesButton.addEventListener('click', async () => {
+  try {
+    const result = await request('/api/files/scan', { method: 'POST' })
+    fileStatus.textContent = `Scanned ${result.paths.length} user files (${result.inserted} new).`
+    fileStatus.classList.remove('is-error')
+    await loadFiles()
+  } catch (error) {
+    fileStatus.textContent = `Could not scan user files: ${error.message}`
+    fileStatus.classList.add('is-error')
+  }
+})

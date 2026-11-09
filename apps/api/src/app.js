@@ -1,12 +1,5 @@
-/**
- * Objective: Implement and maintain apps/api/src/app.js.
- * Requirements: Keep the implementation aligned with the documented API, tests, and repository conventions.
- * Decisions: Follow existing patterns and avoid changing unrelated behavior.
- * Relevant Files: apps/api/src/app.js
- * Important Context: User file. Vendor and transient artifacts are excluded from tracking.
- * Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
- */
 import express from 'express'
+import { execFileSync } from 'node:child_process'
 import { createResourceMonitor } from './resourceMonitor.js'
 import { createAdaptiveCpuLimit } from './adaptiveCpuLimit.js'
 import { buildTaskPrompt } from './localAiPrompt.js'
@@ -35,6 +28,24 @@ const TASK_TEXT_LIMITS = {
   ...Object.fromEntries(
     PLANNING_TEXT_FIELDS.map((field) => [field, MAX_PLANNING_TEXT_LENGTH])
   )
+}
+const USER_FILE_TEXT_FIELDS = [
+  'objective', 'requirements', 'decisions', 'relevant_files', 'important_context',
+  'work_completed', 'work_active', 'work_blocked', 'next_move'
+]
+const USER_FILE_TEXT_LIMITS = Object.fromEntries(
+  USER_FILE_TEXT_FIELDS.map((field) => [field, MAX_PLANNING_TEXT_LENGTH])
+)
+const USER_FILE_TEXT_LABELS = {
+  objective: 'Objective',
+  requirements: 'Requirements',
+  decisions: 'Decisions',
+  relevant_files: 'Relevant files',
+  important_context: 'Important context',
+  work_completed: 'Work completed',
+  work_active: 'Active work',
+  work_blocked: 'Blocked work',
+  next_move: 'Next move'
 }
 const TASK_TEXT_LABELS = {
   description: 'Description',
@@ -246,6 +257,42 @@ function validateTaskInput(body, { partial = false } = {}) {
     }
     if (body[field].length > maxLength) {
       return `${TASK_TEXT_LABELS[field]} must be at most ${maxLength} characters.`
+    }
+  }
+
+  if (partial && Object.keys(body).length === 0) {
+    return 'Provide at least one field to update.'
+  }
+
+  return null
+}
+
+function validateUserFileInput(body, { partial = false } = {}) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return 'Request body must be a JSON object.'
+  }
+
+  const allowedFields = new Set(['path', ...USER_FILE_TEXT_FIELDS])
+  if (Object.keys(body).some((key) => !allowedFields.has(key))) {
+    return 'Request includes an unsupported user-file field.'
+  }
+
+  if (!partial || Object.hasOwn(body, 'path')) {
+    if (typeof body.path !== 'string' || !body.path.trim()) {
+      return 'Path must be a non-empty string.'
+    }
+    if (body.path.trim().length > 500) {
+      return 'Path must be at most 500 characters.'
+    }
+  }
+
+  for (const [field, maxLength] of Object.entries(USER_FILE_TEXT_LIMITS)) {
+    if (!Object.hasOwn(body, field)) continue
+    if (typeof body[field] !== 'string') {
+      return `${USER_FILE_TEXT_LABELS[field]} must be a string.`
+    }
+    if (body[field].length > maxLength) {
+      return `${USER_FILE_TEXT_LABELS[field]} must be at most ${maxLength} characters.`
     }
   }
 
@@ -625,6 +672,101 @@ export function createApp(database, {
     if (!database.deleteTask(id)) return response.status(404).json({ error: 'Task not found.' })
     jobStore.unlinkTask(id)
     return response.status(204).end()
+  })
+
+  function isTrackedUserFile(filePath) {
+    if (!filePath || typeof filePath !== 'string') return false
+    const normalized = filePath.replace(/\\\\/g, '/')
+    const noisePrefixes = [
+      'node_modules/', 'apps/python/.venv/', 'apps/web/dist/', 'apps/api/data/',
+      '.git/'
+    ]
+    if (noisePrefixes.some((prefix) => normalized.startsWith(prefix))) return false
+    if (normalized.split('/').includes('__pycache__')) return false
+    const extension = normalized.slice(normalized.lastIndexOf('.')).toLowerCase()
+    const allowedExtensions = new Set([
+      '.js', '.mjs', '.py', '.css', '.html', '.md', '.yml', '.yaml'
+    ])
+    if (!allowedExtensions.has(extension)) return false
+    return true
+  }
+
+  app.get('/api/files', (request, response) => {
+    response.json(database.listUserFiles({ search: request.query.search || '' }))
+  })
+
+  app.get('/api/files/:id', (request, response) => {
+    const id = parseId(request.params.id)
+    if (id === null) return response.status(400).json({ error: 'File ID must be a positive integer.' })
+    const file = database.getUserFile(id)
+    if (!file) return response.status(404).json({ error: 'User file not found.' })
+    return response.json(file)
+  })
+
+  app.post('/api/files', (request, response) => {
+    const validationError = validateUserFileInput(request.body)
+    if (validationError) return response.status(400).json({ error: validationError })
+
+    if (database.getUserFileByPath(request.body.path.trim())) {
+      return response.status(409).json({ error: 'A tracked user file already uses this path.' })
+    }
+
+    const file = database.createUserFile({
+      path: request.body.path.trim(),
+      ...Object.fromEntries(
+        USER_FILE_TEXT_FIELDS.map((field) => [
+          field,
+          (request.body[field] ?? '').trim()
+        ])
+      )
+    })
+    return response.status(201).json(file)
+  })
+
+  app.patch('/api/files/:id', (request, response) => {
+    const id = parseId(request.params.id)
+    if (id === null) return response.status(400).json({ error: 'File ID must be a positive integer.' })
+
+    const validationError = validateUserFileInput(request.body, { partial: true })
+    if (validationError) return response.status(400).json({ error: validationError })
+
+    const changes = { ...request.body }
+    if (Object.hasOwn(changes, 'path')) changes.path = changes.path.trim()
+    for (const field of USER_FILE_TEXT_FIELDS) {
+      if (Object.hasOwn(changes, field)) changes[field] = changes[field].trim()
+    }
+
+    const file = database.updateUserFile(id, changes)
+    if (!file) return response.status(404).json({ error: 'User file not found.' })
+    return response.json(file)
+  })
+
+  app.delete('/api/files/:id', (request, response) => {
+    const id = parseId(request.params.id)
+    if (id === null) return response.status(400).json({ error: 'File ID must be a positive integer.' })
+    if (!database.deleteUserFile(id)) return response.status(404).json({ error: 'User file not found.' })
+    return response.status(204).end()
+  })
+
+  app.post('/api/files/scan', (_request, response) => {
+    try {
+      const root = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+        cwd: process.cwd(),
+        encoding: 'utf8'
+      }).trim()
+      const output = execFileSync('git', ['-C', root, 'ls-files'], {
+        encoding: 'utf8'
+      })
+      const paths = output
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .filter(isTrackedUserFile)
+      const result = database.scanUserFiles(paths)
+      response.json({ ...result, paths })
+    } catch (error) {
+      response.status(500).json({ error: 'Could not scan user files.' })
+    }
   })
 
   app.use((error, _request, response, _next) => {

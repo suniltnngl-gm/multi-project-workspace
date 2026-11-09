@@ -1,11 +1,3 @@
-/**
- * Objective: Implement and maintain apps/api/src/modelScheduler.js.
- * Requirements: Keep the implementation aligned with the documented API, tests, and repository conventions.
- * Decisions: Follow existing patterns and avoid changing unrelated behavior.
- * Relevant Files: apps/api/src/modelScheduler.js
- * Important Context: User file. Vendor and transient artifacts are excluded from tracking.
- * Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
- */
 const HEALTH_TIMEOUT_MS = 5000
 const RETRY_AFTER_SECONDS = 5
 

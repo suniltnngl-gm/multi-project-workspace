@@ -1,11 +1,3 @@
-/**
- * Objective: Implement and maintain apps/api/src/index.js.
- * Requirements: Keep the implementation aligned with the documented API, tests, and repository conventions.
- * Decisions: Follow existing patterns and avoid changing unrelated behavior.
- * Relevant Files: apps/api/src/index.js
- * Important Context: User file. Vendor and transient artifacts are excluded from tracking.
- * Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
- */
 import { createApp } from './app.js'
 import { createDatabase } from './database.js'
 

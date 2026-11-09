@@ -1,11 +1,3 @@
-<!--
-Objective: Document workspace usage and APIs.
-Requirements: Keep the implementation aligned with the documented API, tests, and repository conventions.
-Decisions: Follow existing patterns and avoid changing unrelated behavior.
-Relevant Files: README.md
-Important Context: User file. Vendor and transient artifacts are excluded from tracking.
-Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
--->
 # Multi-project workspace
 
 This workspace contains a Vite frontend, an Express/Node.js API, a Python analytics satellite, and shared utilities. Both backend services read the same SQLite task store at `apps/api/data/workspace.sqlite` by default; the database is created automatically by the Node API and ignored by Git.
@@ -54,6 +46,9 @@ Set `DATABASE_PATH` to use a different SQLite file. Set `PORT` for the Node API 
 - `POST /api/tasks` — create tasks with title, project, type (`feature`, `bug`, `chore`, `test`, `docs`), priority (`low`, `medium`, `high`, `urgent`), status (`todo`, `in_progress`, `blocked`, `done`), description, acceptance criteria, objectives, requirements, decisions, relevant files, important context, and work state (`work_completed`, `work_active`, `work_blocked`, `next_move`)
 - `PATCH /api/tasks/:id` — update any of those task fields; `completed` remains supported for older clients and maps to `done`/`todo`
 - `DELETE /api/tasks/:id` — delete a task
+- `GET /api/files` — list centrally tracked user files; supports `search`
+- `POST /api/files/scan` — scan tracked Git files and register user files, excluding vendor/transient paths
+- `POST /api/files`, `PATCH /api/files/:id`, `DELETE /api/files/:id` — manage user-file metadata
 - `GET /api/models` — list the model registry, including in-process request/failure metrics and any configured quota budget
 - `GET /api/local-ai/status` — report each model's live state, session state, resource limits, and metrics
 - `POST /api/local-ai/refine-task` — draft a task with an auto-selected or explicitly named model; pass `task_id` to link the run to an existing task

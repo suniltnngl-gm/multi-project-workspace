@@ -1,11 +1,3 @@
-/**
- * Objective: Implement and maintain apps/api/src/resourceMonitor.js.
- * Requirements: Keep the implementation aligned with the documented API, tests, and repository conventions.
- * Decisions: Follow existing patterns and avoid changing unrelated behavior.
- * Relevant Files: apps/api/src/resourceMonitor.js
- * Important Context: User file. Vendor and transient artifacts are excluded from tracking.
- * Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
- */
 import { readdir, readFile } from 'node:fs/promises'
 import os from 'node:os'
 import { setTimeout as delay } from 'node:timers/promises'

@@ -1,11 +1,3 @@
-/**
- * Objective: Implement and maintain apps/api/src/adaptiveCpuLimit.js.
- * Requirements: Keep the implementation aligned with the documented API, tests, and repository conventions.
- * Decisions: Follow existing patterns and avoid changing unrelated behavior.
- * Relevant Files: apps/api/src/adaptiveCpuLimit.js
- * Important Context: User file. Vendor and transient artifacts are excluded from tracking.
- * Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
- */
 const OBSERVATION_INTERVAL_MS = 5000
 const OVERLOAD_DURATION_MS = 10000
 const RECOVERY_DURATION_MS = 30000

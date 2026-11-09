@@ -1,12 +1,4 @@
 /**
- * Objective: Implement and maintain apps/api/src/taskJobStore.js.
- * Requirements: Keep the implementation aligned with the documented API, tests, and repository conventions.
- * Decisions: Follow existing patterns and avoid changing unrelated behavior.
- * Relevant Files: apps/api/src/taskJobStore.js
- * Important Context: User file. Vendor and transient artifacts are excluded from tracking.
- * Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
- */
-/**
  * Queue for long-running model calls such as Kaggle batches. Jobs may be
  * persisted through an optional repository so an API restart can report them
  * instead of silently forgetting a running kernel.

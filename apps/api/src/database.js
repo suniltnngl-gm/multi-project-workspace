@@ -1,11 +1,3 @@
-/**
- * Objective: Implement and maintain apps/api/src/database.js.
- * Requirements: Keep the implementation aligned with the documented API, tests, and repository conventions.
- * Decisions: Follow existing patterns and avoid changing unrelated behavior.
- * Relevant Files: apps/api/src/database.js
- * Important Context: User file. Vendor and transient artifacts are excluded from tracking.
- * Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
- */
 import { mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -98,6 +90,23 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
   const connection = new Database(resolvedPath)
   connection.pragma('journal_mode = WAL')
   connection.pragma('foreign_keys = ON')
+  connection.exec(`
+    CREATE TABLE IF NOT EXISTS user_files (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      path TEXT NOT NULL UNIQUE CHECK(length(trim(path)) BETWEEN 1 AND 500),
+      objective TEXT NOT NULL DEFAULT '',
+      requirements TEXT NOT NULL DEFAULT '',
+      decisions TEXT NOT NULL DEFAULT '',
+      relevant_files TEXT NOT NULL DEFAULT '',
+      important_context TEXT NOT NULL DEFAULT '',
+      work_completed TEXT NOT NULL DEFAULT '',
+      work_active TEXT NOT NULL DEFAULT '',
+      work_blocked TEXT NOT NULL DEFAULT '',
+      next_move TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `)
   connection.exec(`
     CREATE TABLE IF NOT EXISTS tasks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -432,6 +441,38 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     return readTask(id)
   })
 
+    const listUserFilesStatement = connection.prepare(
+      'SELECT * FROM user_files ORDER BY path COLLATE NOCASE'
+    )
+    const getUserFileStatement = connection.prepare('SELECT * FROM user_files WHERE id = ?')
+    const getUserFileByPathStatement = connection.prepare('SELECT * FROM user_files WHERE path = ?')
+    const insertUserFileStatement = connection.prepare(
+      'INSERT INTO user_files (path, objective, requirements, decisions, relevant_files, important_context, work_completed, work_active, work_blocked, next_move, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    )
+    const updateUserFileStatement = connection.prepare(
+      'UPDATE user_files SET path = ?, objective = ?, requirements = ?, decisions = ?, relevant_files = ?, important_context = ?, work_completed = ?, work_active = ?, work_blocked = ?, next_move = ?, updated_at = ? WHERE id = ?'
+    )
+    const deleteUserFileStatement = connection.prepare('DELETE FROM user_files WHERE id = ?')
+
+    function toUserFile(row) {
+      if (!row) return null
+      return {
+        id: row.id,
+        path: row.path,
+        objective: row.objective,
+        requirements: row.requirements,
+        decisions: row.decisions,
+        relevant_files: row.relevant_files,
+        important_context: row.important_context,
+        work_completed: row.work_completed,
+        work_active: row.work_active,
+        work_blocked: row.work_blocked,
+        next_move: row.next_move,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+      }
+    }
+
   return {
     listTasks(filters = {}) {
       const conditions = []
@@ -567,6 +608,81 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     },
     pruneQuotaBefore(cutoff) {
       return pruneQuotaStatement.run(cutoff).changes
+    },
+    listUserFiles({ search = '' } = {}) {
+      if (search) {
+        const like = `%${String(search).replace(/[\\%_]/g, '\\$&')}%`
+        return connection.prepare(
+          'SELECT * FROM user_files WHERE path LIKE ? ESCAPE \'\\\' OR objective LIKE ? ESCAPE \'\\\' OR requirements LIKE ? ESCAPE \'\\\' OR decisions LIKE ? ESCAPE \'\\\' OR relevant_files LIKE ? ESCAPE \'\\\' OR important_context LIKE ? ESCAPE \'\\\' OR work_completed LIKE ? ESCAPE \'\\\' OR work_active LIKE ? ESCAPE \'\\\' OR work_blocked LIKE ? ESCAPE \'\\\' OR next_move LIKE ? ESCAPE \'\\\' ORDER BY path COLLATE NOCASE'
+        ).all(...Array(10).fill(like)).map(toUserFile)
+      }
+      return listUserFilesStatement.all().map(toUserFile)
+    },
+    getUserFile(id) {
+      return toUserFile(getUserFileStatement.get(id))
+    },
+    getUserFileByPath(path) {
+      return toUserFile(getUserFileByPathStatement.get(path))
+    },
+    createUserFile({
+      path,
+      objective = '',
+      requirements = '',
+      decisions = '',
+      relevant_files = '',
+      important_context = '',
+      work_completed = '',
+      work_active = '',
+      work_blocked = '',
+      next_move = ''
+    }) {
+      const now = new Date().toISOString()
+      const result = insertUserFileStatement.run(
+        path, objective, requirements, decisions, relevant_files, important_context,
+        work_completed, work_active, work_blocked, next_move, now, now
+      )
+      return toUserFile(getUserFileStatement.get(Number(result.lastInsertRowid)))
+    },
+    updateUserFile(id, changes) {
+      const current = toUserFile(getUserFileStatement.get(id))
+      if (!current) return null
+      const next = {
+        path: changes.path ?? current.path,
+        objective: changes.objective ?? current.objective,
+        requirements: changes.requirements ?? current.requirements,
+        decisions: changes.decisions ?? current.decisions,
+        relevant_files: changes.relevant_files ?? current.relevant_files,
+        important_context: changes.important_context ?? current.important_context,
+        work_completed: changes.work_completed ?? current.work_completed,
+        work_active: changes.work_active ?? current.work_active,
+        work_blocked: changes.work_blocked ?? current.work_blocked,
+        next_move: changes.next_move ?? current.next_move
+      }
+      const now = new Date().toISOString()
+      updateUserFileStatement.run(
+        next.path, next.objective, next.requirements, next.decisions, next.relevant_files,
+        next.important_context, next.work_completed, next.work_active, next.work_blocked,
+        next.next_move, now, id
+      )
+      return toUserFile(getUserFileStatement.get(id))
+    },
+    deleteUserFile(id) {
+      return deleteUserFileStatement.run(id).changes > 0
+    },
+    scanUserFiles(paths) {
+      const now = new Date().toISOString()
+      const existing = new Map(listUserFilesStatement.all().map((row) => [row.path, row]))
+      let inserted = 0
+      let updated = 0
+      for (const path of paths) {
+        if (existing.has(path)) {
+          updated += 1
+        } else {
+          insertUserFileStatement.run(path, '', '', '', '', '', '', '', '', '', now, now)
+          inserted += 1
+        }
+      }
+      return { inserted, updated, total: paths.length }
     },
     close() {
       connection.close()
