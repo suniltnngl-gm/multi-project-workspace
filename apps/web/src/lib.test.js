@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  buildDraftInput,
   buildTaskQuery,
+  formatAiRun,
   formatBudget,
   formatBusyMessage,
   formatDuration,
@@ -144,6 +146,51 @@ describe('buildTaskQuery', () => {
 
   it('returns an empty string without filters', () => {
     expect(buildTaskQuery(new FormData())).toBe('')
+  })
+})
+
+describe('buildDraftInput', () => {
+  it('keeps draftable task fields and drops save-only fields', () => {
+    const data = new FormData()
+    data.set('title', 'Draft this')
+    data.set('description', 'Notes')
+    data.set('acceptance_criteria', 'It works')
+    data.set('project', 'web')
+    data.set('task_type', 'feature')
+    data.set('priority', 'high')
+    data.set('status', 'todo')
+
+    expect(buildDraftInput(data)).toEqual({
+      title: 'Draft this',
+      description: 'Notes',
+      acceptance_criteria: 'It works',
+      project: 'web',
+      task_type: 'feature'
+    })
+  })
+})
+
+describe('formatAiRun', () => {
+  it('includes model, backend, state, phase, and duration', () => {
+    expect(formatAiRun({
+      model: 'local-0.5b',
+      backend: 'http',
+      state: 'done',
+      phase: 'finished',
+      durationMs: 2000
+    })).toBe('local-0.5b · http · done (finished) · 2s')
+  })
+
+  it('includes the error and retry hint for failed runs', () => {
+    expect(formatAiRun({
+      model: 'kaggle-3b',
+      backend: 'kaggle-cli',
+      state: 'error',
+      phase: 'finished',
+      durationMs: 65_000,
+      error: 'Kaggle runner failed.',
+      retryAfter: 30
+    })).toBe('kaggle-3b · kaggle-cli · error (finished) · 1m 5s — Kaggle runner failed. (retry in 30s)')
   })
 })
 

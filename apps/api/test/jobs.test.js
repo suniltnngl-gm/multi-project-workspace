@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, beforeEach, test } from 'node:test'
+import Database from 'better-sqlite3'
 import { createApp } from '../src/app.js'
 import { createDatabase } from '../src/database.js'
 import { createModelBudget } from '../src/modelBudget.js'
@@ -30,6 +31,21 @@ const MODELS = [
     cli: { command: 'kaggle', python: 'python3', pollIntervalSeconds: 30 }
   }
 ]
+
+const LOCAL_MODEL = {
+  id: 'local-0.5b',
+  label: 'Qwen2.5-Coder 0.5B (local)',
+  provider: 'local',
+  execution: 'live',
+  backend: 'http',
+  callable: true,
+  autoSelect: true,
+  remote: false,
+  priority: 10,
+  minAvailableMemoryMb: 0,
+  timeoutMs: 120000,
+  url: 'http://127.0.0.1:8080'
+}
 
 const idleMetrics = async () => ({
   loadAverage: 0.1,
@@ -320,4 +336,262 @@ test('background jobs validate input and require an explicit model', async () =>
 
     assert.equal(called, false)
   })
+})
+
+test('legacy job tables gain task and backend columns without losing rows', async () => {
+  const migrationDirectory = await mkdtemp(join(tmpdir(), 'workspace-jobs-migrate-'))
+  const path = join(migrationDirectory, 'legacy.sqlite')
+  const connection = new Database(path)
+  connection.exec(`
+    CREATE TABLE ai_jobs (
+      id TEXT PRIMARY KEY,
+      state TEXT NOT NULL,
+      phase TEXT NOT NULL DEFAULT 'queued',
+      model TEXT NOT NULL,
+      title TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      started_at INTEGER,
+      finished_at INTEGER,
+      result TEXT,
+      error TEXT,
+      status INTEGER
+    )
+  `)
+  connection.prepare(`
+    INSERT INTO ai_jobs (id, state, phase, model, title, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run('job-1', 'done', 'finished', 'kaggle-3b', 'Old job', 1000)
+  connection.close()
+
+  const migrated = createDatabase(path)
+  try {
+    const [job] = migrated.listJobs()
+    assert.equal(job.id, 'job-1')
+    assert.equal(job.taskId, undefined)
+    assert.equal(job.backend, undefined)
+
+    const task = migrated.createTask({ title: 'Migrated link' })
+    migrated.saveJob({ ...job, taskId: task.id, backend: 'kaggle-cli' })
+    const [run] = migrated.listTaskAiRuns(task.id)
+    assert.equal(run.taskId, task.id)
+    assert.equal(run.backend, 'kaggle-cli')
+  } finally {
+    migrated.close()
+    await rm(migrationDirectory, { recursive: true, force: true })
+  }
+})
+
+test('drafts link to tasks and expose newest-first AI runs', async () => {
+  await withApp({
+    models: [LOCAL_MODEL, ...MODELS],
+    turnCooldownMs: 0,
+    modelClient: {
+      probe: async () => ({ ok: true }),
+      complete: async () => JSON.stringify(DRAFT)
+    }
+  }, async (url) => {
+    const task = database.createTask({ title: 'Linked task' })
+    try {
+      const syncResponse = await fetch(`${url}/api/local-ai/refine-task`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: task.title,
+          task_id: task.id,
+          model: 'local-0.5b'
+        })
+      })
+      assert.equal(syncResponse.status, 200)
+      assert.deepEqual(await syncResponse.json(), DRAFT)
+
+      const batchResponse = await postJob(url, { task_id: task.id })
+      assert.equal(batchResponse.status, 202)
+      const batchJob = await waitForJob(url, (await batchResponse.json()).id)
+      assert.equal(batchJob.state, 'done')
+      assert.equal(batchJob.taskId, task.id)
+      assert.equal(batchJob.backend, 'kaggle-cli')
+
+      const detail = await (await fetch(`${url}/api/tasks/${task.id}`)).json()
+      assert.equal(detail.aiRuns.length, 2)
+      assert.deepEqual(
+        {
+          id: detail.aiRuns[0].id,
+          taskId: detail.aiRuns[0].taskId,
+          model: detail.aiRuns[0].model,
+          backend: detail.aiRuns[0].backend,
+          state: detail.aiRuns[0].state,
+          phase: detail.aiRuns[0].phase
+        },
+        {
+          id: batchJob.id,
+          taskId: task.id,
+          model: 'kaggle-3b',
+          backend: 'kaggle-cli',
+          state: 'done',
+          phase: 'finished'
+        }
+      )
+      assert.equal(typeof detail.aiRuns[0].durationMs, 'number')
+      assert.equal(detail.aiRuns[1].taskId, task.id)
+      assert.equal(detail.aiRuns[1].model, 'local-0.5b')
+      assert.equal(detail.aiRuns[1].backend, 'http')
+      assert.equal(detail.aiRuns[1].state, 'done')
+
+      const limited = await (await fetch(`${url}/api/tasks/${task.id}?ai_limit=1`)).json()
+      assert.equal(limited.aiRuns.length, 1)
+      assert.equal(limited.aiRuns[0].id, batchJob.id)
+
+      for (const value of ['0', '101', 'invalid']) {
+        const invalidLimit = await fetch(`${url}/api/tasks/${task.id}?ai_limit=${value}`)
+        assert.equal(invalidLimit.status, 400)
+      }
+    } finally {
+      database.deleteTask(task.id)
+    }
+  })
+})
+
+test('unlinked drafts remain unsaved and do not appear in task history', async () => {
+  await withApp({
+    models: [LOCAL_MODEL, ...MODELS],
+    modelClient: {
+      probe: async () => ({ ok: true }),
+      complete: async () => JSON.stringify(DRAFT)
+    }
+  }, async (url) => {
+    const response = await fetch(`${url}/api/local-ai/refine-task`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'New task draft', model: 'local-0.5b' })
+    })
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), DRAFT)
+    assert.deepEqual(database.listTasks(), [])
+
+    const [job] = database.listJobs()
+    assert.equal(job.taskId, undefined)
+    assert.equal(job.backend, 'http')
+  })
+})
+
+test('drafts reject invalid and unknown task ids before submission', async () => {
+  let called = false
+  await withApp({
+    models: [LOCAL_MODEL, ...MODELS],
+    modelClient: {
+      probe: async () => ({ ok: true }),
+      complete: async () => {
+        called = true
+        return JSON.stringify(DRAFT)
+      }
+    }
+  }, async (url) => {
+    for (const taskId of [0, -1, 1.5, '1']) {
+      const response = await fetch(`${url}/api/local-ai/refine-task`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'Invalid link', task_id: taskId })
+      })
+      assert.equal(response.status, 400)
+      assert.match((await response.json()).error, /Task ID must be/)
+    }
+
+    const missingSync = await fetch(`${url}/api/local-ai/refine-task`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Missing link', task_id: 999999 })
+    })
+    assert.equal(missingSync.status, 404)
+
+    const missingBatch = await postJob(url, { task_id: 999999 })
+    assert.equal(missingBatch.status, 404)
+    assert.equal(called, false)
+    assert.deepEqual(database.listJobs(), [])
+  })
+})
+
+test('task AI runs retain failure details and retry delays', async () => {
+  await withApp({
+    models: [LOCAL_MODEL, ...MODELS],
+    modelClient: {
+      probe: async () => ({ ok: true }),
+      complete: async () => {
+        throw Object.assign(new Error('Rate limited by provider.'), {
+          status: 429,
+          retryAfter: 42
+        })
+      }
+    }
+  }, async (url) => {
+    const task = database.createTask({ title: 'Failure history' })
+    try {
+      const submitted = await (await postJob(url, { task_id: task.id })).json()
+      assert.equal((await waitForJob(url, submitted.id)).state, 'error')
+
+      const detail = await (await fetch(`${url}/api/tasks/${task.id}`)).json()
+      assert.equal(detail.aiRuns.length, 1)
+      const [run] = detail.aiRuns
+      assert.equal(run.state, 'error')
+      assert.equal(run.phase, 'finished')
+      assert.equal(run.error, 'Rate limited by provider.')
+      assert.equal(run.status, 429)
+      assert.equal(run.retryAfter, 42)
+      assert.equal(typeof run.durationMs, 'number')
+    } finally {
+      database.deleteTask(task.id)
+    }
+  })
+})
+
+test('deleting a task unlinks its AI runs but keeps the job', async () => {
+  await withApp({
+    models: [LOCAL_MODEL, ...MODELS],
+    modelClient: {
+      probe: async () => ({ ok: true }),
+      complete: async () => JSON.stringify(DRAFT)
+    }
+  }, async (url) => {
+    const task = database.createTask({ title: 'Delete linked task' })
+    const submitted = await (await postJob(url, { task_id: task.id })).json()
+    const finished = await waitForJob(url, submitted.id)
+    assert.equal(finished.taskId, task.id)
+
+    const deleted = await fetch(`${url}/api/tasks/${task.id}`, { method: 'DELETE' })
+    assert.equal(deleted.status, 204)
+
+    const jobResponse = await fetch(`${url}/api/local-ai/jobs/${submitted.id}`)
+    assert.equal(jobResponse.status, 200)
+    const job = await jobResponse.json()
+    assert.equal(job.taskId, undefined)
+    assert.equal(job.state, 'done')
+    assert.equal(database.listTaskAiRuns(task.id), null)
+  })
+})
+
+test('terminal job history is pruned by count', async () => {
+  const historyDirectory = await mkdtemp(join(tmpdir(), 'workspace-jobs-history-'))
+  const persisted = createDatabase(join(historyDirectory, 'history.sqlite'))
+  try {
+    const store = createTaskJobStore({ maxJobs: 2, repository: persisted })
+    const ids = []
+    for (let index = 1; index <= 3; index += 1) {
+      const submitted = store.submit({
+        model: 'kaggle-3b',
+        title: `Pruned job ${index}`,
+        runner: async () => DRAFT
+      })
+      await store.wait(submitted.id)
+      ids.push(submitted.id)
+    }
+
+    assert.equal(persisted.listJobs().length, 2)
+    assert.deepEqual(
+      persisted.listJobs().map((job) => job.id).sort(),
+      ids.slice(1).sort()
+    )
+    assert.equal(store.get(ids[0]), undefined)
+  } finally {
+    persisted.close()
+    await rm(historyDirectory, { recursive: true, force: true })
+  }
 })

@@ -1,7 +1,9 @@
 import './style.css'
 import { getProjectCards, workspaceSummary } from '../../../packages/shared/index.js'
 import {
+  buildDraftInput,
   buildTaskQuery,
+  formatAiRun,
   formatBusyMessage,
   formatJobProgress,
   formatModelMeta,
@@ -308,7 +310,11 @@ function createEditForm(task) {
   const save = document.createElement('button')
   save.type = 'submit'
   save.textContent = 'Save changes'
-  actions.append(save, makeButton('Cancel', 'secondary-button', 'cancel-edit'))
+  actions.append(
+    makeButton('Draft with AI', 'secondary-button', 'draft-edit'),
+    save,
+    makeButton('Cancel', 'secondary-button', 'cancel-edit')
+  )
   form.append(actions)
   return form
 }
@@ -437,6 +443,68 @@ function renderTaskActivity(task) {
   return details
 }
 
+function renderTaskAiRuns(runs) {
+  const details = document.createElement('details')
+  details.className = 'task-ai-runs'
+  details.open = true
+
+  const summary = document.createElement('summary')
+  summary.textContent = `AI runs (${runs.length})`
+  details.append(summary)
+
+  if (runs.length === 0) {
+    const empty = document.createElement('p')
+    empty.className = 'ai-run-empty'
+    empty.textContent = 'No AI runs linked to this task yet.'
+    details.append(empty)
+    return details
+  }
+
+  const list = document.createElement('ol')
+  list.className = 'ai-run-list'
+  for (const run of runs) {
+    const entry = document.createElement('li')
+    entry.className = `ai-run ai-run-${run.state}`
+    const message = document.createElement('span')
+    message.className = 'ai-run-message'
+    message.textContent = formatAiRun(run)
+    const time = document.createElement('time')
+    if (run.createdAt) {
+      const createdAt = new Date(run.createdAt)
+      if (!Number.isNaN(createdAt.valueOf())) {
+        time.dateTime = createdAt.toISOString()
+        time.title = time.dateTime
+        time.textContent = formatRelativeTime(run.createdAt)
+      }
+    }
+    entry.append(message, time)
+    list.append(entry)
+  }
+  details.append(list)
+  return details
+}
+
+function renderTaskHistory(task) {
+  const wrapper = document.createElement('div')
+  wrapper.className = 'task-history'
+  wrapper.append(renderTaskActivity(task))
+  wrapper.append(renderTaskAiRuns(task.aiRuns ?? []))
+  return wrapper
+}
+
+async function refreshTaskHistory(taskId) {
+  try {
+    const detail = await request(`/api/tasks/${taskId}`)
+    const item = taskList.querySelector(`.task-item[data-task-id="${taskId}"]`)
+    if (!item) return
+    item.querySelector('.task-history')?.remove()
+    item.append(renderTaskHistory(detail))
+  } catch {
+    // A deleted task or a transient read failure should not replace the
+    // draft status with an unrelated history error.
+  }
+}
+
 function renderTasks() {
   taskList.replaceChildren()
   taskCount.textContent = `${tasks.length} shown`
@@ -546,23 +614,25 @@ async function waitForJob(jobId, signal) {
   }
 }
 
-draftTaskButton.addEventListener('click', async () => {
+async function draftTaskIntoForm({ form, taskId, button }) {
   if (draftController) {
     draftController.abort()
     return
   }
 
-  const title = taskForm.elements.title.value.trim()
+  const title = form.elements.title.value.trim()
   if (!title) {
-    taskForm.elements.title.focus()
+    form.elements.title.focus()
     showStatus('Enter a task title before asking the model to draft it.')
     return
   }
 
   const controller = new AbortController()
+  const defaultLabel = button.dataset.defaultLabel ?? button.textContent
+  button.dataset.defaultLabel = defaultLabel
   draftController = controller
-  draftTaskButton.textContent = 'Cancel draft'
-  draftTaskButton.setAttribute('aria-label', 'Cancel the waiting task draft')
+  button.textContent = 'Cancel draft'
+  button.setAttribute('aria-label', 'Cancel the waiting task draft')
   const signal = controller.signal
 
   try {
@@ -597,7 +667,8 @@ draftTaskButton.addEventListener('click', async () => {
         continue
       }
 
-      const body = Object.fromEntries(new FormData(taskForm))
+      const body = buildDraftInput(new FormData(form))
+      if (taskId !== undefined) body.task_id = taskId
       if (selectedId) body.model = selectedId
       showStatus(selected ? `Drafting with ${selected.label}…` : 'Local model is idle. Drafting a task brief…')
 
@@ -633,9 +704,13 @@ draftTaskButton.addEventListener('click', async () => {
     }
 
     if (draft) {
-      taskForm.elements.description.value = draft.description
-      taskForm.elements.acceptance_criteria.value = draft.acceptance_criteria
-      showStatus('Draft ready. Review it and edit as needed before adding the task.')
+      form.elements.description.value = draft.description
+      form.elements.acceptance_criteria.value = draft.acceptance_criteria
+      showStatus(
+        taskId === undefined
+          ? 'Draft ready. Review it and edit as needed before adding the task.'
+          : 'Draft ready. Review it and save the task to keep your edits.'
+      )
     }
   } catch (error) {
     if (error.name === 'AbortError') {
@@ -654,12 +729,17 @@ draftTaskButton.addEventListener('click', async () => {
     }
   } finally {
     activeJobId = null
+    if (taskId !== undefined) await refreshTaskHistory(taskId)
     if (draftController === controller) {
       draftController = null
-      draftTaskButton.textContent = 'Draft brief with AI'
-      draftTaskButton.removeAttribute('aria-label')
+      button.textContent = defaultLabel
+      button.removeAttribute('aria-label')
     }
   }
+}
+
+draftTaskButton.addEventListener('click', () => {
+  draftTaskIntoForm({ form: taskForm, button: draftTaskButton })
 })
 
 filterForm.addEventListener('submit', (event) => {
@@ -710,7 +790,7 @@ taskList.addEventListener('click', async (event) => {
   const task = tasks.find((candidate) => candidate.id === id)
 
   if (button.dataset.action === 'history') {
-    const current = item.querySelector('.task-activity')
+    const current = item.querySelector('.task-history')
     if (current) {
       current.remove()
       return
@@ -719,7 +799,7 @@ taskList.addEventListener('click', async (event) => {
     try {
       const detail = await request(`/api/tasks/${id}`)
       item.querySelector('.task-edit-form')?.remove()
-      item.append(renderTaskActivity(detail))
+      item.append(renderTaskHistory(detail))
     } catch (error) {
       showStatus(`Could not load task history: ${error.message}`, true)
     }
@@ -729,6 +809,12 @@ taskList.addEventListener('click', async (event) => {
     item.querySelector('.task-edit-form')?.remove()
     item.append(createEditForm(task))
     item.querySelector('.task-edit-form [name="title"]').focus()
+    return
+  }
+  if (button.dataset.action === 'draft-edit') {
+    const form = item.querySelector('.task-edit-form')
+    if (!form) return
+    await draftTaskIntoForm({ form, taskId: id, button })
     return
   }
   if (button.dataset.action === 'cancel-edit') {

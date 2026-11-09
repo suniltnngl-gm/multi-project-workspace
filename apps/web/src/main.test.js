@@ -54,6 +54,37 @@ const taskDetail = {
       action: 'created',
       createdAt: '2026-11-09T10:00:00.000Z'
     }
+  ],
+  aiRuns: [
+    {
+      id: 'job-2',
+      taskId: 1,
+      model: 'kaggle-3b',
+      backend: 'kaggle-cli',
+      state: 'error',
+      phase: 'finished',
+      title: 'Ship board',
+      createdAt: '2026-11-09T12:30:00.000Z',
+      startedAt: '2026-11-09T12:28:55.000Z',
+      finishedAt: '2026-11-09T12:30:00.000Z',
+      durationMs: 65_000,
+      error: 'Kaggle runner failed.',
+      status: 502,
+      retryAfter: 30
+    },
+    {
+      id: 'job-1',
+      taskId: 1,
+      model: 'local-0.5b',
+      backend: 'http',
+      state: 'done',
+      phase: 'finished',
+      title: 'Ship board',
+      createdAt: '2026-11-09T11:30:00.000Z',
+      startedAt: '2026-11-09T11:29:58.000Z',
+      finishedAt: '2026-11-09T11:30:00.000Z',
+      durationMs: 2000
+    }
   ]
 }
 
@@ -207,6 +238,12 @@ describe('development board', () => {
         'Priority: Medium → High',
         'Created'
       ])
+    expect(item.querySelector('.task-ai-runs summary').textContent).toBe('AI runs (2)')
+    expect([...item.querySelectorAll('.ai-run-message')].map((node) => node.textContent))
+      .toEqual([
+        'kaggle-3b · kaggle-cli · error (finished) · 1m 5s — Kaggle runner failed. (retry in 30s)',
+        'local-0.5b · http · done (finished) · 2s'
+      ])
   })
 
   it('cancels a running batch job from the draft button', async () => {
@@ -260,5 +297,51 @@ describe('development board', () => {
       expect(document.querySelector('#task-status').textContent)
         .toBe('Cancelled batch job job-1.')
     })
+  })
+
+  it('drafts an existing task with its id and refreshes linked runs', async () => {
+    let draftBody
+    vi.mocked(fetch).mockImplementation(async (path, options = {}) => {
+      if (path === '/api/local-ai/status') {
+        return jsonResponse({
+          state: 'ready',
+          models: [{
+            id: 'local-0.5b',
+            label: 'Qwen2.5-Coder 0.5B (local)',
+            execution: 'live',
+            state: 'ready'
+          }]
+        })
+      }
+      if (path === '/api/local-ai/refine-task' && options.method === 'POST') {
+        draftBody = JSON.parse(options.body)
+        return jsonResponse({
+          description: 'Drafted description.',
+          acceptance_criteria: 'Drafted criteria.'
+        })
+      }
+      if (path === '/api/tasks/1') return jsonResponse(taskDetail)
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    document.querySelector('#draft-model').value = ''
+    const item = document.querySelector('.task-item')
+    item.querySelector('button[data-action="edit"]').click()
+    const form = item.querySelector('.task-edit-form')
+    form.querySelector('button[data-action="draft-edit"]').click()
+
+    await vi.waitFor(() => {
+      expect(form.elements.description.value).toBe('Drafted description.')
+      expect(form.elements.acceptance_criteria.value).toBe('Drafted criteria.')
+    })
+
+    expect(draftBody.task_id).toBe(1)
+    expect(draftBody.title).toBe('Ship board')
+    expect(draftBody.priority).toBeUndefined()
+
+    await vi.waitFor(() => {
+      expect(item.querySelector('.task-ai-runs summary').textContent).toBe('AI runs (2)')
+    })
+    expect(item.querySelector('.ai-run-message').textContent).toContain('kaggle-3b')
   })
 })

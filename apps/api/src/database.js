@@ -39,6 +39,8 @@ function toJob(row) {
     model: row.model,
     title: row.title,
     createdAt: row.created_at,
+    ...(row.backend !== null && row.backend !== undefined ? { backend: row.backend } : {}),
+    ...(row.task_id !== null && row.task_id !== undefined ? { taskId: row.task_id } : {}),
     ...(row.started_at !== null ? { startedAt: row.started_at } : {}),
     ...(row.finished_at !== null ? { finishedAt: row.finished_at } : {}),
     ...(row.result !== null ? { result: JSON.parse(row.result) } : {}),
@@ -47,6 +49,28 @@ function toJob(row) {
     ...(row.retry_after !== null && row.retry_after !== undefined
       ? { retryAfter: row.retry_after }
       : {})
+  }
+}
+
+function toAiRun(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    model: row.model,
+    ...(row.backend !== null ? { backend: row.backend } : {}),
+    state: row.state,
+    phase: row.phase,
+    title: row.title,
+    createdAt: row.created_at,
+    ...(row.started_at !== null ? { startedAt: row.started_at } : {}),
+    ...(row.finished_at !== null ? { finishedAt: row.finished_at } : {}),
+    ...(row.started_at !== null && row.finished_at !== null
+      ? { durationMs: Math.max(0, row.finished_at - row.started_at) }
+      : {}),
+    ...(row.error !== null ? { error: row.error } : {}),
+    ...(row.status !== null ? { status: row.status } : {}),
+    ...(row.retry_after !== null ? { retryAfter: row.retry_after } : {})
   }
 }
 
@@ -90,6 +114,8 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       state TEXT NOT NULL,
       phase TEXT NOT NULL DEFAULT 'queued',
       model TEXT NOT NULL,
+      backend TEXT,
+      task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
       title TEXT NOT NULL,
       created_at INTEGER NOT NULL,
       started_at INTEGER,
@@ -141,6 +167,18 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
   if (!jobColumns.has('retry_after')) {
     connection.exec('ALTER TABLE ai_jobs ADD COLUMN retry_after INTEGER')
   }
+  if (!jobColumns.has('backend')) {
+    connection.exec('ALTER TABLE ai_jobs ADD COLUMN backend TEXT')
+  }
+  if (!jobColumns.has('task_id')) {
+    connection.exec(
+      'ALTER TABLE ai_jobs ADD COLUMN task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL'
+    )
+  }
+  connection.exec(`
+    CREATE INDEX IF NOT EXISTS idx_ai_jobs_task
+      ON ai_jobs(task_id, created_at DESC);
+  `)
   connection.exec(`
     UPDATE tasks SET status = 'done' WHERE completed = 1 AND status = 'todo';
     UPDATE tasks SET completed = CASE WHEN status = 'done' THEN 1 ELSE 0 END;
@@ -183,19 +221,32 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
   `)
   const projectsStatement = connection.prepare('SELECT DISTINCT project FROM tasks ORDER BY project COLLATE NOCASE')
   const listJobsStatement = connection.prepare(
-    'SELECT * FROM ai_jobs ORDER BY created_at ASC, id ASC'
+    'SELECT * FROM ai_jobs ORDER BY created_at ASC, rowid ASC'
+  )
+  const listTaskAiRunsStatement = connection.prepare(`
+    SELECT id, task_id, model, backend, state, phase, title, created_at,
+           started_at, finished_at, error, status, retry_after
+    FROM ai_jobs
+    WHERE task_id = ?
+    ORDER BY created_at DESC, rowid DESC
+    LIMIT ?
+  `)
+  const unlinkTaskJobsStatement = connection.prepare(
+    'UPDATE ai_jobs SET task_id = NULL WHERE task_id = ?'
   )
   const saveJobStatement = connection.prepare(`
     INSERT INTO ai_jobs (
-      id, state, phase, model, title, created_at, started_at, finished_at,
-      result, error, status, retry_after
+      id, state, phase, model, backend, task_id, title, created_at, started_at,
+      finished_at, result, error, status, retry_after
     ) VALUES (
-      @id, @state, @phase, @model, @title, @createdAt, @startedAt, @finishedAt,
-      @result, @error, @status, @retryAfter
+      @id, @state, @phase, @model, @backend, @taskId, @title, @createdAt,
+      @startedAt, @finishedAt, @result, @error, @status, @retryAfter
     )
     ON CONFLICT(id) DO UPDATE SET
       state = excluded.state,
       phase = excluded.phase,
+      backend = excluded.backend,
+      task_id = excluded.task_id,
       started_at = excluded.started_at,
       finished_at = excluded.finished_at,
       result = excluded.result,
@@ -245,6 +296,14 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     return listTaskEventsStatement.all(taskId, limit).map(toTaskEvent)
   }
 
+  function readTaskAiRuns(taskId, aiLimit = 20) {
+    const requestedLimit = Number(aiLimit)
+    const limit = Number.isFinite(requestedLimit) && requestedLimit >= 1
+      ? Math.min(100, Math.trunc(requestedLimit))
+      : 20
+    return listTaskAiRunsStatement.all(taskId, limit).map(toAiRun)
+  }
+
   const insertTaskRecord = connection.transaction((fields) => {
     const now = new Date().toISOString()
     const result = insertStatement.run(
@@ -262,6 +321,13 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     const id = Number(result.lastInsertRowid)
     insertTaskEventStatement.run(id, 'created', null, null, null, now)
     return id
+  })
+
+  const deleteTaskRecord = connection.transaction((id) => {
+    // AI runs survive task deletion but are unlinked so their history remains
+    // inspectable without pointing at a missing task.
+    unlinkTaskJobsStatement.run(id)
+    return deleteStatement.run(id).changes > 0
   })
 
   const applyTaskUpdate = connection.transaction((id, changes) => {
@@ -334,14 +400,22 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     getTask(id) {
       return readTask(id)
     },
-    getTaskDetail(id, { activityLimit = 50 } = {}) {
+    getTaskDetail(id, { activityLimit = 50, aiLimit = 20 } = {}) {
       const task = readTask(id)
       if (!task) return null
-      return { ...task, activity: readTaskActivity(id, activityLimit) }
+      return {
+        ...task,
+        activity: readTaskActivity(id, activityLimit),
+        aiRuns: readTaskAiRuns(id, aiLimit)
+      }
     },
     listTaskActivity(id, { limit = 50 } = {}) {
       if (!readTask(id)) return null
       return readTaskActivity(id, limit)
+    },
+    listTaskAiRuns(id, { limit = 20 } = {}) {
+      if (!readTask(id)) return null
+      return readTaskAiRuns(id, limit)
     },
     listProjects() {
       return projectsStatement.all().map(({ project }) => project)
@@ -370,7 +444,7 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       return applyTaskUpdate(id, changes)
     },
     deleteTask(id) {
-      return deleteStatement.run(id).changes > 0
+      return deleteTaskRecord(id)
     },
     listJobs() {
       return listJobsStatement.all().map(toJob)
@@ -381,6 +455,8 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
         state: job.state,
         phase: job.phase ?? 'queued',
         model: job.model,
+        backend: job.backend ?? null,
+        taskId: job.taskId ?? null,
         title: job.title,
         createdAt: job.createdAt,
         startedAt: job.startedAt ?? null,

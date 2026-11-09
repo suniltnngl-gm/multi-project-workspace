@@ -41,24 +41,26 @@ Set `DATABASE_PATH` to use a different SQLite file. Set `PORT` for the Node API 
 ## Task API
 
 - `GET /api/tasks` — list tasks; supports `project`, `status`, `priority`, `task_type`, and `search` filters
-- `GET /api/tasks/:id` — return one task with its newest-first activity timeline; `activity_limit` defaults to 50 and is capped at 200
+- `GET /api/tasks/:id` — return one task with its newest-first activity timeline and linked AI runs; `activity_limit` defaults to 50 and is capped at 200, `ai_limit` defaults to 20 and is capped at 100
 - `GET /api/projects` — list project names used by tasks
 - `POST /api/tasks` — create tasks with title, project, type (`feature`, `bug`, `chore`, `test`, `docs`), priority (`low`, `medium`, `high`, `urgent`), status (`todo`, `in_progress`, `blocked`, `done`), description, and acceptance criteria
 - `PATCH /api/tasks/:id` — update any of those task fields; `completed` remains supported for older clients and maps to `done`/`todo`
 - `DELETE /api/tasks/:id` — delete a task
 - `GET /api/models` — list the model registry, including in-process request/failure metrics and any configured quota budget
 - `GET /api/local-ai/status` — report each model's live state, session state, resource limits, and metrics
-- `POST /api/local-ai/refine-task` — draft a task with an auto-selected or explicitly named model
-- `POST /api/local-ai/jobs` — start a background draft job; requires `model` in the body
-- `GET /api/local-ai/jobs` / `GET /api/local-ai/jobs/:id` — list or poll background jobs (`queued`, `running`, `done`, `cancelled`, or `error`) with phase and elapsed time
+- `POST /api/local-ai/refine-task` — draft a task with an auto-selected or explicitly named model; pass `task_id` to link the run to an existing task
+- `POST /api/local-ai/jobs` — start a background draft job; requires `model` in the body and accepts the same optional `task_id`
+- `GET /api/local-ai/jobs` / `GET /api/local-ai/jobs/:id` — list or poll draft jobs (`queued`, `running`, `done`, `cancelled`, or `error`) with model, backend, phase, elapsed time, error, and retry delay
 - `DELETE /api/local-ai/jobs/:id` — request cancellation of a queued or running job (`202` when accepted, `409` when it already finished)
 - `GET /health` — API health
 
 The web board supports adding, editing, filtering, searching, reprioritizing, moving tasks through the development workflow, and deleting tasks. Each task records a field-level activity timeline (creation, status, priority, project, type, title, description, and acceptance-criteria changes); the board loads it on demand from `GET /api/tasks/:id` and shows creation/updated ages on the card. Activity is stored in `task_events` and is deleted with its task. Existing SQLite task databases are migrated on startup; old completed tasks become `done`, other existing tasks retain their content with sensible defaults, and existing tasks receive a synthetic creation event so their history is not blank after the upgrade.
 
+Every draft is also recorded in `ai_jobs`, including synchronous local and serverless calls, so a task can retain its AI provenance after the transient progress indicator disappears. Jobs may carry a nullable `task_id`; drafts for a new task leave it unset and never save the task automatically. Unknown task ids are rejected before model selection. `GET /api/tasks/:id` returns at most `ai_limit` linked runs newest-first with the model, backend, state, phase, duration, error, and `retryAfter`. Deleting a task unlinks its AI runs instead of deleting them, so the run remains inspectable through the job API without referencing a missing task. Terminal jobs are pruned by count (`50` by default), which bounds the persisted history; queued or running jobs are never pruned.
+
 ## Local task assistant
 
-The board's **Draft brief with AI** action asks a selected model to refine a task description and acceptance criteria. The result is only placed into the form for review; it is never saved automatically. Start the local models separately:
+The board's **Draft brief with AI** action on the create form, and **Draft with AI** on an existing task's edit form, ask a selected model to refine a task description and acceptance criteria. Existing drafts send their `task_id` so the run appears in that task's AI-run history; the result is only placed into the form for review and is never saved automatically. Draft input excludes fields the model does not need, such as priority and status. Start the local models separately:
 
 ```sh
 ./workspace local-ai        # start every installed model within memory limits
@@ -80,7 +82,7 @@ GPU capacity varies by account and time; if `colab new` reports `Service Unavail
 
 The CLI backend uses `colab exec`, not `colab ssh --proxy-mode`. Google's free-tier Colab FAQ disallows remote control such as SSH shells, remote desktops, and bypassing the notebook UI to interact primarily via a web UI; an SSH tunnel to a long-lived model server would fall under that restriction. A paid Colab plan with a positive compute-unit balance, Colab Enterprise, or compute you control is the compliant way to expose a persistent endpoint. The `COLAB_AI_URL` HTTP override is intended for such environments.
 
-The board's **Draft model** picker lists every callable model. `Auto` prefers the local models; selecting `colab-3b` or `kaggle-3b` targets it explicitly. Kaggle drafts use the background job API and are polled by the board, so a long batch does not hold one HTTP request open. Job phase and elapsed time appear in the board's status line, and pressing **Cancel draft** sends `DELETE /api/local-ai/jobs/:id` so the runner can abort the CLI process. Jobs persist in SQLite; after an API restart, jobs that were queued or running are reported as interrupted rather than silently forgotten. The model roster shows each model's session state, in-process request/failure counts, last duration, and any configured quota budget.
+The board's **Draft model** picker lists every callable model. `Auto` prefers the local models; selecting `colab-3b` or `kaggle-3b` targets it explicitly. Every draft is submitted through the job layer. Kaggle drafts are polled by the board, so a long batch does not hold one HTTP request open; local and serverless drafts are awaited by the request but still persist their provenance. Job phase and elapsed time appear in the board's status line, and pressing **Cancel draft** sends `DELETE /api/local-ai/jobs/:id` so the runner can abort the CLI process. Jobs persist in SQLite; after an API restart, jobs that were queued or running are reported as interrupted rather than silently forgotten. Runs linked to a task appear in that task's AI-run history with the selected model and backend. The model roster shows each model's session state, in-process request/failure counts, last duration, and any configured quota budget.
 
 Set `COLAB_AI_MAX_REQUESTS_PER_DAY` or `KAGGLE_AI_MAX_REQUESTS_PER_DAY` to cap quota-backed remote requests. Counters persist in SQLite (`ai_quota`) and reset at UTC midnight; a request over the limit returns `429` with the remaining budget. Kaggle CLI 2.2.5 has no `kaggle kernels cancel` command, so cancellation after a timeout is best-effort: the runner tries `kaggle kernels cancel`, and only when `KAGGLE_AI_CANCEL_FALLBACK=delete` is set does it fall back to deleting the private kernel. Deletion stops the run but removes the private notebook, which the next submission recreates. If the queued kernel cannot be cancelled, stop it from the Kaggle website.
 

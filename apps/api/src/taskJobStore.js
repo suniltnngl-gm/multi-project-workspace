@@ -2,6 +2,10 @@
  * Queue for long-running model calls such as Kaggle batches. Jobs may be
  * persisted through an optional repository so an API restart can report them
  * instead of silently forgetting a running kernel.
+ *
+ * Every draft call is recorded here, including synchronous local and
+ * serverless calls, so a task can show its complete AI provenance. The queue
+ * keeps at most `maxJobs` terminal jobs in memory and in the repository.
  */
 export function createTaskJobStore({
   maxJobs = 50,
@@ -9,6 +13,7 @@ export function createTaskJobStore({
   repository
 } = {}) {
   const jobs = new Map()
+  const waiters = new Map()
   let nextId = 1
 
   if (repository) {
@@ -23,6 +28,10 @@ export function createTaskJobStore({
     }
   }
 
+  function terminal(job) {
+    return job.state === 'done' || job.state === 'error' || job.state === 'cancelled'
+  }
+
   function storedJob(job) {
     return {
       id: job.id,
@@ -31,6 +40,8 @@ export function createTaskJobStore({
       model: job.model,
       title: job.title,
       createdAt: job.createdAt,
+      ...(job.backend !== undefined ? { backend: job.backend } : {}),
+      ...(job.taskId !== undefined ? { taskId: job.taskId } : {}),
       ...(job.startedAt !== undefined ? { startedAt: job.startedAt } : {}),
       ...(job.finishedAt !== undefined ? { finishedAt: job.finishedAt } : {}),
       ...(job.result !== undefined ? { result: job.result } : {}),
@@ -53,7 +64,10 @@ export function createTaskJobStore({
     return {
       ...storedJob(job),
       ...(job.startedAt !== undefined
-        ? { elapsedMs: Math.max(0, end - job.startedAt) }
+        ? {
+            elapsedMs: Math.max(0, end - job.startedAt),
+            durationMs: Math.max(0, end - job.startedAt)
+          }
         : {}),
       cancelable: (job.state === 'queued' || job.state === 'running')
         && !job.cancelRequested,
@@ -61,17 +75,24 @@ export function createTaskJobStore({
     }
   }
 
+  function settle(job) {
+    const pending = waiters.get(job.id)
+    if (!pending) return
+    waiters.delete(job.id)
+    for (const resolve of pending) resolve(publicJob(job))
+  }
+
   function prune() {
     if (jobs.size <= maxJobs) return
     for (const [id, job] of jobs) {
       if (jobs.size <= maxJobs) break
-      if (job.state === 'done' || job.state === 'error' || job.state === 'cancelled') {
-        jobs.delete(id)
-        try {
-          repository?.deleteJob?.(id)
-        } catch (error) {
-          console.error(`Could not prune AI job ${id}: ${error.message}`)
-        }
+      if (!terminal(job)) continue
+      jobs.delete(id)
+      waiters.delete(id)
+      try {
+        repository?.deleteJob?.(id)
+      } catch (error) {
+        console.error(`Could not prune AI job ${id}: ${error.message}`)
       }
     }
   }
@@ -86,7 +107,7 @@ export function createTaskJobStore({
     persist(job)
   }
 
-  function submit({ model, title, runner }) {
+  function submit({ model, backend, title, taskId, runner }) {
     const id = `job-${nextId++}`
     const controller = new AbortController()
     const job = {
@@ -96,6 +117,8 @@ export function createTaskJobStore({
       model,
       title,
       createdAt: now(),
+      ...(backend !== undefined ? { backend } : {}),
+      ...(taskId !== undefined ? { taskId } : {}),
       controller
     }
     jobs.set(id, job)
@@ -136,6 +159,7 @@ export function createTaskJobStore({
         job.finishedAt = now()
         delete job.controller
         persist(job)
+        settle(job)
         prune()
       }
     })
@@ -146,7 +170,7 @@ export function createTaskJobStore({
   function cancel(id) {
     const job = jobs.get(id)
     if (!job) return undefined
-    if (job.state === 'done' || job.state === 'error' || job.state === 'cancelled') {
+    if (terminal(job)) {
       return { job: publicJob(job), cancelled: false }
     }
 
@@ -157,9 +181,30 @@ export function createTaskJobStore({
       job.phase = 'finished'
       job.finishedAt = now()
       delete job.controller
+      settle(job)
     }
     persist(job)
+    prune()
     return { job: publicJob(job), cancelled: true }
+  }
+
+  function wait(id) {
+    const job = jobs.get(id)
+    if (!job) return Promise.reject(new Error(`Unknown job: ${id}.`))
+    if (terminal(job)) return Promise.resolve(publicJob(job))
+    return new Promise((resolve) => {
+      const pending = waiters.get(id) ?? []
+      pending.push(resolve)
+      waiters.set(id, pending)
+    })
+  }
+
+  function unlinkTask(taskId) {
+    for (const job of jobs.values()) {
+      if (job.taskId !== taskId) continue
+      delete job.taskId
+      persist(job)
+    }
   }
 
   function get(id) {
@@ -171,5 +216,5 @@ export function createTaskJobStore({
     return [...jobs.values()].map(publicJob)
   }
 
-  return { submit, get, list, cancel }
+  return { submit, get, list, cancel, wait, unlinkTask }
 }

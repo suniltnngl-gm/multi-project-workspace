@@ -106,6 +106,21 @@ export function formatJobProgress(job) {
   return `Batch job ${job.id} is ${phase}${elapsed}. Waiting…`
 }
 
+export function formatAiRun(run) {
+  const parts = [run.model ?? 'unknown model']
+  if (run.backend) parts.push(run.backend)
+  const state = run.state ?? 'unknown'
+  parts.push(run.phase && run.phase !== state ? `${state} (${run.phase})` : state)
+  if (Number.isFinite(run.durationMs)) parts.push(formatDuration(run.durationMs))
+
+  let text = parts.join(' · ')
+  if (run.error) {
+    text += ` — ${run.error}`
+    if (run.retryAfter !== undefined) text += ` (retry in ${run.retryAfter}s)`
+  }
+  return text
+}
+
 export function waitForRetry(milliseconds, signal) {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
@@ -130,4 +145,16 @@ export function buildTaskQuery(formData) {
     if (value) filters.set(key, value)
   }
   return filters.toString()
+}
+
+const DRAFT_FIELDS = new Set([
+  'title', 'description', 'acceptance_criteria', 'project', 'task_type'
+])
+
+export function buildDraftInput(formData) {
+  const draft = {}
+  for (const [key, value] of formData) {
+    if (DRAFT_FIELDS.has(key)) draft[key] = value
+  }
+  return draft
 }

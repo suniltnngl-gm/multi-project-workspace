@@ -103,7 +103,7 @@ function validateRefineInput(input, { requireModel = false } = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return 'Request body must be a JSON object.'
   }
-  if (Object.keys(input).some((key) => !['title', 'description', 'acceptance_criteria', 'project', 'task_type', 'model'].includes(key))) {
+  if (Object.keys(input).some((key) => !['title', 'description', 'acceptance_criteria', 'project', 'task_type', 'model', 'task_id'].includes(key))) {
     return 'Request includes an unsupported task field.'
   }
   if (!isValidText(input.title, MAX_TITLE_LENGTH) || !input.title.trim()) {
@@ -123,6 +123,12 @@ function validateRefineInput(input, { requireModel = false } = {}) {
   }
   if (input.model !== undefined && (!isValidText(input.model, 80) || !input.model.trim())) {
     return 'Model must be a non-empty model ID of at most 80 characters.'
+  }
+  if (
+    input.task_id !== undefined &&
+    (!Number.isSafeInteger(input.task_id) || input.task_id < 1)
+  ) {
+    return 'Task ID must be a positive integer.'
   }
   if (requireModel && input.model === undefined) {
     return 'Model is required for a background job.'
@@ -314,7 +320,18 @@ export function createApp(database, {
       }
     }
 
-    const task = database.getTaskDetail(id, { activityLimit })
+    let aiLimit = 20
+    if (request.query.ai_limit !== undefined) {
+      if (!/^[1-9]\d*$/.test(request.query.ai_limit)) {
+        return response.status(400).json({ error: 'AI run limit must be a positive integer.' })
+      }
+      aiLimit = Number(request.query.ai_limit)
+      if (!Number.isSafeInteger(aiLimit) || aiLimit > 100) {
+        return response.status(400).json({ error: 'AI run limit must be at most 100.' })
+      }
+    }
+
+    const task = database.getTaskDetail(id, { activityLimit, aiLimit })
     if (!task) return response.status(404).json({ error: 'Task not found.' })
     return response.json(task)
   })
@@ -326,6 +343,111 @@ export function createApp(database, {
   function withBudget(status) {
     const budget = modelBudget.snapshot(status.id)
     return budget ? { ...status, budget } : status
+  }
+
+  async function selectDraftModel(input) {
+    let selection
+    try {
+      selection = await scheduler.select(input.model?.trim())
+    } catch (error) {
+      console.error('Local AI model selection failed:', error)
+      return {
+        error: {
+          status: 503,
+          body: { error: 'Local AI model selection failed.', state: 'unavailable' }
+        }
+      }
+    }
+    if (selection.error) return { error: selection.error }
+
+    const model = selection.model
+    const budget = modelBudget.check(model.id)
+    if (!budget.ok) {
+      selection.release({ inferenceStarted: false })
+      return {
+        error: {
+          status: 429,
+          body: {
+            error: `${model.label} reached its ${quotaLimitLabel(budget)} (${budget.budget.used}/${budget.budget.limit}).`,
+            ...budget
+          }
+        }
+      }
+    }
+    return { selection, model }
+  }
+
+  function submitDraftJob(input, model, selection) {
+    const task = taskFromRefineInput(input)
+    const prompt = buildTaskPrompt(task)
+    modelBudget.record(model.id)
+
+    const runner = async ({ signal, onPhase }) => {
+      let inferenceStarted = false
+      let startedAt
+      try {
+        inferenceStarted = true
+        startedAt = Date.now()
+        modelMetrics.recordStart(model.id)
+        let content
+        try {
+          content = await modelClient.complete(model, {
+            messages: prompt.messages,
+            maxTokens: prompt.maxTokens,
+            task,
+            signal,
+            onPhase,
+            onUsage: (usage) => modelBudget.recordUsage?.(model.id, usage)
+          })
+          modelMetrics.recordSuccess(model.id, { durationMs: Date.now() - startedAt })
+        } catch (error) {
+          applyCooldown(modelBudget, model, error)
+          modelMetrics.recordError(model.id, error, {
+            durationMs: startedAt === undefined ? undefined : Date.now() - startedAt
+          })
+          throw error
+        }
+
+        try {
+          return parseAssistantDraft(content)
+        } catch (error) {
+          console.error('Could not parse local AI response:', error)
+          throw Object.assign(
+            new Error('The local model returned an invalid task draft. Please retry.'),
+            { status: 502 }
+          )
+        }
+      } finally {
+        selection.release({ inferenceStarted })
+      }
+    }
+
+    return jobStore.submit({
+      model: model.id,
+      backend: model.backend,
+      title: task.title,
+      taskId: input.task_id,
+      runner
+    })
+  }
+
+  async function startDraftJob(input) {
+    const selected = await selectDraftModel(input)
+    if (selected.error) return selected
+    if (taskNotFound(input)) {
+      selected.selection.release({ inferenceStarted: false })
+      return { error: { status: 404, body: { error: 'Task not found.' } } }
+    }
+    try {
+      return { job: submitDraftJob(input, selected.model, selected.selection) }
+    } catch (error) {
+      selected.selection.release({ inferenceStarted: false })
+      throw error
+    }
+  }
+
+  function taskNotFound(input) {
+    return input.task_id !== undefined && !database.getTask(input.task_id)
   }
 
   app.get('/api/models', (_request, response) => {
@@ -357,70 +479,24 @@ export function createApp(database, {
     if (validationError) {
       return response.status(400).json({ error: validationError })
     }
-
-    let selection
-    try {
-      selection = await scheduler.select(input.model?.trim())
-    } catch (error) {
-      console.error('Local AI model selection failed:', error)
-      return response.status(503).json({
-        error: 'Local AI model selection failed.',
-        state: 'unavailable'
-      })
-    }
-    if (selection.error) {
-      return response.status(selection.error.status).json(selection.error.body)
+    if (taskNotFound(input)) {
+      return response.status(404).json({ error: 'Task not found.' })
     }
 
-    const model = selection.model
-    const budget = modelBudget.check(model.id)
-    if (!budget.ok) {
-      selection.release({ inferenceStarted: false })
-      return response.status(429).json({
-        error: `${model.label} reached its ${quotaLimitLabel(budget)} (${budget.budget.used}/${budget.budget.limit}).`,
-        ...budget
-      })
+    const started = await startDraftJob(input)
+    if (started.error) {
+      return response.status(started.error.status).json(started.error.body)
     }
 
-    let inferenceStarted = false
-    let startedAt
-    try {
-      const task = taskFromRefineInput(input)
-      const prompt = buildTaskPrompt(task)
-
-      try {
-        inferenceStarted = true
-        startedAt = Date.now()
-        modelBudget.record(model.id)
-        modelMetrics.recordStart(model.id)
-        const content = await modelClient.complete(model, {
-          messages: prompt.messages,
-          maxTokens: prompt.maxTokens,
-          task,
-          onUsage: (usage) => modelBudget.recordUsage?.(model.id, usage)
-        })
-        modelMetrics.recordSuccess(model.id, { durationMs: Date.now() - startedAt })
-
-        try {
-          return response.json(parseAssistantDraft(content))
-        } catch (error) {
-          console.error('Could not parse local AI response:', error)
-          return response.status(502).json({ error: 'The local model returned an invalid task draft. Please retry.' })
-        }
-      } catch (error) {
-        applyCooldown(modelBudget, model, error)
-        modelMetrics.recordError(model.id, error, {
-          durationMs: startedAt === undefined ? undefined : Date.now() - startedAt
-        })
-        console.error(`Local AI request to ${model.id} failed:`, error)
-        return response.status(error.status ?? 503).json({
-          error: error.message || `The model ${model.label} is unavailable.`,
-          ...(error.retryAfter !== undefined ? { retryAfter: error.retryAfter } : {})
-        })
-      }
-    } finally {
-      selection.release({ inferenceStarted })
+    const job = await jobStore.wait(started.job.id)
+    if (job.state === 'done') return response.json(job.result)
+    if (job.state === 'cancelled') {
+      return response.status(499).json({ error: job.error || 'The draft was cancelled.' })
     }
+    return response.status(job.status ?? 503).json({
+      error: job.error || 'The local model is unavailable.',
+      ...(job.retryAfter !== undefined ? { retryAfter: job.retryAfter } : {})
+    })
   })
 
   app.get('/api/local-ai/jobs', (_request, response) => {
@@ -449,67 +525,16 @@ export function createApp(database, {
     if (validationError) {
       return response.status(400).json({ error: validationError })
     }
-
-    let selection
-    try {
-      selection = await scheduler.select(input.model.trim())
-    } catch (error) {
-      console.error('Local AI job selection failed:', error)
-      return response.status(503).json({
-        error: 'Local AI model selection failed.',
-        state: 'unavailable'
-      })
-    }
-    if (selection.error) {
-      return response.status(selection.error.status).json(selection.error.body)
+    if (taskNotFound(input)) {
+      return response.status(404).json({ error: 'Task not found.' })
     }
 
-    const model = selection.model
-    const budget = modelBudget.check(model.id)
-    if (!budget.ok) {
-      selection.release({ inferenceStarted: false })
-      return response.status(429).json({
-        error: `${model.label} reached its ${quotaLimitLabel(budget)} (${budget.budget.used}/${budget.budget.limit}).`,
-        ...budget
-      })
+    const started = await startDraftJob(input)
+    if (started.error) {
+      return response.status(started.error.status).json(started.error.body)
     }
 
-    const task = taskFromRefineInput(input)
-    const prompt = buildTaskPrompt(task)
-    modelBudget.record(model.id)
-    const job = jobStore.submit({
-      model: model.id,
-      title: task.title,
-      runner: async ({ signal, onPhase }) => {
-        let inferenceStarted = false
-        let startedAt
-        try {
-          inferenceStarted = true
-          startedAt = Date.now()
-          modelMetrics.recordStart(model.id)
-          const content = await modelClient.complete(model, {
-            messages: prompt.messages,
-            maxTokens: prompt.maxTokens,
-            task,
-            signal,
-            onPhase,
-            onUsage: (usage) => modelBudget.recordUsage?.(model.id, usage)
-          })
-          modelMetrics.recordSuccess(model.id, { durationMs: Date.now() - startedAt })
-          return parseAssistantDraft(content)
-        } catch (error) {
-          applyCooldown(modelBudget, model, error)
-          modelMetrics.recordError(model.id, error, {
-            durationMs: startedAt === undefined ? undefined : Date.now() - startedAt
-          })
-          throw error
-        } finally {
-          selection.release({ inferenceStarted })
-        }
-      }
-    })
-
-    return response.status(202).json(job)
+    return response.status(202).json(started.job)
   })
 
   app.post('/api/tasks', (request, response) => {
@@ -550,6 +575,7 @@ export function createApp(database, {
     const id = parseId(request.params.id)
     if (id === null) return response.status(400).json({ error: 'Task ID must be a positive integer.' })
     if (!database.deleteTask(id)) return response.status(404).json({ error: 'Task not found.' })
+    jobStore.unlinkTask(id)
     return response.status(204).end()
   })
 
