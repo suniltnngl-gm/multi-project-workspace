@@ -74,6 +74,19 @@ case "$command_name" in
   colab)
     run_with_env node "$ROOT_DIR/scripts/colab-session.mjs" "${2:-status}" "${3:-}"
     ;;
+  ai)
+    subcommand="${2:-doctor}"
+    case "$subcommand" in
+      doctor)
+        shift 2 || true
+        run_with_env node "$ROOT_DIR/scripts/ai-doctor.mjs" "$@"
+        ;;
+      *)
+        printf 'Usage: ./workspace ai doctor [--json] [--strict]\n' >&2
+        exit 2
+        ;;
+    esac
+    ;;
   install)
     require_npm
     require_uv
@@ -123,6 +136,7 @@ case "$command_name" in
     printf '  python   Start only the Python satellite\n'
     printf '  local-ai [all|0.5b|1.5b]  Start local models within memory limits (default: all)\n'
     printf '  colab [status|stop] [session]  Inspect or stop the reusable Colab session\n'
+    printf '  ai doctor [--json] [--strict]  Check local and remote model configuration\n'
     printf '  install  Install npm dependencies and sync the uv Python project\n'
     printf '  python-add  Add a managed Python dependency with uv\n'
     printf '  python-pip  Run uv pip against the workspace Python environment\n'
