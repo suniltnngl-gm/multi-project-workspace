@@ -67,7 +67,7 @@ The workspace tracks four models in one registry: the two local Qwen2.5-Coder mo
 
 Colab 3B calls the installed `colab` CLI (Linux or macOS, authenticated) using a reusable session (`COLAB_AI_SESSION`, default `workspace-qwen`). On the first request it checks `colab status`, creates a GPU session with `colab new --gpu T4` when needed, and bootstraps `scripts/colab_model_server.py` once inside the runtime; later requests reuse that session through `colab exec`. Kaggle 3B calls the existing batch runner `scripts/kaggle_run.py` through the `kaggle` CLI, so every request is a finite private notebook submission, not a low-latency endpoint. Its default timeout is one hour (`KAGGLE_AI_TIMEOUT_MS`), and polls default to 30 seconds (`KAGGLE_AI_POLL_INTERVAL_SECONDS`). Both CLIs use their own configured credentials; the API never reads or writes those tokens. Availability checks run `colab sessions` and `kaggle config view` (cached for one minute), so the roster reflects authentication rather than only a binary on `PATH`.
 
-The reusable Colab session keeps its GPU assigned while idle, so release it when finished:
+GPU capacity varies by account and time; if `colab new` reports `Service Unavailable`, retry later or set `COLAB_AI_GPU` to another accelerator your account can use. The reusable Colab session keeps its GPU assigned while idle, so release it when finished:
 
 ```sh
 ./workspace colab status          # list active Colab sessions
