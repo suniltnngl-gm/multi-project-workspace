@@ -206,7 +206,12 @@ function parseProfileJson(raw) {
   return result
 }
 
-function buildProfiles({ env, profiles }) {
+/**
+ * Normalize the active quota profiles from an explicit registry profile map,
+ * AI_QUOTA_PROFILES, and the legacy daily shorthand. Returns a Map keyed by
+ * model id; callers can use it for diagnostics without creating a budget.
+ */
+export function resolveQuotaProfiles({ env = process.env, profiles } = {}) {
   let result
   if (profiles instanceof Map) {
     result = new Map()
@@ -254,7 +259,7 @@ export function createModelBudget({
   repository,
   profiles
 } = {}) {
-  const configs = buildProfiles({ env, profiles })
+  const configs = resolveQuotaProfiles({ env, profiles })
   const rolling = new Map()
   const memoryBuckets = new Map()
   const usageSeen = new Map()

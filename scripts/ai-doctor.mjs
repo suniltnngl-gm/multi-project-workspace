@@ -10,6 +10,10 @@ import { accessSync, constants, existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { createModelRegistry } from '../apps/api/src/modelRegistry.js'
 import { createModelClient } from '../apps/api/src/modelClient.js'
+import {
+  checkQuotaConfiguration,
+  checkServerlessConfiguration
+} from './ai-doctor-checks.mjs'
 import { loadWorkspaceEnv, ROOT_DIR } from './env.mjs'
 
 const DEFAULT_DATABASE_PATH = resolve(ROOT_DIR, 'apps/api/data/workspace.sqlite')
@@ -54,26 +58,6 @@ function checkDatabase() {
     )
   } catch (error) {
     record('error', 'database', `Cannot write ${directory}: ${describeError(error)}`)
-  }
-}
-
-function checkBudgetConfiguration(models) {
-  const limits = {
-    'colab-3b': process.env.COLAB_AI_MAX_REQUESTS_PER_DAY,
-    'kaggle-3b': process.env.KAGGLE_AI_MAX_REQUESTS_PER_DAY
-  }
-  for (const model of models.filter((entry) => entry.remote)) {
-    const raw = limits[model.id]
-    if (raw === undefined || raw === '') {
-      record('warn', 'budget', `${model.label} has no daily request limit configured.`)
-      continue
-    }
-    const limit = Number(raw)
-    if (!Number.isFinite(limit) || limit < 0) {
-      record('error', 'budget', `${model.id} daily limit must be a non-negative number.`)
-      continue
-    }
-    record('ok', 'budget', `${model.label} is limited to ${Math.floor(limit)} requests per UTC day.`)
   }
 }
 
@@ -146,7 +130,8 @@ async function main() {
     return finish()
   }
 
-  checkBudgetConfiguration(models)
+  checks.push(...checkQuotaConfiguration(models))
+  checks.push(...checkServerlessConfiguration(models))
   checkRemoteSelection(models)
   checkSafetyOptions(models)
   await checkModels(models, createModelClient())

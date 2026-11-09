@@ -221,6 +221,7 @@ test('serverless slot is registered only when an endpoint is configured', () => 
   assert.equal(serverless.callable, true)
   assert.equal(serverless.minAvailableMemoryMb, 0)
   assert.equal(serverless.priority, 9)
+  assert.equal(serverless.apiKeyEnv, 'SERVERLESS_AI_API_KEY')
 })
 
 test('serverless defaults avoid implicit selection and JSON mode', () => {
@@ -277,6 +278,7 @@ test('multiple serverless slots register independently', () => {
   assert.equal(slotA.minAvailableMemoryMb, 0)
   assert.equal(slotA.url, 'https://a.example/openai')
   assert.equal(slotA.apiKey, 'key-a')
+  assert.equal(slotA.apiKeyEnv, 'SLOT_A_KEY')
   assert.equal(slotA.apiModel, 'provider/a')
   assert.equal(slotA.timeoutMs, 12000)
   assert.equal(slotA.autoSelect, true)
@@ -292,6 +294,7 @@ test('multiple serverless slots register independently', () => {
   assert.equal(slotB.label, 'Serverless slot-b')
   assert.equal(slotB.url, 'https://b.example/v1')
   assert.equal(slotB.apiKey, undefined)
+  assert.equal(slotB.apiKeyEnv, undefined)
   assert.equal(slotB.apiModel, undefined)
   assert.equal(slotB.timeoutMs, 60000)
   assert.equal(slotB.autoSelect, false)

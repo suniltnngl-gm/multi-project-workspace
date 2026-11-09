@@ -276,12 +276,15 @@ function readSlotText(value, label) {
 
 function buildServerlessModel(definition, config) {
   return {
-    ...definition,
     id: config.id,
     label: config.label,
+    provider: definition.provider,
+    execution: definition.execution,
+    backend: definition.backend,
+    callable: true,
+    remote: true,
     priority: config.priority,
     url: config.url,
-    callable: true,
     // An explicitly configured serverless endpoint is still opt-in: a missing
     // model does not silently spend a third-party quota.
     autoSelect: config.autoSelect,
@@ -292,8 +295,10 @@ function buildServerlessModel(definition, config) {
     supportsJsonMode: config.supportsJsonMode,
     chatPath: config.chatPath,
     healthPath: config.healthPath,
+    notes: config.notes ?? definition.notes,
     ...(config.apiModel ? { apiModel: config.apiModel } : {}),
     ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+    ...(config.apiKeyEnv ? { apiKeyEnv: config.apiKeyEnv } : {}),
     ...(config.quotaLimits ? { quotaLimits: config.quotaLimits } : {})
   }
 }
@@ -310,6 +315,7 @@ function createServerlessModel(env) {
     url,
     apiModel: readText(env, definition.apiModelEnv, ''),
     apiKey: env[definition.apiKeyEnv],
+    apiKeyEnv: definition.apiKeyEnv,
     timeoutMs: readNumber(env, definition.timeoutEnv, definition.defaultTimeoutMs),
     autoSelect: readBoolean(env, definition.autoSelectEnv, false),
     supportsJsonMode: readBoolean(env, definition.jsonModeEnv, false),
@@ -367,6 +373,8 @@ function createServerlessSlots(env) {
       url: readSlotUrl(entry.url, `${at}.url`),
       apiModel: readSlotText(entry.apiModel, `${at}.apiModel`),
       apiKey: apiKey || undefined,
+      apiKeyEnv,
+      notes: 'OpenAI-compatible endpoint configured by SERVERLESS_AI_SLOTS.',
       timeoutMs: readSlotNumber(
         entry.timeoutMs,
         `${at}.timeoutMs`,

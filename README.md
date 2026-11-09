@@ -45,7 +45,7 @@ Set `DATABASE_PATH` to use a different SQLite file. Set `PORT` for the Node API 
 - `POST /api/tasks` — create tasks with title, project, type (`feature`, `bug`, `chore`, `test`, `docs`), priority (`low`, `medium`, `high`, `urgent`), status (`todo`, `in_progress`, `blocked`, `done`), description, and acceptance criteria
 - `PATCH /api/tasks/:id` — update any of those task fields; `completed` remains supported for older clients and maps to `done`/`todo`
 - `DELETE /api/tasks/:id` — delete a task
-- `GET /api/models` — list the model registry, including in-process request/failure metrics and any configured daily budget
+- `GET /api/models` — list the model registry, including in-process request/failure metrics and any configured quota budget
 - `GET /api/local-ai/status` — report each model's live state, session state, resource limits, and metrics
 - `POST /api/local-ai/refine-task` — draft a task with an auto-selected or explicitly named model
 - `POST /api/local-ai/jobs` — start a background draft job; requires `model` in the body
@@ -79,7 +79,7 @@ GPU capacity varies by account and time; if `colab new` reports `Service Unavail
 
 The CLI backend uses `colab exec`, not `colab ssh --proxy-mode`. Google's free-tier Colab FAQ disallows remote control such as SSH shells, remote desktops, and bypassing the notebook UI to interact primarily via a web UI; an SSH tunnel to a long-lived model server would fall under that restriction. A paid Colab plan with a positive compute-unit balance, Colab Enterprise, or compute you control is the compliant way to expose a persistent endpoint. The `COLAB_AI_URL` HTTP override is intended for such environments.
 
-The board's **Draft model** picker lists every callable model. `Auto` prefers the local models; selecting `colab-3b` or `kaggle-3b` targets it explicitly. Kaggle drafts use the background job API and are polled by the board, so a long batch does not hold one HTTP request open. Job phase and elapsed time appear in the board's status line, and pressing **Cancel draft** sends `DELETE /api/local-ai/jobs/:id` so the runner can abort the CLI process. Jobs persist in SQLite; after an API restart, jobs that were queued or running are reported as interrupted rather than silently forgotten. The model roster shows each model's session state, in-process request/failure counts, last duration, and any daily budget.
+The board's **Draft model** picker lists every callable model. `Auto` prefers the local models; selecting `colab-3b` or `kaggle-3b` targets it explicitly. Kaggle drafts use the background job API and are polled by the board, so a long batch does not hold one HTTP request open. Job phase and elapsed time appear in the board's status line, and pressing **Cancel draft** sends `DELETE /api/local-ai/jobs/:id` so the runner can abort the CLI process. Jobs persist in SQLite; after an API restart, jobs that were queued or running are reported as interrupted rather than silently forgotten. The model roster shows each model's session state, in-process request/failure counts, last duration, and any configured quota budget.
 
 Set `COLAB_AI_MAX_REQUESTS_PER_DAY` or `KAGGLE_AI_MAX_REQUESTS_PER_DAY` to cap quota-backed remote requests. Counters persist in SQLite (`ai_quota`) and reset at UTC midnight; a request over the limit returns `429` with the remaining budget. Kaggle CLI 2.2.5 has no `kaggle kernels cancel` command, so cancellation after a timeout is best-effort: the runner tries `kaggle kernels cancel`, and only when `KAGGLE_AI_CANCEL_FALLBACK=delete` is set does it fall back to deleting the private kernel. Deletion stops the run but removes the private notebook, which the next submission recreates. If the queued kernel cannot be cancelled, stop it from the Kaggle website.
 
@@ -135,7 +135,7 @@ Allowed shapes are: interactive notebook execution with manual or cell-triggered
 
 ## Diagnostics and CI
 
-Run `./workspace ai doctor` before filing an AI issue. It checks Node and SQLite writability, probes each configured endpoint or CLI, reports Colab session state, validates daily budget settings, and warns about quota-spending or destructive options. It never starts a model, bootstraps a Colab session, or submits a Kaggle kernel. Add `--json` for machine-readable output; `--strict` exits nonzero when an error is found (for example when a remote CLI or endpoint is unavailable). The default advisory mode exits zero so it is safe to run while local models are stopped.
+Run `./workspace ai doctor` before filing an AI issue. It checks Node and SQLite writability, probes each configured endpoint or CLI, reports Colab session state, validates quota profiles and serverless slot configuration (model slug, key environment variable, chat/health paths, and JSON mode), and warns about quota-spending or destructive options. It never starts a model, bootstraps a Colab session, or submits a Kaggle kernel. Add `--json` for machine-readable output; `--strict` exits nonzero when an error is found (for example when a remote CLI or endpoint is unavailable). The default advisory mode exits zero so it is safe to run while local models are stopped.
 
 GitHub Actions runs lint, the full frontend/Node/Python test suite, and the production build on pushes to `master` and on pull requests (`.github/workflows/ci.yml`).
 
