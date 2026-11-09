@@ -4,6 +4,7 @@ import { createAdaptiveCpuLimit } from './adaptiveCpuLimit.js'
 import { buildTaskPrompt } from './localAiPrompt.js'
 import { createModelRegistry, publicModelDefinition } from './modelRegistry.js'
 import { createModelScheduler } from './modelScheduler.js'
+import { createModelClient } from './modelClient.js'
 import { loadWorkspaceEnv } from '../../../scripts/env.mjs'
 
 loadWorkspaceEnv()
@@ -181,7 +182,8 @@ export function createApp(database, {
   }),
   localAiUrl = LOCAL_AI_URL,
   localAiApiKey = LOCAL_AI_API_KEY,
-  models = createModelRegistry({ localAiUrl })
+  models = createModelRegistry({ localAiUrl }),
+  modelClient = createModelClient({ fetchImpl, apiKey: localAiApiKey })
 } = {}) {
   const app = express()
   const scheduler = createModelScheduler({
@@ -189,6 +191,7 @@ export function createApp(database, {
     getResourceMetrics,
     getCpuLoadLimit,
     fetchImpl,
+    probeModel: modelClient.probe,
     apiKey: localAiApiKey,
     minAvailableMemoryMb: LOCAL_AI_MIN_AVAILABLE_MEMORY_MB,
     minCpuLoad: LOCAL_AI_MIN_LOAD,
@@ -293,42 +296,22 @@ export function createApp(database, {
     const model = selection.model
     let inferenceStarted = false
     try {
-      const prompt = buildTaskPrompt({
+      const task = {
         title: input.title,
         project: input.project || 'workspace',
         task_type: input.task_type || 'feature',
         description: input.description || '',
         acceptance_criteria: input.acceptance_criteria || ''
-      })
+      }
+      const prompt = buildTaskPrompt(task)
 
       try {
         inferenceStarted = true
-        const modelKey = model.apiKey || (model.remote ? '' : localAiApiKey)
-        const modelHeaders = modelKey ? { Authorization: `Bearer ${modelKey}` } : {}
-        const modelResponse = await fetchImpl(`${model.url}/v1/chat/completions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...modelHeaders },
-          signal: AbortSignal.timeout(120000),
-          body: JSON.stringify({
-            model: model.id,
-            temperature: 0.2,
-            max_tokens: prompt.maxTokens,
-            response_format: { type: 'json_object' },
-            messages: prompt.messages
-          })
+        const content = await modelClient.complete(model, {
+          messages: prompt.messages,
+          maxTokens: prompt.maxTokens,
+          task
         })
-
-        if (!modelResponse.ok) {
-          console.error(`Local AI request to ${model.id} failed with status ${modelResponse.status}.`)
-          return response.status(502).json({ error: 'The local model rejected the request.' })
-        }
-
-        const result = await modelResponse.json()
-        const content = result.choices?.[0]?.message?.content
-        if (typeof content !== 'string' || !content.trim()) {
-          console.error('Local AI returned an empty or malformed completion.')
-          return response.status(502).json({ error: 'The local model returned an empty response.' })
-        }
 
         try {
           return response.json(parseAssistantDraft(content))
@@ -337,12 +320,9 @@ export function createApp(database, {
           return response.status(502).json({ error: 'The local model returned an invalid task draft. Please retry.' })
         }
       } catch (error) {
-        console.error('Local AI request failed:', error)
-        const status = error.name === 'TimeoutError' ? 504 : 503
-        return response.status(status).json({
-          error: status === 504
-            ? 'The local model took too long to respond.'
-            : `The configured endpoint for ${model.label} is unavailable. Start the selected local model and retry.`
+        console.error(`Local AI request to ${model.id} failed:`, error)
+        return response.status(error.status ?? 503).json({
+          error: error.message || `The model ${model.label} is unavailable.`
         })
       }
     } finally {

@@ -15,10 +15,41 @@ let database
 let server
 let baseUrl
 
+// Keep task tests on local models only: CLI-backed remote models would call
+// the real colab/kaggle executables when local resources are busy.
+const LOCAL_MODELS = [
+  {
+    id: 'local-0.5b',
+    label: 'Qwen2.5-Coder 0.5B (local)',
+    provider: 'local',
+    execution: 'live',
+    backend: 'http',
+    callable: true,
+    autoSelect: true,
+    remote: false,
+    priority: 10,
+    minAvailableMemoryMb: 1024,
+    url: 'http://127.0.0.1:8080'
+  },
+  {
+    id: 'local-1.5b',
+    label: 'Qwen2.5-Coder 1.5B (local)',
+    provider: 'local',
+    execution: 'live',
+    backend: 'http',
+    callable: true,
+    autoSelect: true,
+    remote: false,
+    priority: 20,
+    minAvailableMemoryMb: 1792,
+    url: 'http://127.0.0.1:8081'
+  }
+]
+
 before(async () => {
   directory = await mkdtemp(join(tmpdir(), 'workspace-api-'))
   database = createDatabase(join(directory, 'test.sqlite'))
-  server = createApp(database).listen(0, '127.0.0.1')
+  server = createApp(database, { models: LOCAL_MODELS }).listen(0, '127.0.0.1')
   await new Promise((resolve, reject) => {
     server.once('listening', resolve)
     server.once('error', reject)
@@ -262,6 +293,7 @@ test('task prompt router uses compact and detailed routes within the context bud
 test('local task assistant waits for low load and returns an unsaved draft', async () => {
   const prompts = []
   const app = createApp(database, {
+    models: LOCAL_MODELS,
     localAiApiKey: 'colab-test-key',
     getResourceMetrics: async () => ({
       loadAverage: 0.1,
@@ -329,6 +361,7 @@ test('local task assistant waits for low load and returns an unsaved draft', asy
 
 test('local task assistant formats structured acceptance-criteria arrays', async () => {
   const app = createApp(database, {
+    models: LOCAL_MODELS,
     getResourceMetrics: async () => ({
       loadAverage: 0.1,
       availableMemoryMb: 4096,
@@ -383,6 +416,7 @@ test('local task assistant pauses without contacting the model when any resource
 
   for (const metrics of busyMetrics) {
     const app = createApp(database, {
+      models: LOCAL_MODELS,
       getResourceMetrics: async () => metrics,
       fetchImpl: async () => {
         modelCalled = true
@@ -420,6 +454,7 @@ test('local task assistant runs one generation per model concurrently', async ()
   const secondStarted = new Promise((resolve) => { startSecond = resolve })
   const generationGate = new Promise((resolve) => { releaseGeneration = resolve })
   const app = createApp(database, {
+    models: LOCAL_MODELS,
     getResourceMetrics: async () => ({
       loadAverage: 0.1,
       availableMemoryMb: 4096,

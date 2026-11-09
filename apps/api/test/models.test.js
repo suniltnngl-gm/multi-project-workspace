@@ -106,18 +106,22 @@ function refine(url, body = {}) {
   })
 }
 
-test('registry contains two live local models and two external web models', () => {
+test('registry contains two callable local models and two CLI-backed remote models', () => {
   const models = createModelRegistry({ env: {} })
-  assert.deepEqual(models.map((model) => [model.id, model.execution]), [
-    ['local-0.5b', 'live'],
-    ['local-1.5b', 'live'],
-    ['colab-3b', 'manual'],
-    ['kaggle-3b', 'batch']
+  assert.deepEqual(models.map((model) => [model.id, model.execution, model.backend, model.autoSelect]), [
+    ['local-0.5b', 'live', 'http', true],
+    ['local-1.5b', 'live', 'http', true],
+    ['colab-3b', 'live', 'colab-cli', false],
+    ['kaggle-3b', 'batch', 'kaggle-cli', false]
   ])
   assert.equal(models[0].minAvailableMemoryMb, 1024)
   assert.equal(models[1].minAvailableMemoryMb, 1792)
   assert.equal(models[0].url, 'http://127.0.0.1:8080')
   assert.equal(models[1].url, 'http://127.0.0.1:8081')
+  assert.equal(models[2].callable, true)
+  assert.equal(models[3].callable, true)
+  assert.equal(models[2].cli.session, 'workspace-qwen')
+  assert.equal(models[3].cli.command, 'kaggle')
 
   const custom = createModelRegistry({ env: { LOCAL_AI_URL: 'http://127.0.0.1:9090/' } })
   assert.equal(custom[0].url, 'http://127.0.0.1:9090')
@@ -136,10 +140,14 @@ test('external models become live when a URL is configured', () => {
   const kaggle = models.find((model) => model.id === 'kaggle-3b')
 
   assert.equal(colab.execution, 'live')
+  assert.equal(colab.backend, 'http')
+  assert.equal(colab.autoSelect, true)
   assert.equal(colab.url, 'https://colab.example')
   assert.equal(colab.apiKey, 'colab-key')
   assert.equal(colab.minAvailableMemoryMb, 0)
   assert.equal(kaggle.execution, 'live')
+  assert.equal(kaggle.backend, 'http')
+  assert.equal(kaggle.autoSelect, true)
   assert.equal(kaggle.url, 'https://kaggle.example')
   assert.equal(kaggle.apiKey, undefined)
   assert.equal(kaggle.minAvailableMemoryMb, 0)
@@ -148,6 +156,21 @@ test('external models become live when a URL is configured', () => {
     () => createModelRegistry({ env: { COLAB_AI_URL: 'ftp://colab.example' } }),
     /must be a valid http\(s\) URL/
   )
+})
+
+test('CLI remote models opt out of automatic selection unless enabled', () => {
+  const defaults = createModelRegistry({ env: {} })
+  assert.equal(defaults.find((model) => model.id === 'colab-3b').autoSelect, false)
+  assert.equal(defaults.find((model) => model.id === 'kaggle-3b').autoSelect, false)
+
+  const enabled = createModelRegistry({ env: { COLAB_AI_AUTO_SELECT: 'true' } })
+  assert.equal(enabled.find((model) => model.id === 'colab-3b').autoSelect, true)
+  assert.equal(enabled.find((model) => model.id === 'kaggle-3b').autoSelect, false)
+
+  const disabled = createModelRegistry({
+    env: { COLAB_AI_URL: 'https://colab.example', COLAB_AI_AUTO_SELECT: 'false' }
+  })
+  assert.equal(disabled.find((model) => model.id === 'colab-3b').autoSelect, false)
 })
 
 test('launch planning starts both models only when memory permits', () => {
@@ -365,6 +388,46 @@ test('local API key is not forwarded to external models', async () => {
   })
 })
 
+test('implicit selection skips models that are not auto-selected', async () => {
+  let modelCalled = false
+  const models = [
+    MODELS[0],
+    {
+      ...MODELS[2],
+      execution: 'live',
+      backend: 'http',
+      callable: true,
+      autoSelect: false,
+      remote: true,
+      minAvailableMemoryMb: 0,
+      url: 'http://colab.test'
+    }
+  ]
+  await withApp({
+    models,
+    getResourceMetrics: async () => idleMetrics(),
+    fetchImpl: async (url) => {
+      if (url.startsWith('http://small.test/')) return new Response('', { status: 503 })
+      if (url.endsWith('/health')) return new Response('ok')
+      modelCalled = true
+      return draftResponse()
+    }
+  }, async (url) => {
+    const status = await (await fetch(`${url}/api/local-ai/status`)).json()
+    assert.equal(status.state, 'ready')
+    assert.equal(status.models.find((model) => model.id === 'colab').state, 'ready')
+
+    const implicit = await refine(url)
+    assert.equal(implicit.status, 503)
+    assert.match((await implicit.json()).error, /automatic selection/)
+    assert.equal(modelCalled, false)
+
+    const explicit = await refine(url, { model: 'colab' })
+    assert.equal(explicit.status, 200)
+    assert.equal(modelCalled, true)
+  })
+})
+
 test('models without a live endpoint cannot be selected', async () => {
   let modelCalled = false
   await withApp({
@@ -376,7 +439,7 @@ test('models without a live endpoint cannot be selected', async () => {
   }, async (url) => {
     const response = await refine(url, { model: 'colab' })
     assert.equal(response.status, 400)
-    assert.match((await response.json()).error, /manual and cannot be called live/)
+    assert.match((await response.json()).error, /cannot be called/)
     assert.equal(modelCalled, false)
   })
 })

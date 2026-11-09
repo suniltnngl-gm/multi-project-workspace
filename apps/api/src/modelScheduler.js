@@ -35,6 +35,9 @@ function modelStatus(model, extra = {}) {
     label: model.label,
     provider: model.provider,
     execution: model.execution,
+    backend: model.backend,
+    callable: model.callable,
+    autoSelect: model.autoSelect ?? true,
     priority: model.priority,
     ...(model.minAvailableMemoryMb !== undefined
       ? { minAvailableMemoryMb: model.minAvailableMemoryMb }
@@ -44,11 +47,16 @@ function modelStatus(model, extra = {}) {
   }
 }
 
+function isCallable(model) {
+  return model.callable ?? model.execution === 'live'
+}
+
 export function createModelScheduler({
   models,
   getResourceMetrics,
   getCpuLoadLimit,
   fetchImpl = fetch,
+  probeModel,
   apiKey = '',
   minAvailableMemoryMb,
   minCpuLoad,
@@ -56,8 +64,8 @@ export function createModelScheduler({
   maxDiskBusyPercent,
   turnCooldownMs
 }) {
-  const liveModels = models.filter((model) => model.execution === 'live')
-  const states = new Map(liveModels.map((model) => [model.id, { inFlight: false }]))
+  const callableModels = models.filter(isCallable)
+  const states = new Map(callableModels.map((model) => [model.id, { inFlight: false }]))
   let nextGenerationAt = 0
 
   function headersFor(model) {
@@ -78,6 +86,13 @@ export function createModelScheduler({
   }
 
   async function checkHealth(model) {
+    if (probeModel) {
+      const result = await probeModel(model)
+      if (result === true) return { ok: true }
+      if (result === false) return { ok: false }
+      return result
+    }
+
     // llama.cpp exposes /health, while generic OpenAI-compatible servers may
     // only expose /v1/models. Accept either so tunnels can be used as-is.
     for (const path of ['/health', '/v1/models']) {
@@ -86,12 +101,12 @@ export function createModelScheduler({
           headers: headersFor(model),
           signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS)
         })
-        if (response.ok) return true
+        if (response.ok) return { ok: true }
       } catch {
         // Try the next probe.
       }
     }
-    return false
+    return { ok: false }
   }
 
   async function evaluate() {
@@ -108,7 +123,7 @@ export function createModelScheduler({
     const coolingDown = now < nextGenerationAt
 
     const statuses = await Promise.all(models.map(async (model) => {
-      if (model.execution !== 'live') {
+      if (!isCallable(model)) {
         return modelStatus(model, { state: model.execution, available: false })
       }
       if (metricsError && !model.remote) {
@@ -141,11 +156,12 @@ export function createModelScheduler({
       if (busyReasons.length > 0) {
         return modelStatus(model, { state: 'busy', available: false, busyReasons })
       }
-      if (!(await checkHealth(model))) {
+      const health = await checkHealth(model)
+      if (!health.ok) {
         return modelStatus(model, {
           state: 'unavailable',
           available: false,
-          error: `Configured endpoint for ${model.label} is unavailable.`
+          error: health.error || `The endpoint for ${model.label} is unavailable.`
         })
       }
       return modelStatus(model, { state: 'ready', available: true })
@@ -198,12 +214,12 @@ export function createModelScheduler({
       if (!requested) {
         return { error: { status: 400, body: { error: `Unknown model: ${requestedModelId}.` } } }
       }
-      if (requested.execution !== 'live') {
+      if (!isCallable(requested)) {
         return {
           error: {
             status: 400,
             body: {
-              error: `${requested.label} runs as ${requested.execution} and cannot be called live.`
+              error: `${requested.label} runs as ${requested.execution} and cannot be called.`
             }
           }
         }
@@ -245,10 +261,29 @@ export function createModelScheduler({
     }
 
     const candidates = evaluation.models
-      .filter((status) => status.state === 'ready' && (!requested || status.id === requested.id))
+      .filter((status) => {
+        if (status.state !== 'ready') return false
+        return requested ? status.id === requested.id : status.autoSelect
+      })
       .sort((a, b) => b.priority - a.priority)
     const chosen = candidates.find((status) => !states.get(status.id).inFlight)
     if (!chosen) {
+      if (!requested) {
+        const busyStatuses = evaluation.models.filter((status) => status.state === 'busy')
+        if (busyStatuses.length === 0) {
+          return {
+            error: {
+              status: 503,
+              body: {
+                ...evaluation,
+                state: 'unavailable',
+                error: 'No model is available for automatic selection.',
+                models: evaluation.models
+              }
+            }
+          }
+        }
+      }
       return {
         error: {
           status: 503,

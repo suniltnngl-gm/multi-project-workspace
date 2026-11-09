@@ -12,6 +12,9 @@ export const LOCAL_MODEL_DEFINITIONS = Object.freeze([
     label: 'Qwen2.5-Coder 0.5B (local)',
     provider: 'local',
     execution: 'live',
+    backend: 'http',
+    callable: true,
+    remote: false,
     launchKey: '0.5b',
     priority: 10,
     defaultPort: 8080,
@@ -21,13 +24,18 @@ export const LOCAL_MODEL_DEFINITIONS = Object.freeze([
     modelFileEnv: 'LOCAL_AI_0_5B_MODEL',
     defaultModelFile: 'Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf',
     defaultMinAvailableMemoryMb: 1024,
-    minMemoryEnv: 'LOCAL_AI_MIN_AVAILABLE_MEMORY_MB'
+    minMemoryEnv: 'LOCAL_AI_MIN_AVAILABLE_MEMORY_MB',
+    timeoutEnv: 'LOCAL_AI_TIMEOUT_MS',
+    defaultTimeoutMs: 120000
   },
   {
     id: 'local-1.5b',
     label: 'Qwen2.5-Coder 1.5B (local)',
     provider: 'local',
     execution: 'live',
+    backend: 'http',
+    callable: true,
+    remote: false,
     launchKey: '1.5b',
     priority: 20,
     defaultPort: 8081,
@@ -36,41 +44,50 @@ export const LOCAL_MODEL_DEFINITIONS = Object.freeze([
     modelFileEnv: 'LOCAL_AI_1_5B_MODEL',
     defaultModelFile: 'Qwen2.5-Coder-1.5B-Instruct-Q4_K_M.gguf',
     defaultMinAvailableMemoryMb: 1792,
-    minMemoryEnv: 'LOCAL_AI_1_5B_MIN_AVAILABLE_MEMORY_MB'
+    minMemoryEnv: 'LOCAL_AI_1_5B_MIN_AVAILABLE_MEMORY_MB',
+    timeoutEnv: 'LOCAL_AI_TIMEOUT_MS',
+    defaultTimeoutMs: 120000
   }
 ])
 
 /**
- * Web models default to manual/batch. Setting a URL (for example a
- * user-managed tunnel to an OpenAI-compatible server in the notebook) opts the
- * model into live calls; without one the API never contacts it.
+ * Web models call the Colab/Kaggle CLIs by default. Setting an HTTP URL opts
+ * the model into a faster live endpoint instead; the CLI backend is skipped.
  */
 export const EXTERNAL_MODEL_DEFINITIONS = Object.freeze([
   {
     id: 'colab-3b',
     label: 'Qwen2.5-Coder 3B (Colab)',
     provider: 'colab',
-    execution: 'manual',
-    defaultExecution: 'manual',
+    execution: 'live',
+    backend: 'colab-cli',
+    callable: true,
     remote: true,
     priority: 8,
     urlEnv: 'COLAB_AI_URL',
     apiKeyEnv: 'COLAB_AI_API_KEY',
+    timeoutEnv: 'COLAB_AI_TIMEOUT_MS',
+    autoSelectEnv: 'COLAB_AI_AUTO_SELECT',
+    defaultTimeoutMs: 900000,
     minAvailableMemoryMb: 0,
-    notes: 'Run notebooks/colab-qwen-coder-free-tier.ipynb in Colab, or set COLAB_AI_URL to a live endpoint.'
+    notes: 'Calls a reusable Colab session through the colab CLI; set COLAB_AI_URL for a faster HTTP endpoint.'
   },
   {
     id: 'kaggle-3b',
     label: 'Qwen2.5-Coder 3B (Kaggle)',
     provider: 'kaggle',
     execution: 'batch',
-    defaultExecution: 'batch',
+    backend: 'kaggle-cli',
+    callable: true,
     remote: true,
     priority: 7,
     urlEnv: 'KAGGLE_AI_URL',
     apiKeyEnv: 'KAGGLE_AI_API_KEY',
+    timeoutEnv: 'KAGGLE_AI_TIMEOUT_MS',
+    autoSelectEnv: 'KAGGLE_AI_AUTO_SELECT',
+    defaultTimeoutMs: 3600000,
     minAvailableMemoryMb: 0,
-    notes: 'Submit notebooks/kaggle-qwen-coder.ipynb with scripts/kaggle_run.py, or set KAGGLE_AI_URL to a live endpoint.'
+    notes: 'Submits a private Kaggle notebook through the kaggle CLI; set KAGGLE_AI_URL for a faster HTTP endpoint.'
   }
 ])
 
@@ -87,6 +104,12 @@ function readNumber(env, key, fallback) {
 function readText(env, key, fallback) {
   const value = env[key]
   return value === undefined || value === '' ? fallback : value
+}
+
+function readBoolean(env, key, fallback) {
+  const value = env[key]
+  if (value === undefined || value === '') return fallback
+  return !['0', 'false', 'no', 'off'].includes(String(value).toLowerCase())
 }
 
 function trimUrl(url) {
@@ -124,12 +147,31 @@ function readUrl(env, key) {
   return trimUrl(value)
 }
 
+function createCliConfig(env) {
+  return {
+    colab: {
+      command: 'colab',
+      session: readText(env, 'COLAB_AI_SESSION', 'workspace-qwen'),
+      gpu: readText(env, 'COLAB_AI_GPU', 'T4'),
+      port: readNumber(env, 'COLAB_AI_PORT', 8765),
+      modelId: readText(env, 'COLAB_AI_MODEL', 'Qwen/Qwen2.5-Coder-3B-Instruct'),
+      bootstrapTimeoutMs: readNumber(env, 'COLAB_AI_BOOTSTRAP_TIMEOUT_MS', 1800000)
+    },
+    kaggle: {
+      command: 'kaggle',
+      python: readText(env, 'KAGGLE_AI_PYTHON', 'python3'),
+      pollIntervalSeconds: readNumber(env, 'KAGGLE_AI_POLL_INTERVAL_SECONDS', 30)
+    }
+  }
+}
+
 /**
  * Build the registry consumed by the API and the workspace launcher.
  * `localAiUrl` is kept for compatibility with older callers and tests that
  * only configured a single local endpoint.
  */
 export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
+  const cli = createCliConfig(env)
   const localModels = LOCAL_MODEL_DEFINITIONS.map((definition) => {
     const explicitPort = readNumber(env, definition.portEnv, undefined)
     const assumedPort = explicitPort ?? definition.defaultPort
@@ -142,8 +184,12 @@ export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
     return {
       ...definition,
       execution: 'live',
+      backend: 'http',
+      callable: true,
+      autoSelect: true,
       port: resolvePort(definition, env, url),
       url,
+      timeoutMs: readNumber(env, definition.timeoutEnv, definition.defaultTimeoutMs),
       minAvailableMemoryMb: readNumber(
         env,
         definition.minMemoryEnv,
@@ -154,21 +200,26 @@ export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
 
   const externalModels = EXTERNAL_MODEL_DEFINITIONS.map((definition) => {
     const url = readUrl(env, definition.urlEnv)
-    if (!url) {
-      return {
-        ...definition,
-        execution: definition.defaultExecution,
-        minAvailableMemoryMb: definition.minAvailableMemoryMb ?? 0
-      }
-    }
     const apiKey = definition.apiKeyEnv ? env[definition.apiKeyEnv] : undefined
-    return {
+    const backend = url ? 'http' : definition.backend
+    const model = {
       ...definition,
-      execution: 'live',
-      url,
-      ...(apiKey ? { apiKey } : {}),
-      minAvailableMemoryMb: definition.minAvailableMemoryMb ?? 0
+      execution: url ? 'live' : definition.execution,
+      backend,
+      callable: true,
+      // CLI-backed models opt out of implicit selection so a request without
+      // a model does not unexpectedly spend Colab/Kaggle quota. A configured
+      // HTTP endpoint is treated like any other live endpoint.
+      autoSelect: readBoolean(env, definition.autoSelectEnv, Boolean(url)),
+      timeoutMs: readNumber(env, definition.timeoutEnv, definition.defaultTimeoutMs),
+      minAvailableMemoryMb: definition.minAvailableMemoryMb ?? 0,
+      ...(url ? { url } : {}),
+      ...(apiKey ? { apiKey } : {})
     }
+
+    if (backend === 'colab-cli') model.cli = cli.colab
+    if (backend === 'kaggle-cli') model.cli = cli.kaggle
+    return model
   })
 
   return [...localModels, ...externalModels]
@@ -229,6 +280,9 @@ export function publicModelDefinition(model) {
     label: model.label,
     provider: model.provider,
     execution: model.execution,
+    backend: model.backend,
+    callable: model.callable,
+    autoSelect: model.autoSelect ?? true,
     priority: model.priority,
     ...(model.minAvailableMemoryMb !== undefined
       ? { minAvailableMemoryMb: model.minAvailableMemoryMb }
