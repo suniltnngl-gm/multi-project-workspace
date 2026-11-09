@@ -31,8 +31,7 @@ const TASK_TEXT_LIMITS = {
   )
 }
 const USER_FILE_TEXT_FIELDS = [
-  'objective', 'requirements', 'decisions', 'relevant_files', 'important_context',
-  'work_completed', 'work_active', 'work_blocked', 'next_move'
+  'objective', 'requirements', 'decisions', 'relevant_files', 'important_context'
 ]
 const USER_FILE_TEXT_LIMITS = Object.fromEntries(
   USER_FILE_TEXT_FIELDS.map((field) => [field, MAX_PLANNING_TEXT_LENGTH])
@@ -309,7 +308,7 @@ function validateFolderInput(body, { partial = false } = {}) {
     return 'Request body must be a JSON object.'
   }
 
-  const allowedFields = new Set(['path', 'objective', 'important_context'])
+  const allowedFields = new Set(['path', 'objective'])
   if (Object.keys(body).some((key) => !allowedFields.has(key))) {
     return 'Request includes an unsupported folder field.'
   }
@@ -323,13 +322,12 @@ function validateFolderInput(body, { partial = false } = {}) {
     }
   }
 
-  for (const field of ['objective', 'important_context']) {
-    if (!Object.hasOwn(body, field)) continue
-    if (typeof body[field] !== 'string') {
-      return `${field === 'objective' ? 'Objective' : 'Important context'} must be a string.`
+  if (Object.hasOwn(body, 'objective')) {
+    if (typeof body.objective !== 'string') {
+      return 'Objective must be a string.'
     }
-    if (body[field].length > MAX_PLANNING_TEXT_LENGTH) {
-      return `${field === 'objective' ? 'Objective' : 'Important context'} must be at most ${MAX_PLANNING_TEXT_LENGTH} characters.`
+    if (body.objective.length > MAX_PLANNING_TEXT_LENGTH) {
+      return `Objective must be at most ${MAX_PLANNING_TEXT_LENGTH} characters.`
     }
   }
 
@@ -830,8 +828,7 @@ export function createApp(database, {
 
     const folder = database.createFolder({
       path: request.body.path.trim(),
-      objective: (request.body.objective ?? '').trim(),
-      important_context: (request.body.important_context ?? '').trim()
+      objective: (request.body.objective ?? '').trim()
     })
     return response.status(201).json(folder)
   })
@@ -845,9 +842,7 @@ export function createApp(database, {
 
     const changes = { ...request.body }
     if (Object.hasOwn(changes, 'path')) changes.path = changes.path.trim()
-    for (const field of ['objective', 'important_context']) {
-      if (Object.hasOwn(changes, field)) changes[field] = changes[field].trim()
-    }
+    if (Object.hasOwn(changes, 'objective')) changes.objective = changes.objective.trim()
 
     const folder = database.updateFolder(id, changes)
     if (!folder) return response.status(404).json({ error: 'Folder not found.' })

@@ -40,14 +40,14 @@ test('user files can be scanned, created, updated, and deleted', async () => {
     body: JSON.stringify({
       path: 'docs/example.md',
       objective: 'Track documentation',
-      next_move: 'Review it'
+      requirements: 'Keep it concise'
     })
   })
   assert.equal(createResponse.status, 201)
   const created = await createResponse.json()
   assert.equal(created.path, 'docs/example.md')
   assert.equal(created.objective, 'Track documentation')
-  assert.equal(created.next_move, 'Review it')
+  assert.equal(created.requirements, 'Keep it concise')
 
   const duplicateResponse = await fetch(`${baseUrl}/api/files`, {
     method: 'POST',
@@ -59,10 +59,10 @@ test('user files can be scanned, created, updated, and deleted', async () => {
   const updateResponse = await fetch(`${baseUrl}/api/files/${created.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ work_completed: 'Metadata added' })
+    body: JSON.stringify({ decisions: 'Use Markdown' })
   })
   assert.equal(updateResponse.status, 200)
-  assert.equal((await updateResponse.json()).work_completed, 'Metadata added')
+  assert.equal((await updateResponse.json()).decisions, 'Use Markdown')
 
   const listResponse = await fetch(`${baseUrl}/api/files`)
   assert.equal(listResponse.status, 200)

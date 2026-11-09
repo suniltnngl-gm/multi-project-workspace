@@ -95,7 +95,6 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       path TEXT NOT NULL UNIQUE CHECK(length(trim(path)) BETWEEN 1 AND 500),
       objective TEXT NOT NULL DEFAULT '',
-      important_context TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -109,10 +108,6 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       decisions TEXT NOT NULL DEFAULT '',
       relevant_files TEXT NOT NULL DEFAULT '',
       important_context TEXT NOT NULL DEFAULT '',
-      work_completed TEXT NOT NULL DEFAULT '',
-      work_active TEXT NOT NULL DEFAULT '',
-      work_blocked TEXT NOT NULL DEFAULT '',
-      next_move TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -197,6 +192,24 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
            used
     FROM ai_budget;
   `)
+
+  for (const [tableName, columnsToDrop] of [
+    ['user_files', ['work_completed', 'work_active', 'work_blocked', 'next_move']],
+    ['folders', ['important_context']]
+  ]) {
+    const columns = new Set(
+      connection.prepare(`PRAGMA table_info(${tableName})`).all().map((column) => column.name)
+    )
+    for (const column of columnsToDrop) {
+      if (columns.has(column)) {
+        try {
+          connection.exec(`ALTER TABLE ${tableName} DROP COLUMN ${column}`)
+        } catch (error) {
+          // Older SQLite builds cannot drop columns; leave them unused.
+        }
+      }
+    }
+  }
 
   const existingColumns = new Set(
     connection.prepare('PRAGMA table_info(tasks)').all().map((column) => column.name)
@@ -457,10 +470,10 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     const getFolderStatement = connection.prepare('SELECT * FROM folders WHERE id = ?')
     const getFolderByPathStatement = connection.prepare('SELECT * FROM folders WHERE path = ?')
     const insertFolderStatement = connection.prepare(
-      'INSERT INTO folders (path, objective, important_context, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
+      'INSERT INTO folders (path, objective, created_at, updated_at) VALUES (?, ?, ?, ?)'
     )
     const updateFolderStatement = connection.prepare(
-      'UPDATE folders SET path = ?, objective = ?, important_context = ?, updated_at = ? WHERE id = ?'
+      'UPDATE folders SET path = ?, objective = ?, updated_at = ? WHERE id = ?'
     )
     const deleteFolderStatement = connection.prepare('DELETE FROM folders WHERE id = ?')
 
@@ -470,10 +483,10 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     const getUserFileStatement = connection.prepare('SELECT * FROM user_files WHERE id = ?')
     const getUserFileByPathStatement = connection.prepare('SELECT * FROM user_files WHERE path = ?')
     const insertUserFileStatement = connection.prepare(
-      'INSERT INTO user_files (path, objective, requirements, decisions, relevant_files, important_context, work_completed, work_active, work_blocked, next_move, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      'INSERT INTO user_files (path, objective, requirements, decisions, relevant_files, important_context, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
     )
     const updateUserFileStatement = connection.prepare(
-      'UPDATE user_files SET path = ?, objective = ?, requirements = ?, decisions = ?, relevant_files = ?, important_context = ?, work_completed = ?, work_active = ?, work_blocked = ?, next_move = ?, updated_at = ? WHERE id = ?'
+      'UPDATE user_files SET path = ?, objective = ?, requirements = ?, decisions = ?, relevant_files = ?, important_context = ?, updated_at = ? WHERE id = ?'
     )
     const deleteUserFileStatement = connection.prepare('DELETE FROM user_files WHERE id = ?')
 
@@ -487,10 +500,6 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
         decisions: row.decisions,
         relevant_files: row.relevant_files,
         important_context: row.important_context,
-        work_completed: row.work_completed,
-        work_active: row.work_active,
-        work_blocked: row.work_blocked,
-        next_move: row.next_move,
         createdAt: row.created_at,
         updatedAt: row.updated_at
       }
@@ -636,8 +645,8 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       if (search) {
         const like = `%${String(search).replace(/[\\%_]/g, '\\$&')}%`
         return connection.prepare(
-          'SELECT * FROM user_files WHERE path LIKE ? ESCAPE \'\\\' OR objective LIKE ? ESCAPE \'\\\' OR requirements LIKE ? ESCAPE \'\\\' OR decisions LIKE ? ESCAPE \'\\\' OR relevant_files LIKE ? ESCAPE \'\\\' OR important_context LIKE ? ESCAPE \'\\\' OR work_completed LIKE ? ESCAPE \'\\\' OR work_active LIKE ? ESCAPE \'\\\' OR work_blocked LIKE ? ESCAPE \'\\\' OR next_move LIKE ? ESCAPE \'\\\' ORDER BY path COLLATE NOCASE'
-        ).all(...Array(10).fill(like)).map(toUserFile)
+          'SELECT * FROM user_files WHERE path LIKE ? ESCAPE \'\\\' OR objective LIKE ? ESCAPE \'\\\' OR requirements LIKE ? ESCAPE \'\\\' OR decisions LIKE ? ESCAPE \'\\\' OR relevant_files LIKE ? ESCAPE \'\\\' OR important_context LIKE ? ESCAPE \'\\\' ORDER BY path COLLATE NOCASE'
+        ).all(...Array(6).fill(like)).map(toUserFile)
       }
       return listUserFilesStatement.all().map(toUserFile)
     },
@@ -653,16 +662,12 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       requirements = '',
       decisions = '',
       relevant_files = '',
-      important_context = '',
-      work_completed = '',
-      work_active = '',
-      work_blocked = '',
-      next_move = ''
+      important_context = ''
     }) {
       const now = new Date().toISOString()
       const result = insertUserFileStatement.run(
         path, objective, requirements, decisions, relevant_files, important_context,
-        work_completed, work_active, work_blocked, next_move, now, now
+        now, now
       )
       return toUserFile(getUserFileStatement.get(Number(result.lastInsertRowid)))
     },
@@ -675,17 +680,12 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
         requirements: changes.requirements ?? current.requirements,
         decisions: changes.decisions ?? current.decisions,
         relevant_files: changes.relevant_files ?? current.relevant_files,
-        important_context: changes.important_context ?? current.important_context,
-        work_completed: changes.work_completed ?? current.work_completed,
-        work_active: changes.work_active ?? current.work_active,
-        work_blocked: changes.work_blocked ?? current.work_blocked,
-        next_move: changes.next_move ?? current.next_move
+        important_context: changes.important_context ?? current.important_context
       }
       const now = new Date().toISOString()
       updateUserFileStatement.run(
         next.path, next.objective, next.requirements, next.decisions, next.relevant_files,
-        next.important_context, next.work_completed, next.work_active, next.work_blocked,
-        next.next_move, now, id
+        next.important_context, now, id
       )
       return toUserFile(getUserFileStatement.get(id))
     },
@@ -701,7 +701,7 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
         if (existing.has(path)) {
           updated += 1
         } else {
-          insertUserFileStatement.run(path, '', '', '', '', '', '', '', '', '', now, now)
+          insertUserFileStatement.run(path, '', '', '', '', '', now, now)
           inserted += 1
         }
       }
@@ -724,7 +724,6 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
         id: row.id,
         path: row.path,
         objective: row.objective,
-        importantContext: row.important_context,
         createdAt: row.created_at,
         updatedAt: row.updated_at
       }
@@ -736,14 +735,13 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
         id: row.id,
         path: row.path,
         objective: row.objective,
-        importantContext: row.important_context,
         createdAt: row.created_at,
         updatedAt: row.updated_at
       }
     },
-    createFolder({ path, objective = '', important_context = '' }) {
+    createFolder({ path, objective = '' }) {
       const now = new Date().toISOString()
-      const result = insertFolderStatement.run(path, objective, important_context, now, now)
+      const result = insertFolderStatement.run(path, objective, now, now)
       return this.getFolder(Number(result.lastInsertRowid))
     },
     updateFolder(id, changes) {
@@ -751,11 +749,10 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       if (!current) return null
       const next = {
         path: changes.path ?? current.path,
-        objective: changes.objective ?? current.objective,
-        important_context: changes.important_context ?? current.importantContext
+        objective: changes.objective ?? current.objective
       }
       const now = new Date().toISOString()
-      updateFolderStatement.run(next.path, next.objective, next.important_context, now, id)
+      updateFolderStatement.run(next.path, next.objective, now, id)
       return this.getFolder(id)
     },
     deleteFolder(id) {
@@ -770,7 +767,7 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
         if (existing.has(path)) {
           updated += 1
         } else {
-          insertFolderStatement.run(path, '', '', now, now)
+          insertFolderStatement.run(path, '', now, now)
           inserted += 1
           existing.add(path)
         }
