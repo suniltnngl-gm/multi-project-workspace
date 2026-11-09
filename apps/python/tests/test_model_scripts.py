@@ -70,6 +70,14 @@ class ModelScriptTests(unittest.TestCase):
         self.assertIn("WORKSPACE_COLAB_READY", source)
         self.assertIn('os.environ.get("WORKSPACE_MODEL_PORT", "8765")', source)
 
+    def test_server_uses_fp16_4bit_and_warms_up(self):
+        source = SERVER_PATH.read_text(encoding="utf-8")
+        self.assertIn("bnb_4bit_compute_dtype=torch.float16", source)
+        self.assertIn("torch_dtype=torch.float16", source)
+        self.assertIn("model.eval()", source)
+        self.assertIn("max_new_tokens=1", source)
+        self.assertIn("apply_chat_template", source)
+
     def test_client_requires_a_request_payload(self):
         client = load_module("colab_model_client_missing", CLIENT_PATH)
         stderr = io.StringIO()

@@ -45,14 +45,40 @@ def install_dependencies():
 
 def load_model():
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    quantization = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.float16,
+    )
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
-        device_map="auto",
-        load_in_4bit=True,
+        quantization_config=quantization,
+        device_map={"": 0},
+        torch_dtype=torch.float16,
+        attn_implementation="sdpa",
     )
+    model.eval()
+
+    # Mirror the Kaggle notebook: one tiny warmup generation initializes the
+    # 4-bit kernels so the first real request is representative and reliable.
+    warmup = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "ping"}],
+        tokenize=True,
+        add_generation_prompt=True,
+        return_tensors="pt",
+        return_dict=True,
+    ).to(model.device)
+    with torch.inference_mode():
+        model.generate(
+            **warmup,
+            max_new_tokens=1,
+            do_sample=False,
+            pad_token_id=tokenizer.eos_token_id,
+        )
     return torch, model, tokenizer
 
 
@@ -89,14 +115,13 @@ class ModelHandler(BaseHTTPRequestHandler):
             max_tokens = min(
                 int(body.get("max_tokens", 300)), MAX_NEW_TOKENS_LIMIT
             )
-            text = self.tokenizer.apply_chat_template(
+            inputs = self.tokenizer.apply_chat_template(
                 messages,
-                tokenize=False,
+                tokenize=True,
                 add_generation_prompt=True,
-            )
-            inputs = self.tokenizer(text, return_tensors="pt").to(
-                self.model.device
-            )
+                return_tensors="pt",
+                return_dict=True,
+            ).to(self.model.device)
             with self.torch.inference_mode():
                 output = self.model.generate(
                     **inputs,
