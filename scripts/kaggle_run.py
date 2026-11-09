@@ -17,8 +17,6 @@ REQUIRED_TASK_FIELDS = (
     "title",
     "project",
     "task_type",
-    "description",
-    "acceptance_criteria",
 )
 
 
@@ -37,6 +35,9 @@ def load_task(task_path):
             "Task JSON must contain non-empty string fields: "
             + ", ".join(missing)
         )
+    for field in ("description", "acceptance_criteria"):
+        if task.get(field) is None:
+            task[field] = ""
     return task
 
 

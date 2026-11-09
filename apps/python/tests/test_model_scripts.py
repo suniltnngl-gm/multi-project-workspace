@@ -4,6 +4,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,6 +15,7 @@ from unittest import mock
 ROOT_DIR = Path(__file__).resolve().parents[3]
 SERVER_PATH = ROOT_DIR / "scripts" / "colab_model_server.py"
 CLIENT_PATH = ROOT_DIR / "scripts" / "colab_model_client.py"
+KAGGLE_PATH = ROOT_DIR / "scripts" / "kaggle_run.py"
 RESULT_SENTINEL = "__WORKSPACE_MODEL_RESULT__"
 
 
@@ -27,9 +29,39 @@ def load_module(name, path):
 
 class ModelScriptTests(unittest.TestCase):
     def test_scripts_compile(self):
-        for path in (SERVER_PATH, CLIENT_PATH):
+        for path in (SERVER_PATH, CLIENT_PATH, KAGGLE_PATH):
             with self.subTest(path=path.name):
                 compile(path.read_text(encoding="utf-8"), str(path), "exec")
+
+    def test_kaggle_task_allows_optional_description_and_criteria(self):
+        module = load_module("kaggle_run_optional", KAGGLE_PATH)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "task.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "title": "Draft a task",
+                        "project": "workspace",
+                        "task_type": "feature",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            task = module.load_task(path)
+
+        self.assertEqual(task["description"], "")
+        self.assertEqual(task["acceptance_criteria"], "")
+
+    def test_kaggle_task_requires_title_project_and_type(self):
+        module = load_module("kaggle_run_required", KAGGLE_PATH)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "task.json"
+            path.write_text(json.dumps({"title": "Draft a task"}), encoding="utf-8")
+            with self.assertRaises(ValueError) as caught:
+                module.load_task(path)
+
+        self.assertIn("project", str(caught.exception))
+        self.assertIn("task_type", str(caught.exception))
 
     def test_server_bootstraps_only_when_unhealthy(self):
         source = SERVER_PATH.read_text(encoding="utf-8")
