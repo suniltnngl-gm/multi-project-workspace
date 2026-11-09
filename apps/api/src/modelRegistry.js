@@ -151,6 +151,7 @@ function createCliConfig(env) {
   return {
     colab: {
       command: 'colab',
+      probeArgs: ['sessions'],
       session: readText(env, 'COLAB_AI_SESSION', 'workspace-qwen'),
       gpu: readText(env, 'COLAB_AI_GPU', 'T4'),
       port: readNumber(env, 'COLAB_AI_PORT', 8765),
@@ -159,6 +160,7 @@ function createCliConfig(env) {
     },
     kaggle: {
       command: 'kaggle',
+      probeArgs: ['config', 'view'],
       python: readText(env, 'KAGGLE_AI_PYTHON', 'python3'),
       pollIntervalSeconds: readNumber(env, 'KAGGLE_AI_POLL_INTERVAL_SECONDS', 30)
     }

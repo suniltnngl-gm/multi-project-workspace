@@ -95,7 +95,8 @@ export function createModelClient({
 
     let ok = false
     try {
-      const args = command === 'colab' ? ['version'] : ['--version']
+      const args = model.cli.probeArgs
+        ?? (command === 'colab' ? ['version'] : ['--version'])
       await runCommand(command, args, { timeoutMs: 20000 })
       ok = true
     } catch {
@@ -117,7 +118,7 @@ export function createModelClient({
     return {
       ok: false,
       error: cliBackend
-        ? `The ${model.cli.command} CLI is not available for ${model.label}.`
+        ? `The ${model.cli.command} CLI is not installed or not authenticated for ${model.label}.`
         : `Configured endpoint for ${model.label} is unavailable.`
     }
   }

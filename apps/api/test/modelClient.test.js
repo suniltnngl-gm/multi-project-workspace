@@ -285,7 +285,7 @@ test('CLI probe failures report the missing CLI', async () => {
   })
   assert.deepEqual(await client.probe(colabModel()), {
     ok: false,
-    error: 'The colab CLI is not available for Colab model.'
+    error: 'The colab CLI is not installed or not authenticated for Colab model.'
   })
 })
 

@@ -19,6 +19,8 @@ Useful commands:
 
 - `./workspace dev` — start all services
 - `./workspace web`, `./workspace node`, `./workspace python` — start one service
+- `./workspace local-ai [all|0.5b|1.5b]` — start local models within memory limits
+- `./workspace colab [status|stop] [session]` — inspect or stop the reusable Colab session
 - `./workspace install` — install npm dependencies and sync the uv-managed Python environment
 - `./workspace python-add <package>` — add a tracked Python dependency with uv
 - `./workspace python-pip install <package>` — use uv's pip-compatible interface in the workspace environment
@@ -42,6 +44,11 @@ Set `DATABASE_PATH` to use a different SQLite file. Set `PORT` for the Node API 
 - `POST /api/tasks` — create tasks with title, project, type (`feature`, `bug`, `chore`, `test`, `docs`), priority (`low`, `medium`, `high`, `urgent`), status (`todo`, `in_progress`, `blocked`, `done`), description, and acceptance criteria
 - `PATCH /api/tasks/:id` — update any of those task fields; `completed` remains supported for older clients and maps to `done`/`todo`
 - `DELETE /api/tasks/:id` — delete a task
+- `GET /api/models` — list the model registry
+- `GET /api/local-ai/status` — report each model's live state and resource limits
+- `POST /api/local-ai/refine-task` — draft a task with an auto-selected or explicitly named model
+- `POST /api/local-ai/jobs` — start a background draft job; requires `model` in the body
+- `GET /api/local-ai/jobs/:id` — poll a background job (`queued`, `running`, `done`, or `error`)
 - `GET /health` — API health
 
 The web board supports adding, editing, filtering, searching, reprioritizing, moving tasks through the development workflow, and deleting tasks. Existing SQLite task databases are migrated on startup; old completed tasks become `done`, and other existing tasks retain their content with sensible defaults.
@@ -58,7 +65,17 @@ The board's **Draft brief with local AI** action asks a local llama.cpp model to
 
 The workspace tracks four models in one registry: the two local Qwen2.5-Coder models (0.5B and 1.5B) and the two web notebooks (Colab 3B and Kaggle 3B). `GET /api/models` returns the registry, and `GET /api/local-ai/status` reports each model's live state. The 0.5B and 1.5B Q4_K_M servers can run at the same time; the launcher starts each only when its model file exists and enough free memory remains for its configured threshold. Set `LOCAL_AI_CONTEXT` or `LOCAL_AI_THREADS` to change the defaults (`1024` context tokens and `2` threads), and use `LOCAL_AI_0_5B_PORT` / `LOCAL_AI_1_5B_PORT` if the defaults conflict.
 
-Colab 3B calls the installed `colab` CLI (Linux or macOS, authenticated) using a reusable session (`COLAB_AI_SESSION`, default `workspace-qwen`). On the first request it checks `colab status`, creates a GPU session with `colab new --gpu T4` when needed, and bootstraps `scripts/colab_model_server.py` once inside the runtime; later requests reuse that session through `colab exec`. Kaggle 3B calls the existing batch runner `scripts/kaggle_run.py` through the `kaggle` CLI, so every request is a finite private notebook submission, not a low-latency endpoint. Its default timeout is one hour (`KAGGLE_AI_TIMEOUT_MS`), and polls default to 30 seconds (`KAGGLE_AI_POLL_INTERVAL_SECONDS`). Both CLIs use their own configured credentials; the API never reads or writes those tokens.
+Colab 3B calls the installed `colab` CLI (Linux or macOS, authenticated) using a reusable session (`COLAB_AI_SESSION`, default `workspace-qwen`). On the first request it checks `colab status`, creates a GPU session with `colab new --gpu T4` when needed, and bootstraps `scripts/colab_model_server.py` once inside the runtime; later requests reuse that session through `colab exec`. Kaggle 3B calls the existing batch runner `scripts/kaggle_run.py` through the `kaggle` CLI, so every request is a finite private notebook submission, not a low-latency endpoint. Its default timeout is one hour (`KAGGLE_AI_TIMEOUT_MS`), and polls default to 30 seconds (`KAGGLE_AI_POLL_INTERVAL_SECONDS`). Both CLIs use their own configured credentials; the API never reads or writes those tokens. Availability checks run `colab sessions` and `kaggle config view` (cached for one minute), so the roster reflects authentication rather than only a binary on `PATH`.
+
+The reusable Colab session keeps its GPU assigned while idle, so release it when finished:
+
+```sh
+./workspace colab status          # list active Colab sessions
+./workspace colab stop            # stop workspace-qwen
+./workspace colab stop my-session # stop a custom session
+```
+
+The board's **Draft model** picker lists every callable model. `Auto` prefers the local models; selecting `colab-3b` or `kaggle-3b` targets it explicitly. Kaggle drafts use the background job API and are polled by the board, so a long batch does not hold one HTTP request open. Jobs are in memory and disappear when the API restarts.
 
 Setting `COLAB_AI_URL` or `KAGGLE_AI_URL` to an OpenAI-compatible endpoint (for example a user-managed tunnel) skips the CLI backend and uses HTTP instead. Optional `COLAB_AI_API_KEY` and `KAGGLE_AI_API_KEY` bearer tokens are supported. Because CLI-backed remote models can spend quota, they are excluded from automatic selection by default; set `COLAB_AI_AUTO_SELECT=true` or `KAGGLE_AI_AUTO_SELECT=true` to include them, or pass `model` explicitly. A URL-configured remote model is auto-selected unless its `*_AI_AUTO_SELECT` is false. Securing any tunnel and endpoint is your responsibility.
 
