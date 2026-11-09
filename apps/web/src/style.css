@@ -119,6 +119,81 @@ h2 {
   color: #bfdbfe;
 }
 
+.models-section {
+  margin: 18px 0 24px;
+}
+
+.models-section h3 {
+  margin: 0 0 2px;
+  color: #f8fbff;
+  font-size: 1.05rem;
+}
+
+.models-section .section-heading p {
+  margin-bottom: 0;
+}
+
+.model-list {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  padding: 0;
+  margin: 12px 0 0;
+}
+
+.model-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: rgba(30, 41, 59, 0.5);
+}
+
+.model-item strong {
+  color: #f8fbff;
+}
+
+.model-item small {
+  flex-basis: 100%;
+  color: #94a3b8;
+}
+
+.model-state {
+  margin-left: auto;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  background: rgba(148, 163, 184, 0.2);
+  color: #cbd5e1;
+}
+
+.model-state-ready {
+  background: rgba(34, 197, 94, 0.18);
+  color: #86efac;
+}
+
+.model-state-busy {
+  background: rgba(250, 204, 21, 0.18);
+  color: #fde68a;
+}
+
+.model-state-unavailable {
+  background: rgba(248, 113, 113, 0.18);
+  color: #fca5a5;
+}
+
+.model-state-manual,
+.model-state-batch {
+  background: rgba(96, 165, 250, 0.18);
+  color: #93c5fd;
+}
+
 .task-form,
 .task-edit-form {
   display: grid;

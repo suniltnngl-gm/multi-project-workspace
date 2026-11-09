@@ -27,10 +27,18 @@ function jsonResponse(payload) {
   return { ok: true, status: 200, json: async () => payload }
 }
 
+const models = [
+  { id: 'local-0.5b', label: 'Qwen2.5-Coder 0.5B (local)', provider: 'local', execution: 'live' },
+  { id: 'local-1.5b', label: 'Qwen2.5-Coder 1.5B (local)', provider: 'local', execution: 'live' },
+  { id: 'colab-3b', label: 'Qwen2.5-Coder 3B (Colab)', provider: 'colab', execution: 'manual' },
+  { id: 'kaggle-3b', label: 'Qwen2.5-Coder 3B (Kaggle)', provider: 'kaggle', execution: 'batch' }
+]
+
 beforeAll(async () => {
   vi.stubGlobal('fetch', vi.fn(async (path) => {
     if (path.startsWith('/api/tasks')) return jsonResponse(tasks)
     if (path === '/api/projects') return jsonResponse(['workspace', 'web', 'api'])
+    if (path === '/api/models') return jsonResponse(models)
     if (path === '/satellite/summary') {
       return jsonResponse({ total: 2, open: 1, completed: 1 })
     }
@@ -55,5 +63,15 @@ describe('development board', () => {
       expect(document.querySelector('#satellite-summary').textContent)
         .toBe('2 total · 1 open · 1 completed')
     })
+  })
+
+  it('lists all four registered models', async () => {
+    await vi.waitFor(() => {
+      expect(document.querySelectorAll('.model-item')).toHaveLength(4)
+    })
+
+    expect(document.querySelector('#model-roster-status').textContent).toBe('4 registered')
+    expect([...document.querySelectorAll('.model-state')].map((node) => node.textContent))
+      .toEqual(['live', 'live', 'manual', 'batch'])
   })
 })

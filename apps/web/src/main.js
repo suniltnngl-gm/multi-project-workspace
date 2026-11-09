@@ -67,6 +67,17 @@ app.innerHTML = `
         <button id="draft-task" class="secondary-button field-wide" type="button">Draft brief with local AI</button>
       </form>
 
+      <section class="models-section" aria-labelledby="models-heading">
+        <div class="section-heading">
+          <div>
+            <h3 id="models-heading">Models</h3>
+            <p>Local models run under resource limits; Colab and Kaggle stay manual.</p>
+          </div>
+          <span id="model-roster-status" class="satellite-status" aria-live="polite">Loading…</span>
+        </div>
+        <ul id="model-roster" class="model-list"></ul>
+      </section>
+
       <form id="filter-form" class="filter-form" aria-label="Filter development tasks">
         <label class="search-field">
           <span class="sr-only">Search tasks</span>
@@ -140,6 +151,8 @@ const taskStatus = document.querySelector('#task-status')
 const taskCount = document.querySelector('#task-count')
 const projectOptions = document.querySelector('#project-options')
 const draftTaskButton = document.querySelector('#draft-task')
+const modelRoster = document.querySelector('#model-roster')
+const modelRosterStatus = document.querySelector('#model-roster-status')
 let tasks = []
 let draftController = null
 
@@ -162,6 +175,36 @@ async function request(path, options) {
 function showStatus(message, isError = false) {
   taskStatus.textContent = message
   taskStatus.classList.toggle('is-error', isError)
+}
+
+function renderModelRoster(models) {
+  modelRoster.replaceChildren()
+  for (const model of models) {
+    const item = document.createElement('li')
+    item.className = 'model-item'
+    const name = document.createElement('strong')
+    name.textContent = model.label
+    const state = document.createElement('span')
+    const stateName = model.state || model.execution
+    state.className = `model-state model-state-${stateName}`
+    state.textContent = stateName
+    const note = document.createElement('small')
+    note.textContent = model.notes || `${model.provider} · ${model.execution}`
+    item.append(name, state, note)
+    modelRoster.append(item)
+  }
+}
+
+async function loadModels() {
+  try {
+    const models = await request('/api/models')
+    renderModelRoster(models)
+    modelRosterStatus.textContent = `${models.length} registered`
+    modelRosterStatus.classList.remove('is-error')
+  } catch (error) {
+    modelRosterStatus.textContent = `Unavailable: ${error.message}`
+    modelRosterStatus.classList.add('is-error')
+  }
 }
 
 function addField(form, labelText, name, { value = '', type = 'text', options, wide = false } = {}) {
@@ -406,6 +449,11 @@ draftTaskButton.addEventListener('click', async () => {
     let draft
     while (!signal.aborted) {
       const status = await request('/api/local-ai/status', { signal })
+      if (status.models) {
+        renderModelRoster(status.models)
+        modelRosterStatus.textContent = status.state
+        modelRosterStatus.classList.toggle('is-error', status.state === 'unavailable')
+      }
       if (status.state === 'unavailable') {
         throw new Error(status.error || 'Local AI resource monitoring is unavailable.')
       }
@@ -545,3 +593,4 @@ taskList.addEventListener('submit', async (event) => {
 loadTasks()
 loadProjects()
 loadSatelliteSummary()
+loadModels()
