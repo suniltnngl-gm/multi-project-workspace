@@ -68,32 +68,8 @@ case "$command_name" in
     run_with_env "$UV" run --project apps/python python apps/python/src/server.py
     ;;
   local-ai)
-    model="${2:-0.5b}"
-    run_with_env bash -c '
-      case "$1" in
-        0.5b)
-          model_path="$HOME/.local/share/llama.cpp/models/Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf"
-          ;;
-        1.5b)
-          model_path="$HOME/.local/share/llama.cpp/models/Qwen2.5-Coder-1.5B-Instruct-Q4_K_M.gguf"
-          ;;
-        *)
-          printf "Usage: ./workspace local-ai [0.5b|1.5b]\n" >&2
-          exit 2
-          ;;
-      esac
-      if [[ ! -f "$model_path" ]]; then
-        printf "Model file not found: %s\n" "$model_path" >&2
-        exit 1
-      fi
-      llama_server="${LLAMA_SERVER:-$HOME/.local/bin/llama-server}"
-      if [[ ! -x "$llama_server" ]]; then
-        printf "llama-server is not executable: %s\n" "$llama_server" >&2
-        exit 1
-      fi
-      exec "$llama_server" -m "$model_path" --host 127.0.0.1 --port 8080 \
-        -c "${LOCAL_AI_CONTEXT:-1024}" -t "${LOCAL_AI_THREADS:-2}"
-    ' workspace-local-ai "$model"
+    model="${2:-all}"
+    run_with_env node "$ROOT_DIR/scripts/local-models.mjs" "$model"
     ;;
   install)
     require_npm
@@ -142,7 +118,7 @@ case "$command_name" in
     printf '  web      Start only the Vite frontend\n'
     printf '  node     Start only the Node API (api is an alias)\n'
     printf '  python   Start only the Python satellite\n'
-    printf '  local-ai [0.5b|1.5b]  Start one local model (default: 0.5b)\n'
+    printf '  local-ai [all|0.5b|1.5b]  Start local models within memory limits (default: all)\n'
     printf '  install  Install npm dependencies and sync the uv Python project\n'
     printf '  python-add  Add a managed Python dependency with uv\n'
     printf '  python-pip  Run uv pip against the workspace Python environment\n'
