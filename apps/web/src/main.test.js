@@ -28,10 +28,24 @@ function jsonResponse(payload) {
 }
 
 const models = [
-  { id: 'local-0.5b', label: 'Qwen2.5-Coder 0.5B (local)', provider: 'local', execution: 'live' },
-  { id: 'local-1.5b', label: 'Qwen2.5-Coder 1.5B (local)', provider: 'local', execution: 'live' },
-  { id: 'colab-3b', label: 'Qwen2.5-Coder 3B (Colab)', provider: 'colab', execution: 'manual' },
-  { id: 'kaggle-3b', label: 'Qwen2.5-Coder 3B (Kaggle)', provider: 'kaggle', execution: 'batch' }
+  { id: 'local-0.5b', label: 'Qwen2.5-Coder 0.5B (local)', provider: 'local', execution: 'live', autoSelect: true },
+  { id: 'local-1.5b', label: 'Qwen2.5-Coder 1.5B (local)', provider: 'local', execution: 'live', autoSelect: true },
+  {
+    id: 'colab-3b',
+    label: 'Qwen2.5-Coder 3B (Colab)',
+    provider: 'colab',
+    execution: 'live',
+    autoSelect: false,
+    notes: 'Calls a reusable Colab session through the colab CLI.'
+  },
+  {
+    id: 'kaggle-3b',
+    label: 'Qwen2.5-Coder 3B (Kaggle)',
+    provider: 'kaggle',
+    execution: 'batch',
+    autoSelect: false,
+    notes: 'Submits a private Kaggle notebook through the kaggle CLI.'
+  }
 ]
 
 beforeAll(async () => {
@@ -72,6 +86,13 @@ describe('development board', () => {
 
     expect(document.querySelector('#model-roster-status').textContent).toBe('4 registered')
     expect([...document.querySelectorAll('.model-state')].map((node) => node.textContent))
-      .toEqual(['live', 'live', 'manual', 'batch'])
+      .toEqual(['live', 'live', 'live', 'batch'])
+    expect([...document.querySelectorAll('.model-item small')].map((node) => node.textContent))
+      .toEqual([
+        'local · live',
+        'local · live',
+        'Calls a reusable Colab session through the colab CLI. · explicit selection only',
+        'Submits a private Kaggle notebook through the kaggle CLI. · explicit selection only'
+      ])
   })
 })

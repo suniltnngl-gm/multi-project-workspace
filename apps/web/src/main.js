@@ -71,7 +71,7 @@ app.innerHTML = `
         <div class="section-heading">
           <div>
             <h3 id="models-heading">Models</h3>
-            <p>Local models run under resource limits; Colab and Kaggle stay manual.</p>
+            <p>Local models run under resource limits; Colab and Kaggle use their CLIs or a configured HTTP endpoint.</p>
           </div>
           <span id="model-roster-status" class="satellite-status" aria-live="polite">Loading…</span>
         </div>
@@ -189,7 +189,8 @@ function renderModelRoster(models) {
     state.className = `model-state model-state-${stateName}`
     state.textContent = stateName
     const note = document.createElement('small')
-    note.textContent = model.notes || `${model.provider} · ${model.execution}`
+    const selection = model.autoSelect === false ? ' · explicit selection only' : ''
+    note.textContent = (model.notes || `${model.provider} · ${model.execution}`) + selection
     item.append(name, state, note)
     modelRoster.append(item)
   }
