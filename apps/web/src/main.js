@@ -5,6 +5,8 @@ import {
   formatBusyMessage,
   formatJobProgress,
   formatModelMeta,
+  formatRelativeTime,
+  formatTaskActivity,
   priorities,
   statuses,
   taskTypes,
@@ -357,15 +359,34 @@ function createTaskItem(task) {
     meta.append(tag)
   }
 
+  const timestamps = document.createElement('div')
+  timestamps.className = 'task-timestamps'
+  if (task.created_at) {
+    const created = document.createElement('time')
+    created.dateTime = task.created_at
+    created.title = task.created_at
+    created.textContent = `Created ${formatRelativeTime(task.created_at)}`
+    timestamps.append(created)
+  }
+  if (task.updated_at) {
+    const updated = document.createElement('time')
+    updated.dateTime = task.updated_at
+    updated.title = task.updated_at
+    updated.textContent = `Updated ${formatRelativeTime(task.updated_at)}`
+    timestamps.append(updated)
+  }
+
   const actions = document.createElement('div')
   actions.className = 'task-actions'
   actions.append(
+    makeButton('History', 'history-task', 'history'),
     makeButton('Edit', 'edit-task', 'edit'),
     makeButton('Delete', 'delete-task', 'delete')
   )
 
   heading.append(content, controls)
   item.append(heading, meta)
+  if (timestamps.childElementCount > 0) item.append(timestamps)
   if (task.acceptance_criteria) {
     const criteria = document.createElement('details')
     criteria.className = 'acceptance-criteria'
@@ -378,6 +399,42 @@ function createTaskItem(task) {
   }
   item.append(actions)
   return item
+}
+
+function renderTaskActivity(task) {
+  const details = document.createElement('details')
+  details.className = 'task-activity'
+  details.open = true
+
+  const summary = document.createElement('summary')
+  const count = task.activity?.length ?? 0
+  summary.textContent = `History (${count})`
+  details.append(summary)
+
+  if (count === 0) {
+    const empty = document.createElement('p')
+    empty.className = 'activity-empty'
+    empty.textContent = 'No recorded activity yet.'
+    details.append(empty)
+    return details
+  }
+
+  const list = document.createElement('ol')
+  list.className = 'activity-list'
+  for (const event of task.activity) {
+    const entry = document.createElement('li')
+    const message = document.createElement('span')
+    message.className = 'activity-message'
+    message.textContent = formatTaskActivity(event)
+    const time = document.createElement('time')
+    time.dateTime = event.createdAt
+    time.title = event.createdAt
+    time.textContent = formatRelativeTime(event.createdAt)
+    entry.append(message, time)
+    list.append(entry)
+  }
+  details.append(list)
+  return details
 }
 
 function renderTasks() {
@@ -652,6 +709,22 @@ taskList.addEventListener('click', async (event) => {
   const id = Number(item.dataset.taskId)
   const task = tasks.find((candidate) => candidate.id === id)
 
+  if (button.dataset.action === 'history') {
+    const current = item.querySelector('.task-activity')
+    if (current) {
+      current.remove()
+      return
+    }
+
+    try {
+      const detail = await request(`/api/tasks/${id}`)
+      item.querySelector('.task-edit-form')?.remove()
+      item.append(renderTaskActivity(detail))
+    } catch (error) {
+      showStatus(`Could not load task history: ${error.message}`, true)
+    }
+    return
+  }
   if (button.dataset.action === 'edit') {
     item.querySelector('.task-edit-form')?.remove()
     item.append(createEditForm(task))

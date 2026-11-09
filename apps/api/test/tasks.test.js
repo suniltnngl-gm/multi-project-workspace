@@ -175,7 +175,91 @@ test('existing task databases are migrated without losing completion state', () 
   assert.equal(migratedDatabase.getTask(1).completed, true)
   assert.equal(migratedDatabase.getTask(2).status, 'todo')
   assert.equal(migratedDatabase.getTask(2).project, 'workspace')
+  const migratedActivity = migratedDatabase.getTaskDetail(1).activity
+  assert.equal(migratedActivity.length, 1)
+  assert.equal(migratedActivity[0].action, 'created')
+  assert.equal(migratedActivity[0].createdAt, '2026-01-01T00:00:00.000Z')
   migratedDatabase.close()
+
+  const reopenedDatabase = createDatabase(databasePath)
+  assert.equal(reopenedDatabase.getTaskDetail(1).activity.length, 1)
+  reopenedDatabase.close()
+})
+
+test('task detail records field-level activity newest first', async () => {
+  const createResponse = await fetch(`${baseUrl}/api/tasks`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: 'Trace task changes',
+      description: 'Original notes',
+      priority: 'medium'
+    })
+  })
+  assert.equal(createResponse.status, 201)
+  const created = await createResponse.json()
+
+  try {
+    const initial = await (await fetch(`${baseUrl}/api/tasks/${created.id}`)).json()
+    assert.equal(initial.title, 'Trace task changes')
+    assert.equal(initial.activity.length, 1)
+    assert.equal(initial.activity[0].action, 'created')
+    assert.equal(initial.activity[0].taskId, created.id)
+
+    const updateResponse = await fetch(`${baseUrl}/api/tasks/${created.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        description: 'Updated notes',
+        status: 'in_progress',
+        priority: 'high'
+      })
+    })
+    assert.equal(updateResponse.status, 200)
+
+    const detail = await (await fetch(`${baseUrl}/api/tasks/${created.id}`)).json()
+    assert.equal(detail.activity.length, 4)
+    assert.deepEqual(
+      detail.activity.slice(0, 3).map(({ action, field, oldValue, newValue }) => ({
+        action, field, oldValue, newValue
+      })),
+      [
+        { action: 'updated', field: 'priority', oldValue: 'medium', newValue: 'high' },
+        { action: 'updated', field: 'status', oldValue: 'todo', newValue: 'in_progress' },
+        { action: 'updated', field: 'description', oldValue: 'Original notes', newValue: 'Updated notes' }
+      ]
+    )
+    assert.equal(detail.activity[3].action, 'created')
+
+    await fetch(`${baseUrl}/api/tasks/${created.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'in_progress', priority: 'high' })
+    })
+    const unchanged = await (await fetch(`${baseUrl}/api/tasks/${created.id}`)).json()
+    assert.equal(unchanged.activity.length, 4)
+
+    const limited = await (await fetch(`${baseUrl}/api/tasks/${created.id}?activity_limit=2`)).json()
+    assert.equal(limited.activity.length, 2)
+    assert.equal(limited.activity[0].field, 'priority')
+    assert.equal(limited.activity[1].field, 'status')
+
+    const invalidLimit = await fetch(`${baseUrl}/api/tasks/${created.id}?activity_limit=0`)
+    assert.equal(invalidLimit.status, 400)
+    const oversizedLimit = await fetch(`${baseUrl}/api/tasks/${created.id}?activity_limit=201`)
+    assert.equal(oversizedLimit.status, 400)
+    const invalidId = await fetch(`${baseUrl}/api/tasks/not-a-number`)
+    assert.equal(invalidId.status, 400)
+    const missing = await fetch(`${baseUrl}/api/tasks/999999`)
+    assert.equal(missing.status, 404)
+
+    const deleteResponse = await fetch(`${baseUrl}/api/tasks/${created.id}`, { method: 'DELETE' })
+    assert.equal(deleteResponse.status, 204)
+    const deletedDetail = await fetch(`${baseUrl}/api/tasks/${created.id}`)
+    assert.equal(deletedDetail.status, 404)
+  } finally {
+    database.deleteTask(created.id)
+  }
 })
 
 test('resource monitor averages physical disk busy time over five seconds', async () => {

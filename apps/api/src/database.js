@@ -17,6 +17,19 @@ function toTask(row) {
   return { ...row, completed: row.status === 'done' || Boolean(row.completed) }
 }
 
+function toTaskEvent(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    action: row.action,
+    ...(row.field !== null ? { field: row.field } : {}),
+    ...(row.old_value !== null ? { oldValue: row.old_value } : {}),
+    ...(row.new_value !== null ? { newValue: row.new_value } : {}),
+    createdAt: row.created_at
+  }
+}
+
 function toJob(row) {
   if (!row) return null
   return {
@@ -58,6 +71,19 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS task_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      action TEXT NOT NULL,
+      field TEXT,
+      old_value TEXT,
+      new_value TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_task_events_task
+      ON task_events(task_id, created_at DESC, id DESC);
 
     CREATE TABLE IF NOT EXISTS ai_jobs (
       id TEXT PRIMARY KEY,
@@ -120,6 +146,18 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     UPDATE tasks SET completed = CASE WHEN status = 'done' THEN 1 ELSE 0 END;
   `)
 
+  // Existing tasks get a synthetic creation event so their history is never
+  // blank after an upgrade. The NOT EXISTS guard makes startup idempotent.
+  connection.exec(`
+    INSERT INTO task_events (task_id, action, created_at)
+    SELECT tasks.id, 'created', tasks.created_at
+    FROM tasks
+    WHERE NOT EXISTS (
+      SELECT 1 FROM task_events
+      WHERE task_events.task_id = tasks.id AND task_events.action = 'created'
+    );
+  `)
+
   const taskFields = 'id, title, description, completed, project, status, priority, task_type, acceptance_criteria, created_at, updated_at'
   const taskOrder = "ORDER BY CASE status WHEN 'in_progress' THEN 0 WHEN 'todo' THEN 1 WHEN 'blocked' THEN 2 ELSE 3 END, CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, updated_at DESC"
   const getStatement = connection.prepare(
@@ -132,6 +170,17 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     'UPDATE tasks SET title = ?, description = ?, project = ?, status = ?, priority = ?, task_type = ?, acceptance_criteria = ?, completed = ?, updated_at = ? WHERE id = ?'
   )
   const deleteStatement = connection.prepare('DELETE FROM tasks WHERE id = ?')
+  const listTaskEventsStatement = connection.prepare(`
+    SELECT id, task_id, action, field, old_value, new_value, created_at
+    FROM task_events
+    WHERE task_id = ?
+    ORDER BY created_at DESC, id DESC
+    LIMIT ?
+  `)
+  const insertTaskEventStatement = connection.prepare(`
+    INSERT INTO task_events (task_id, action, field, old_value, new_value, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `)
   const projectsStatement = connection.prepare('SELECT DISTINCT project FROM tasks ORDER BY project COLLATE NOCASE')
   const listJobsStatement = connection.prepare(
     'SELECT * FROM ai_jobs ORDER BY created_at ASC, id ASC'
@@ -179,6 +228,89 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     'DELETE FROM ai_quota WHERE bucket < ?'
   )
 
+  const TASK_ACTIVITY_FIELDS = [
+    'title', 'description', 'project', 'status', 'priority', 'task_type',
+    'acceptance_criteria'
+  ]
+
+  function readTask(id) {
+    return toTask(getStatement.get(id))
+  }
+
+  function readTaskActivity(taskId, activityLimit = 50) {
+    const requestedLimit = Number(activityLimit)
+    const limit = Number.isFinite(requestedLimit) && requestedLimit >= 1
+      ? Math.min(200, Math.trunc(requestedLimit))
+      : 50
+    return listTaskEventsStatement.all(taskId, limit).map(toTaskEvent)
+  }
+
+  const insertTaskRecord = connection.transaction((fields) => {
+    const now = new Date().toISOString()
+    const result = insertStatement.run(
+      fields.title,
+      fields.description,
+      fields.project,
+      fields.status,
+      fields.priority,
+      fields.task_type,
+      fields.acceptance_criteria,
+      fields.status === 'done' ? 1 : 0,
+      now,
+      now
+    )
+    const id = Number(result.lastInsertRowid)
+    insertTaskEventStatement.run(id, 'created', null, null, null, now)
+    return id
+  })
+
+  const applyTaskUpdate = connection.transaction((id, changes) => {
+    const current = readTask(id)
+    if (!current) return null
+
+    const status = changes.status ?? (changes.completed === undefined
+      ? current.status
+      : changes.completed ? 'done' : 'todo')
+    const next = {
+      title: changes.title ?? current.title,
+      description: changes.description ?? current.description,
+      project: changes.project ?? current.project,
+      status,
+      priority: changes.priority ?? current.priority,
+      task_type: changes.task_type ?? current.task_type,
+      acceptance_criteria: changes.acceptance_criteria ?? current.acceptance_criteria
+    }
+    const changedFields = TASK_ACTIVITY_FIELDS.filter(
+      (field) => current[field] !== next[field]
+    )
+    if (changedFields.length === 0) return current
+
+    const updatedAt = new Date().toISOString()
+    updateStatement.run(
+      next.title,
+      next.description,
+      next.project,
+      next.status,
+      next.priority,
+      next.task_type,
+      next.acceptance_criteria,
+      next.status === 'done' ? 1 : 0,
+      updatedAt,
+      id
+    )
+    for (const field of changedFields) {
+      insertTaskEventStatement.run(
+        id,
+        'updated',
+        field,
+        String(current[field]),
+        String(next[field]),
+        updatedAt
+      )
+    }
+    return readTask(id)
+  })
+
   return {
     listTasks(filters = {}) {
       const conditions = []
@@ -200,7 +332,16 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       return rows.map(toTask)
     },
     getTask(id) {
-      return toTask(getStatement.get(id))
+      return readTask(id)
+    },
+    getTaskDetail(id, { activityLimit = 50 } = {}) {
+      const task = readTask(id)
+      if (!task) return null
+      return { ...task, activity: readTaskActivity(id, activityLimit) }
+    },
+    listTaskActivity(id, { limit = 50 } = {}) {
+      if (!readTask(id)) return null
+      return readTaskActivity(id, limit)
     },
     listProjects() {
       return projectsStatement.all().map(({ project }) => project)
@@ -214,34 +355,19 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       task_type = 'feature',
       acceptance_criteria = ''
     }) {
-      const now = new Date().toISOString()
-      const result = insertStatement.run(
-        title, description, project, status, priority, task_type,
-        acceptance_criteria, status === 'done' ? 1 : 0, now, now
-      )
-      return this.getTask(Number(result.lastInsertRowid))
+      const id = insertTaskRecord({
+        title,
+        description,
+        project,
+        status,
+        priority,
+        task_type,
+        acceptance_criteria
+      })
+      return readTask(id)
     },
     updateTask(id, changes) {
-      const current = this.getTask(id)
-      if (!current) return null
-
-      const updatedAt = new Date().toISOString()
-      const status = changes.status ?? (changes.completed === undefined
-        ? current.status
-        : changes.completed ? 'done' : 'todo')
-      updateStatement.run(
-        changes.title ?? current.title,
-        changes.description ?? current.description,
-        changes.project ?? current.project,
-        status,
-        changes.priority ?? current.priority,
-        changes.task_type ?? current.task_type,
-        changes.acceptance_criteria ?? current.acceptance_criteria,
-        status === 'done' ? 1 : 0,
-        updatedAt,
-        id
-      )
-      return this.getTask(id)
+      return applyTaskUpdate(id, changes)
     },
     deleteTask(id) {
       return deleteStatement.run(id).changes > 0

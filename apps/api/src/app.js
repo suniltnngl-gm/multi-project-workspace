@@ -299,6 +299,26 @@ export function createApp(database, {
     return response.json(database.listTasks(filters))
   })
 
+  app.get('/api/tasks/:id', (request, response) => {
+    const id = parseId(request.params.id)
+    if (id === null) return response.status(400).json({ error: 'Task ID must be a positive integer.' })
+
+    let activityLimit = 50
+    if (request.query.activity_limit !== undefined) {
+      if (!/^[1-9]\d*$/.test(request.query.activity_limit)) {
+        return response.status(400).json({ error: 'Activity limit must be a positive integer.' })
+      }
+      activityLimit = Number(request.query.activity_limit)
+      if (!Number.isSafeInteger(activityLimit) || activityLimit > 200) {
+        return response.status(400).json({ error: 'Activity limit must be at most 200.' })
+      }
+    }
+
+    const task = database.getTaskDetail(id, { activityLimit })
+    if (!task) return response.status(404).json({ error: 'Task not found.' })
+    return response.json(task)
+  })
+
   app.get('/api/projects', (_request, response) => {
     response.json(['workspace', ...database.listProjects().filter((project) => project !== 'workspace')])
   })

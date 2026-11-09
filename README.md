@@ -41,6 +41,7 @@ Set `DATABASE_PATH` to use a different SQLite file. Set `PORT` for the Node API 
 ## Task API
 
 - `GET /api/tasks` — list tasks; supports `project`, `status`, `priority`, `task_type`, and `search` filters
+- `GET /api/tasks/:id` — return one task with its newest-first activity timeline; `activity_limit` defaults to 50 and is capped at 200
 - `GET /api/projects` — list project names used by tasks
 - `POST /api/tasks` — create tasks with title, project, type (`feature`, `bug`, `chore`, `test`, `docs`), priority (`low`, `medium`, `high`, `urgent`), status (`todo`, `in_progress`, `blocked`, `done`), description, and acceptance criteria
 - `PATCH /api/tasks/:id` — update any of those task fields; `completed` remains supported for older clients and maps to `done`/`todo`
@@ -53,7 +54,7 @@ Set `DATABASE_PATH` to use a different SQLite file. Set `PORT` for the Node API 
 - `DELETE /api/local-ai/jobs/:id` — request cancellation of a queued or running job (`202` when accepted, `409` when it already finished)
 - `GET /health` — API health
 
-The web board supports adding, editing, filtering, searching, reprioritizing, moving tasks through the development workflow, and deleting tasks. Existing SQLite task databases are migrated on startup; old completed tasks become `done`, and other existing tasks retain their content with sensible defaults.
+The web board supports adding, editing, filtering, searching, reprioritizing, moving tasks through the development workflow, and deleting tasks. Each task records a field-level activity timeline (creation, status, priority, project, type, title, description, and acceptance-criteria changes); the board loads it on demand from `GET /api/tasks/:id` and shows creation/updated ages on the card. Activity is stored in `task_events` and is deleted with its task. Existing SQLite task databases are migrated on startup; old completed tasks become `done`, other existing tasks retain their content with sensible defaults, and existing tasks receive a synthetic creation event so their history is not blank after the upgrade.
 
 ## Local task assistant
 

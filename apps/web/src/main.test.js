@@ -9,7 +9,9 @@ const tasks = [
     status: 'in_progress',
     priority: 'high',
     task_type: 'feature',
-    acceptance_criteria: 'Tasks render.'
+    acceptance_criteria: 'Tasks render.',
+    created_at: '2026-11-09T10:00:00.000Z',
+    updated_at: '2026-11-09T12:00:00.000Z'
   },
   {
     id: 2,
@@ -19,9 +21,41 @@ const tasks = [
     status: 'done',
     priority: 'urgent',
     task_type: 'bug',
-    acceptance_criteria: ''
+    acceptance_criteria: '',
+    created_at: '2026-11-08T10:00:00.000Z',
+    updated_at: '2026-11-08T12:00:00.000Z'
   }
 ]
+
+const taskDetail = {
+  ...tasks[0],
+  activity: [
+    {
+      id: 3,
+      taskId: 1,
+      action: 'updated',
+      field: 'status',
+      oldValue: 'todo',
+      newValue: 'in_progress',
+      createdAt: '2026-11-09T12:00:00.000Z'
+    },
+    {
+      id: 2,
+      taskId: 1,
+      action: 'updated',
+      field: 'priority',
+      oldValue: 'medium',
+      newValue: 'high',
+      createdAt: '2026-11-09T11:00:00.000Z'
+    },
+    {
+      id: 1,
+      taskId: 1,
+      action: 'created',
+      createdAt: '2026-11-09T10:00:00.000Z'
+    }
+  ]
+}
 
 function jsonResponse(payload) {
   return { ok: true, status: 200, json: async () => payload }
@@ -72,7 +106,8 @@ const models = [
 
 beforeAll(async () => {
   vi.stubGlobal('fetch', vi.fn(async (path) => {
-    if (path.startsWith('/api/tasks')) return jsonResponse(tasks)
+    if (path === '/api/tasks' || path.startsWith('/api/tasks?')) return jsonResponse(tasks)
+    if (path === '/api/tasks/1') return jsonResponse(taskDetail)
     if (path === '/api/projects') return jsonResponse(['workspace', 'web', 'api'])
     if (path === '/api/models') return jsonResponse(models)
     if (path === '/satellite/summary') {
@@ -146,6 +181,32 @@ describe('development board', () => {
       ['colab-3b', 'Qwen2.5-Coder 3B (Colab) — explicit'],
       ['kaggle-3b', 'Qwen2.5-Coder 3B (Kaggle) — explicit']
     ])
+  })
+
+  it('shows a task activity history on demand', async () => {
+    await vi.waitFor(() => {
+      expect(document.querySelectorAll('.task-item')).toHaveLength(2)
+    })
+
+    const item = document.querySelector('.task-item')
+    const timestamps = [...item.querySelectorAll('.task-timestamps time')]
+    expect(timestamps).toHaveLength(2)
+    expect(timestamps[0].textContent).toMatch(/^Created /)
+    expect(timestamps[1].textContent).toMatch(/^Updated /)
+
+    item.querySelector('button[data-action="history"]').click()
+
+    await vi.waitFor(() => {
+      expect(item.querySelector('.task-activity')).not.toBeNull()
+    })
+
+    expect(item.querySelector('.task-activity summary').textContent).toBe('History (3)')
+    expect([...item.querySelectorAll('.activity-message')].map((node) => node.textContent))
+      .toEqual([
+        'Status: Todo → In progress',
+        'Priority: Medium → High',
+        'Created'
+      ])
   })
 
   it('cancels a running batch job from the draft button', async () => {

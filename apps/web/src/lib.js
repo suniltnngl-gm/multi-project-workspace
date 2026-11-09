@@ -24,6 +24,53 @@ export function formatDuration(milliseconds) {
   return `${hours}h ${minutes % 60}m`
 }
 
+export function formatRelativeTime(value, now = Date.now()) {
+  const timestamp = typeof value === 'number' ? value : Date.parse(value)
+  if (!Number.isFinite(timestamp)) return 'unknown'
+
+  const seconds = Math.round(Math.max(0, now - timestamp) / 1000)
+  if (seconds < 45) return 'just now'
+  if (seconds < 90) return '1m ago'
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.round(hours / 24)
+  if (days < 30) return `${days}d ago`
+  const months = Math.round(days / 30)
+  if (months < 12) return `${months}mo ago`
+  return `${Math.round(months / 12)}y ago`
+}
+
+const ACTIVITY_FIELD_LABELS = {
+  title: 'Title',
+  description: 'Description',
+  project: 'Project',
+  status: 'Status',
+  priority: 'Priority',
+  task_type: 'Type',
+  acceptance_criteria: 'Acceptance criteria'
+}
+
+const ACTIVITY_TEXT_FIELDS = new Set(['description', 'acceptance_criteria'])
+
+function formatActivityValue(value) {
+  if (value === undefined || value === null || value === '') return '—'
+  const text = String(value).replaceAll('_', ' ')
+  const shortened = text.length > 60 ? `${text.slice(0, 57)}…` : text
+  return shortened.charAt(0).toUpperCase() + shortened.slice(1)
+}
+
+export function formatTaskActivity(event) {
+  if (event.action === 'created') return 'Created'
+
+  const label = ACTIVITY_FIELD_LABELS[event.field] ?? 'Task'
+  if (!event.field || ACTIVITY_TEXT_FIELDS.has(event.field)) {
+    return `${label} updated`
+  }
+  return `${label}: ${formatActivityValue(event.oldValue)} → ${formatActivityValue(event.newValue)}`
+}
+
 export function formatBudget(budget) {
   if (!budget) return ''
   const used = budget.used ?? 0

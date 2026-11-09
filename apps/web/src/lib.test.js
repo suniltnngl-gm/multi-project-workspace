@@ -6,6 +6,8 @@ import {
   formatDuration,
   formatJobProgress,
   formatModelMeta,
+  formatRelativeTime,
+  formatTaskActivity,
   waitForRetry
 } from './lib.js'
 
@@ -19,6 +21,55 @@ describe('formatDuration', () => {
   it('rejects missing durations', () => {
     expect(formatDuration(undefined)).toBe('unknown')
     expect(formatDuration(-1)).toBe('unknown')
+  })
+})
+
+describe('formatRelativeTime', () => {
+  const now = Date.parse('2026-11-09T12:00:00.000Z')
+
+  it('formats recent and older timestamps', () => {
+    expect(formatRelativeTime('2026-11-09T11:59:40.000Z', now)).toBe('just now')
+    expect(formatRelativeTime('2026-11-09T11:58:30.000Z', now)).toBe('2m ago')
+    expect(formatRelativeTime('2026-11-09T09:00:00.000Z', now)).toBe('3h ago')
+    expect(formatRelativeTime('2026-11-06T12:00:00.000Z', now)).toBe('3d ago')
+    expect(formatRelativeTime('2026-09-09T12:00:00.000Z', now)).toBe('2mo ago')
+    expect(formatRelativeTime('2025-11-09T12:00:00.000Z', now)).toBe('1y ago')
+  })
+
+  it('rejects missing values', () => {
+    expect(formatRelativeTime(undefined, now)).toBe('unknown')
+    expect(formatRelativeTime('not a date', now)).toBe('unknown')
+  })
+})
+
+describe('formatTaskActivity', () => {
+  it('labels creation and readable field transitions', () => {
+    expect(formatTaskActivity({ action: 'created' })).toBe('Created')
+    expect(formatTaskActivity({
+      action: 'updated',
+      field: 'status',
+      oldValue: 'todo',
+      newValue: 'in_progress'
+    })).toBe('Status: Todo → In progress')
+    expect(formatTaskActivity({
+      action: 'updated',
+      field: 'priority',
+      oldValue: 'medium',
+      newValue: 'high'
+    })).toBe('Priority: Medium → High')
+  })
+
+  it('summarizes long text edits without dumping the value', () => {
+    expect(formatTaskActivity({
+      action: 'updated',
+      field: 'description',
+      oldValue: '',
+      newValue: 'A long description'
+    })).toBe('Description updated')
+    expect(formatTaskActivity({
+      action: 'updated',
+      field: 'acceptance_criteria'
+    })).toBe('Acceptance criteria updated')
   })
 })
 
