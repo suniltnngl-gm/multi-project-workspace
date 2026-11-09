@@ -27,6 +27,22 @@ def load_module(name, path):
     return module
 
 
+def sample_task():
+    return {
+        "title": "Draft a task",
+        "project": "workspace",
+        "task_type": "feature",
+        "description": "",
+        "acceptance_criteria": "",
+    }
+
+
+def valid_response():
+    return json.dumps(
+        {"description": "draft", "acceptance_criteria": "done"}
+    )
+
+
 class ModelScriptTests(unittest.TestCase):
     def test_scripts_compile(self):
         for path in (SERVER_PATH, CLIENT_PATH, KAGGLE_PATH):
@@ -87,7 +103,11 @@ class ModelScriptTests(unittest.TestCase):
             output = Path(directory) / "response.json"
             with mock.patch.object(
                 module, "run_kaggle", side_effect=fake_run_kaggle
-            ), mock.patch.object(module, "cancel_kernel", side_effect=fake_cancel):
+            ), mock.patch.object(
+                module, "cancel_kernel", side_effect=fake_cancel
+            ), mock.patch.object(
+                module.shutil, "which", return_value="/usr/bin/kaggle"
+            ):
                 with self.assertRaises(TimeoutError):
                     module.execute(task, output, 0, 1, "delete")
 
@@ -129,6 +149,8 @@ class ModelScriptTests(unittest.TestCase):
                 side_effect=lambda kernel_id, fallback="none": cancelled.append(
                     (kernel_id, fallback)
                 ),
+            ), mock.patch.object(
+                module.shutil, "which", return_value="/usr/bin/kaggle"
             ):
                 module.execute(task, output, 30, 1)
 
@@ -168,6 +190,8 @@ class ModelScriptTests(unittest.TestCase):
             output = Path(directory) / "response.json"
             with mock.patch.object(
                 module, "run_kaggle", side_effect=fake_run_kaggle
+            ), mock.patch.object(
+                module.shutil, "which", return_value="/usr/bin/kaggle"
             ):
                 module.execute(task, output, 30, 1)
 
@@ -178,6 +202,198 @@ class ModelScriptTests(unittest.TestCase):
             command[command.index("--file-pattern") + 1],
             r"response\.json$",
         )
+
+    def _execute_with_fake_kaggle(
+        self, module, statuses, output_writer=None, which="/usr/bin/kaggle"
+    ):
+        """Patch the Kaggle CLI surface and record the commands execute() runs."""
+        recorder = []
+        cancelled = []
+        staged = {}
+
+        def fake_run_kaggle(arguments, timeout=60):
+            recorder.append((list(arguments), timeout))
+            if arguments[:3] == ["kaggle", "kernels", "push"]:
+                directory = Path(arguments[arguments.index("-p") + 1])
+                staged["files"] = sorted(path.name for path in directory.iterdir())
+                return "submitted"
+            if arguments[:3] == ["kaggle", "kernels", "status"]:
+                return next(statuses)
+            if arguments[:3] == ["kaggle", "kernels", "output"] and output_writer:
+                output_writer(Path(arguments[arguments.index("-p") + 1]))
+            return "ok"
+
+        def fake_cancel(kernel_id, fallback="none"):
+            cancelled.append((kernel_id, fallback))
+            return True
+
+        patches = [
+            mock.patch.object(module.shutil, "which", return_value=which),
+            mock.patch.object(module, "run_kaggle", side_effect=fake_run_kaggle),
+            mock.patch.object(module, "cancel_kernel", side_effect=fake_cancel),
+        ]
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return recorder, cancelled, staged
+
+    def test_execute_runs_push_status_output_in_order(self):
+        module = load_module("kaggle_run_execute_order", KAGGLE_PATH)
+        recorder, cancelled, staged = self._execute_with_fake_kaggle(
+            module,
+            iter(["KernelWorkerStatus.COMPLETE"]),
+            lambda output_dir: (output_dir / "response.json").write_text(
+                valid_response(), encoding="utf-8"
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "kaggle-output" / "response.json"
+            module.execute(sample_task(), output, 30, 1)
+            self.assertEqual(
+                json.loads(output.read_text()),
+                {"description": "draft", "acceptance_criteria": "done"},
+            )
+
+        self.assertEqual(
+            [command[2] for command, _ in recorder],
+            ["push", "status", "output"],
+        )
+
+        push, push_timeout = recorder[0]
+        self.assertEqual(push[:4], ["kaggle", "kernels", "push", "-p"])
+        self.assertEqual(push_timeout, 180)
+        self.assertEqual(
+            staged["files"],
+            ["kaggle-qwen-coder.ipynb", "kernel-metadata.json"],
+        )
+
+        status, status_timeout = recorder[1]
+        self.assertEqual(status[:3], ["kaggle", "kernels", "status"])
+        self.assertEqual(status_timeout, 60)
+
+        download, download_timeout = recorder[2]
+        self.assertEqual(download[:3], ["kaggle", "kernels", "output"])
+        self.assertIn("--file-pattern", download)
+        self.assertEqual(
+            download[download.index("--file-pattern") + 1],
+            r"response\.json$",
+        )
+        self.assertEqual(download_timeout, 180)
+        self.assertEqual(cancelled, [])
+
+    def test_execute_requires_the_kaggle_cli(self):
+        module = load_module("kaggle_run_missing_cli", KAGGLE_PATH)
+        recorder, cancelled, _ = self._execute_with_fake_kaggle(
+            module, iter([]), which=None
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "response.json"
+            with self.assertRaises(FileNotFoundError):
+                module.execute(sample_task(), output, 30, 1)
+            self.assertFalse(output.exists())
+
+        self.assertEqual(recorder, [])
+        self.assertEqual(cancelled, [])
+
+    def test_execute_aborts_before_output_when_kernel_fails(self):
+        module = load_module("kaggle_run_execute_error", KAGGLE_PATH)
+        recorder, cancelled, _ = self._execute_with_fake_kaggle(
+            module, iter(["KernelWorkerStatus.ERROR"])
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "response.json"
+            with self.assertRaises(RuntimeError):
+                module.execute(sample_task(), output, 30, 1)
+            self.assertFalse(output.exists())
+
+        self.assertEqual(
+            [command[2] for command, _ in recorder], ["push", "status"]
+        )
+        self.assertEqual(
+            cancelled, [("edmundrosariosunil/kaggle-qwen-coder", "none")]
+        )
+
+    def test_execute_rejects_a_missing_response_json(self):
+        module = load_module("kaggle_run_missing_response", KAGGLE_PATH)
+        recorder, cancelled, _ = self._execute_with_fake_kaggle(
+            module, iter(["KernelWorkerStatus.COMPLETE"])
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "response.json"
+            with self.assertRaises(FileNotFoundError) as caught:
+                module.execute(sample_task(), output, 30, 1)
+            self.assertFalse(output.exists())
+
+        self.assertIn("Expected one response.json", str(caught.exception))
+        self.assertEqual(
+            [command[2] for command, _ in recorder],
+            ["push", "status", "output"],
+        )
+        self.assertEqual(
+            cancelled, [("edmundrosariosunil/kaggle-qwen-coder", "none")]
+        )
+
+    def test_execute_rejects_multiple_response_json_files(self):
+        module = load_module("kaggle_run_multiple_response", KAGGLE_PATH)
+
+        def write_duplicates(output_dir):
+            for name in ("first", "second"):
+                nested = output_dir / name
+                nested.mkdir()
+                (nested / "response.json").write_text(
+                    valid_response(), encoding="utf-8"
+                )
+
+        _, cancelled, _ = self._execute_with_fake_kaggle(
+            module,
+            iter(["KernelWorkerStatus.COMPLETE"]),
+            write_duplicates,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "response.json"
+            with self.assertRaises(FileNotFoundError) as caught:
+                module.execute(sample_task(), output, 30, 1)
+            self.assertFalse(output.exists())
+
+        self.assertIn("Expected one response.json", str(caught.exception))
+        self.assertIn("first/response.json", str(caught.exception))
+        self.assertIn("second/response.json", str(caught.exception))
+        self.assertEqual(
+            cancelled, [("edmundrosariosunil/kaggle-qwen-coder", "none")]
+        )
+
+    def test_execute_rejects_invalid_response_payloads(self):
+        cases = {
+            "malformed": ("{", json.JSONDecodeError),
+            "schema": (json.dumps({"description": "draft"}), ValueError),
+        }
+
+        for name, (payload, expected) in cases.items():
+            with self.subTest(name=name):
+                module = load_module(f"kaggle_run_invalid_{name}", KAGGLE_PATH)
+                _, cancelled, _ = self._execute_with_fake_kaggle(
+                    module,
+                    iter(["KernelWorkerStatus.COMPLETE"]),
+                    lambda output_dir, payload=payload: (
+                        output_dir / "response.json"
+                    ).write_text(payload, encoding="utf-8"),
+                )
+
+                with tempfile.TemporaryDirectory() as directory:
+                    output = Path(directory) / "response.json"
+                    with self.assertRaises(expected):
+                        module.execute(sample_task(), output, 30, 1)
+                    self.assertFalse(output.exists())
+
+                self.assertEqual(
+                    cancelled,
+                    [("edmundrosariosunil/kaggle-qwen-coder", "none")],
+                )
 
     def test_kaggle_status_ignores_not_complete_text(self):
         module = load_module("kaggle_run_not_complete", KAGGLE_PATH)
