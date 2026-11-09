@@ -72,6 +72,18 @@ describe('formatTaskActivity', () => {
       action: 'updated',
       field: 'acceptance_criteria'
     })).toBe('Acceptance criteria updated')
+    expect(formatTaskActivity({
+      action: 'updated',
+      field: 'objectives'
+    })).toBe('Objectives updated')
+    expect(formatTaskActivity({
+      action: 'updated',
+      field: 'relevant_files'
+    })).toBe('Relevant files updated')
+    expect(formatTaskActivity({
+      action: 'updated',
+      field: 'important_context'
+    })).toBe('Important context updated')
   })
 })
 
@@ -155,6 +167,11 @@ describe('buildDraftInput', () => {
     data.set('title', 'Draft this')
     data.set('description', 'Notes')
     data.set('acceptance_criteria', 'It works')
+    data.set('objectives', 'Ship a structured task')
+    data.set('requirements', 'Preserve existing workflows')
+    data.set('decisions', 'Use dedicated columns')
+    data.set('relevant_files', 'apps/web/src/lib.js')
+    data.set('important_context', 'Keep services loopback-only')
     data.set('project', 'web')
     data.set('task_type', 'feature')
     data.set('priority', 'high')
@@ -164,6 +181,11 @@ describe('buildDraftInput', () => {
       title: 'Draft this',
       description: 'Notes',
       acceptance_criteria: 'It works',
+      objectives: 'Ship a structured task',
+      requirements: 'Preserve existing workflows',
+      decisions: 'Use dedicated columns',
+      relevant_files: 'apps/web/src/lib.js',
+      important_context: 'Keep services loopback-only',
       project: 'web',
       task_type: 'feature'
     })

@@ -75,6 +75,31 @@ app.innerHTML = `
           <span>Acceptance criteria <small>(optional)</small></span>
           <textarea name="acceptance_criteria" maxlength="2000" rows="2" placeholder="What must be true for this task to be done?"></textarea>
         </label>
+        <details class="task-planning field-wide">
+          <summary>Objectives, requirements &amp; context <small>(optional)</small></summary>
+          <div class="task-planning-fields">
+            <label>
+              <span>Objectives</span>
+              <textarea name="objectives" maxlength="2000" rows="2" placeholder="What outcome should this task achieve?"></textarea>
+            </label>
+            <label>
+              <span>Requirements</span>
+              <textarea name="requirements" maxlength="2000" rows="2" placeholder="Constraints, behaviours, or inputs that must be preserved"></textarea>
+            </label>
+            <label>
+              <span>Decisions</span>
+              <textarea name="decisions" maxlength="2000" rows="2" placeholder="Choices already made and why"></textarea>
+            </label>
+            <label>
+              <span>Relevant files</span>
+              <textarea name="relevant_files" maxlength="2000" rows="2" placeholder="Files, modules, or commands worth inspecting"></textarea>
+            </label>
+            <label>
+              <span>Important context</span>
+              <textarea name="important_context" maxlength="2000" rows="2" placeholder="Background, caveats, or constraints for whoever picks this up"></textarea>
+            </label>
+          </div>
+        </details>
         <button type="submit">Add task</button>
         <button id="draft-task" class="secondary-button field-wide" type="button">Draft brief with AI</button>
       </form>
@@ -93,7 +118,7 @@ app.innerHTML = `
       <form id="filter-form" class="filter-form" aria-label="Filter development tasks">
         <label class="search-field">
           <span class="sr-only">Search tasks</span>
-          <input name="search" maxlength="200" placeholder="Search title, notes, criteria…">
+          <input name="search" maxlength="200" placeholder="Search title, notes, planning…">
         </label>
         <label>
           <span class="sr-only">Filter by project</span>
@@ -244,7 +269,7 @@ async function loadModels() {
   }
 }
 
-function addField(form, labelText, name, { value = '', type = 'text', options, wide = false } = {}) {
+function addField(form, labelText, name, { value = '', type = 'text', options, wide = false } = {}, container = form) {
   const label = document.createElement('label')
   if (wide) label.className = 'field-wide'
   const caption = document.createElement('span')
@@ -273,7 +298,7 @@ function addField(form, labelText, name, { value = '', type = 'text', options, w
   control.name = name
   control.value = value
   label.append(control)
-  form.append(label)
+  container.append(label)
   return control
 }
 
@@ -305,6 +330,27 @@ function createEditForm(task) {
     type: 'textarea',
     wide: true
   })
+  const planning = document.createElement('details')
+  planning.className = 'task-planning field-wide'
+  const planningSummary = document.createElement('summary')
+  planningSummary.textContent = 'Objectives, requirements & context'
+  const planningFields = document.createElement('div')
+  planningFields.className = 'task-planning-fields'
+  planning.append(planningSummary, planningFields)
+  form.append(planning)
+  for (const [labelText, name] of [
+    ['Objectives', 'objectives'],
+    ['Requirements', 'requirements'],
+    ['Decisions', 'decisions'],
+    ['Relevant files', 'relevant_files'],
+    ['Important context', 'important_context']
+  ]) {
+    addField(form, labelText, name, {
+      value: task[name] ?? '',
+      type: 'textarea',
+      wide: true
+    }, planningFields)
+  }
   const actions = document.createElement('div')
   actions.className = 'task-actions field-wide'
   const save = document.createElement('button')
@@ -317,6 +363,26 @@ function createEditForm(task) {
   )
   form.append(actions)
   return form
+}
+
+const TASK_CARD_SECTIONS = [
+  ['objectives', 'Objectives'],
+  ['requirements', 'Requirements'],
+  ['decisions', 'Decisions'],
+  ['relevant_files', 'Relevant files'],
+  ['important_context', 'Important context'],
+  ['acceptance_criteria', 'Acceptance criteria']
+]
+
+function appendTaskSection(item, label, value) {
+  const details = document.createElement('details')
+  details.className = 'task-notes'
+  const summary = document.createElement('summary')
+  summary.textContent = label
+  const text = document.createElement('p')
+  text.textContent = value
+  details.append(summary, text)
+  item.append(details)
 }
 
 function createTaskItem(task) {
@@ -393,15 +459,8 @@ function createTaskItem(task) {
   heading.append(content, controls)
   item.append(heading, meta)
   if (timestamps.childElementCount > 0) item.append(timestamps)
-  if (task.acceptance_criteria) {
-    const criteria = document.createElement('details')
-    criteria.className = 'acceptance-criteria'
-    const summary = document.createElement('summary')
-    summary.textContent = 'Acceptance criteria'
-    const text = document.createElement('p')
-    text.textContent = task.acceptance_criteria
-    criteria.append(summary, text)
-    item.append(criteria)
+  for (const [field, label] of TASK_CARD_SECTIONS) {
+    if (task[field]) appendTaskSection(item, label, task[field])
   }
   item.append(actions)
   return item

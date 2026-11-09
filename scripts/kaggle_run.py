@@ -37,7 +37,15 @@ def load_task(task_path):
             "Task JSON must contain non-empty string fields: "
             + ", ".join(missing)
         )
-    for field in ("description", "acceptance_criteria"):
+    for field in (
+        "description",
+        "acceptance_criteria",
+        "objectives",
+        "requirements",
+        "decisions",
+        "relevant_files",
+        "important_context",
+    ):
         if task.get(field) is None:
             task[field] = ""
     return task
@@ -245,7 +253,11 @@ def parse_arguments(argv=None):
         "--task-json",
         required=True,
         type=Path,
-        help="JSON object with title, project, task_type, description, and acceptance_criteria",
+        help=(
+            "JSON object with title, project, task_type, description, "
+            "acceptance_criteria, objectives, requirements, decisions, "
+            "relevant_files, and important_context"
+        ),
     )
     parser.add_argument(
         "--output",

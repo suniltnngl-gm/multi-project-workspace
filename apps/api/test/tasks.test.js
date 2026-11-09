@@ -73,7 +73,12 @@ test('tasks can be created, listed, updated, and deleted', async () => {
       project: 'api',
       task_type: 'feature',
       priority: 'high',
-      acceptance_criteria: 'CRUD requests persist across restart'
+      acceptance_criteria: 'CRUD requests persist across restart',
+      objectives: 'Expose a reliable task API',
+      requirements: 'Keep the service loopback-only',
+      decisions: 'Store planning fields in SQLite',
+      relevant_files: 'apps/api/src/database.js',
+      important_context: 'No live remote calls during tests'
     })
   })
   assert.equal(createResponse.status, 201)
@@ -86,6 +91,11 @@ test('tasks can be created, listed, updated, and deleted', async () => {
   assert.equal(created.priority, 'high')
   assert.equal(created.task_type, 'feature')
   assert.equal(created.acceptance_criteria, 'CRUD requests persist across restart')
+  assert.equal(created.objectives, 'Expose a reliable task API')
+  assert.equal(created.requirements, 'Keep the service loopback-only')
+  assert.equal(created.decisions, 'Store planning fields in SQLite')
+  assert.equal(created.relevant_files, 'apps/api/src/database.js')
+  assert.equal(created.important_context, 'No live remote calls during tests')
 
   const listResponse = await fetch(`${baseUrl}/api/tasks`)
   assert.equal(listResponse.status, 200)
@@ -97,6 +107,9 @@ test('tasks can be created, listed, updated, and deleted', async () => {
   const filteredResponse = await fetch(`${baseUrl}/api/tasks?project=api&priority=high&search=restart`)
   assert.deepEqual(await filteredResponse.json(), [created])
 
+  const planningResponse = await fetch(`${baseUrl}/api/tasks?search=loopback`)
+  assert.deepEqual(await planningResponse.json(), [created])
+
   const statusResponse = await fetch(`${baseUrl}/api/tasks/${created.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
@@ -107,12 +120,13 @@ test('tasks can be created, listed, updated, and deleted', async () => {
   const updateResponse = await fetch(`${baseUrl}/api/tasks/${created.id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ completed: true })
+    body: JSON.stringify({ completed: true, important_context: 'Updated context' })
   })
   assert.equal(updateResponse.status, 200)
   const completed = await updateResponse.json()
   assert.equal(completed.completed, true)
   assert.equal(completed.status, 'done')
+  assert.equal(completed.important_context, 'Updated context')
 
   const invalidResponse = await fetch(`${baseUrl}/api/tasks`, {
     method: 'POST',
@@ -121,6 +135,22 @@ test('tasks can be created, listed, updated, and deleted', async () => {
   })
   assert.equal(invalidResponse.status, 400)
   assert.match((await invalidResponse.json()).error, /non-empty/)
+
+  const oversizedPlanningResponse = await fetch(`${baseUrl}/api/tasks`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'Too much context', objectives: 'x'.repeat(2001) })
+  })
+  assert.equal(oversizedPlanningResponse.status, 400)
+  assert.match((await oversizedPlanningResponse.json()).error, /Objectives/)
+
+  const invalidPlanningTypeResponse = await fetch(`${baseUrl}/api/tasks`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'Wrong planning type', requirements: 42 })
+  })
+  assert.equal(invalidPlanningTypeResponse.status, 400)
+  assert.match((await invalidPlanningTypeResponse.json()).error, /Requirements must be a string/)
 
   const invalidFilterResponse = await fetch(`${baseUrl}/api/tasks?status=unknown`)
   assert.equal(invalidFilterResponse.status, 400)
@@ -175,6 +205,11 @@ test('existing task databases are migrated without losing completion state', () 
   assert.equal(migratedDatabase.getTask(1).completed, true)
   assert.equal(migratedDatabase.getTask(2).status, 'todo')
   assert.equal(migratedDatabase.getTask(2).project, 'workspace')
+  for (const field of [
+    'objectives', 'requirements', 'decisions', 'relevant_files', 'important_context'
+  ]) {
+    assert.equal(migratedDatabase.getTask(2)[field], '')
+  }
   const migratedActivity = migratedDatabase.getTaskDetail(1).activity
   assert.equal(migratedActivity.length, 1)
   assert.equal(migratedActivity[0].action, 'created')
@@ -193,7 +228,9 @@ test('task detail records field-level activity newest first', async () => {
     body: JSON.stringify({
       title: 'Trace task changes',
       description: 'Original notes',
-      priority: 'medium'
+      priority: 'medium',
+      objectives: 'Original objective',
+      decisions: 'Original decision'
     })
   })
   assert.equal(createResponse.status, 201)
@@ -212,24 +249,28 @@ test('task detail records field-level activity newest first', async () => {
       body: JSON.stringify({
         description: 'Updated notes',
         status: 'in_progress',
-        priority: 'high'
+        priority: 'high',
+        objectives: 'Updated objective',
+        requirements: 'Trace every planning field'
       })
     })
     assert.equal(updateResponse.status, 200)
 
     const detail = await (await fetch(`${baseUrl}/api/tasks/${created.id}`)).json()
-    assert.equal(detail.activity.length, 4)
+    assert.equal(detail.activity.length, 6)
     assert.deepEqual(
-      detail.activity.slice(0, 3).map(({ action, field, oldValue, newValue }) => ({
+      detail.activity.slice(0, 5).map(({ action, field, oldValue, newValue }) => ({
         action, field, oldValue, newValue
       })),
       [
+        { action: 'updated', field: 'requirements', oldValue: '', newValue: 'Trace every planning field' },
+        { action: 'updated', field: 'objectives', oldValue: 'Original objective', newValue: 'Updated objective' },
         { action: 'updated', field: 'priority', oldValue: 'medium', newValue: 'high' },
         { action: 'updated', field: 'status', oldValue: 'todo', newValue: 'in_progress' },
         { action: 'updated', field: 'description', oldValue: 'Original notes', newValue: 'Updated notes' }
       ]
     )
-    assert.equal(detail.activity[3].action, 'created')
+    assert.equal(detail.activity[5].action, 'created')
 
     await fetch(`${baseUrl}/api/tasks/${created.id}`, {
       method: 'PATCH',
@@ -237,12 +278,12 @@ test('task detail records field-level activity newest first', async () => {
       body: JSON.stringify({ status: 'in_progress', priority: 'high' })
     })
     const unchanged = await (await fetch(`${baseUrl}/api/tasks/${created.id}`)).json()
-    assert.equal(unchanged.activity.length, 4)
+    assert.equal(unchanged.activity.length, 6)
 
     const limited = await (await fetch(`${baseUrl}/api/tasks/${created.id}?activity_limit=2`)).json()
     assert.equal(limited.activity.length, 2)
-    assert.equal(limited.activity[0].field, 'priority')
-    assert.equal(limited.activity[1].field, 'status')
+    assert.equal(limited.activity[0].field, 'requirements')
+    assert.equal(limited.activity[1].field, 'objectives')
 
     const invalidLimit = await fetch(`${baseUrl}/api/tasks/${created.id}?activity_limit=0`)
     assert.equal(invalidLimit.status, 400)
@@ -343,13 +384,21 @@ test('task prompt router uses compact and detailed routes within the context bud
     project: 'api',
     task_type: 'feature',
     description: 'Expose service health.',
-    acceptance_criteria: 'Return status ok.'
+    acceptance_criteria: 'Return status ok.',
+    objectives: 'Make readiness observable.',
+    requirements: 'Keep the endpoint unauthenticated.',
+    decisions: 'Use the existing Express app.',
+    relevant_files: 'apps/api/src/app.js',
+    important_context: 'Health checks must stay loopback-only.'
   })
   assert.equal(brief.route, 'brief')
   assert.equal(brief.maxTokens, 180)
   assert.match(brief.messages[1].content, /Task: Add a health endpoint/)
   assert.match(brief.messages[1].content, /Description:/)
   assert.match(brief.messages[1].content, /Acceptance criteria:/)
+  assert.match(brief.messages[1].content, /Objectives:\nMake readiness observable\./)
+  assert.match(brief.messages[1].content, /Relevant files:\napps\/api\/src\/app\.js/)
+  assert.match(brief.messages[1].content, /Important context:\nHealth checks must stay loopback-only\./)
 
   const detailed = buildTaskPrompt({
     title: 'Add API validation',
@@ -362,7 +411,7 @@ test('task prompt router uses compact and detailed routes within the context bud
   assert.equal(detailed.maxTokens, 300)
   assert.equal(detailed.wasTruncated, true)
   assert.ok(detailed.messages[1].content.length <= 2200)
-  assert.ok(detailed.messages[1].content.endsWith('…'))
+  assert.match(detailed.messages[1].content, /…/)
 
   const longSingleField = buildTaskPrompt({
     title: 'Summarize details',
@@ -422,7 +471,13 @@ test('local task assistant waits for low load and returns an unsaved draft', asy
     const response = await fetch(`${assistantUrl}/api/local-ai/refine-task`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: 'Add task drafting', project: 'api', task_type: 'feature' })
+      body: JSON.stringify({
+        title: 'Add task drafting',
+        project: 'api',
+        task_type: 'feature',
+        objectives: 'Let the board draft implementation briefs.',
+        relevant_files: 'apps/api/src/app.js'
+      })
     })
     assert.equal(response.status, 200)
     assert.deepEqual(await response.json(), {
@@ -432,6 +487,8 @@ test('local task assistant waits for low load and returns an unsaved draft', asy
     assert.equal(prompts.length, 1)
     assert.equal(prompts[0].messages[1].role, 'user')
     assert.equal(prompts[0].max_tokens, 180)
+    assert.match(prompts[0].messages[1].content, /Objectives:\nLet the board draft implementation briefs\./)
+    assert.match(prompts[0].messages[1].content, /Relevant files:\napps\/api\/src\/app\.js/)
     assert.deepEqual(database.listTasks(), [])
 
     const cooldownResponse = await fetch(`${assistantUrl}/api/local-ai/status`)

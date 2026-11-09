@@ -9,7 +9,12 @@ const TASK_COLUMNS = {
   status: "TEXT NOT NULL DEFAULT 'todo'",
   priority: "TEXT NOT NULL DEFAULT 'medium'",
   task_type: "TEXT NOT NULL DEFAULT 'feature'",
-  acceptance_criteria: "TEXT NOT NULL DEFAULT ''"
+  acceptance_criteria: "TEXT NOT NULL DEFAULT ''",
+  objectives: "TEXT NOT NULL DEFAULT ''",
+  requirements: "TEXT NOT NULL DEFAULT ''",
+  decisions: "TEXT NOT NULL DEFAULT ''",
+  relevant_files: "TEXT NOT NULL DEFAULT ''",
+  important_context: "TEXT NOT NULL DEFAULT ''"
 }
 
 function toTask(row) {
@@ -92,6 +97,11 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       priority TEXT NOT NULL DEFAULT 'medium',
       task_type TEXT NOT NULL DEFAULT 'feature',
       acceptance_criteria TEXT NOT NULL DEFAULT '',
+      objectives TEXT NOT NULL DEFAULT '',
+      requirements TEXT NOT NULL DEFAULT '',
+      decisions TEXT NOT NULL DEFAULT '',
+      relevant_files TEXT NOT NULL DEFAULT '',
+      important_context TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -196,16 +206,16 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     );
   `)
 
-  const taskFields = 'id, title, description, completed, project, status, priority, task_type, acceptance_criteria, created_at, updated_at'
+  const taskFields = 'id, title, description, completed, project, status, priority, task_type, acceptance_criteria, objectives, requirements, decisions, relevant_files, important_context, created_at, updated_at'
   const taskOrder = "ORDER BY CASE status WHEN 'in_progress' THEN 0 WHEN 'todo' THEN 1 WHEN 'blocked' THEN 2 ELSE 3 END, CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, updated_at DESC"
   const getStatement = connection.prepare(
     `SELECT ${taskFields} FROM tasks WHERE id = ?`
   )
   const insertStatement = connection.prepare(
-    'INSERT INTO tasks (title, description, project, status, priority, task_type, acceptance_criteria, completed, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO tasks (title, description, project, status, priority, task_type, acceptance_criteria, objectives, requirements, decisions, relevant_files, important_context, completed, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
   )
   const updateStatement = connection.prepare(
-    'UPDATE tasks SET title = ?, description = ?, project = ?, status = ?, priority = ?, task_type = ?, acceptance_criteria = ?, completed = ?, updated_at = ? WHERE id = ?'
+    'UPDATE tasks SET title = ?, description = ?, project = ?, status = ?, priority = ?, task_type = ?, acceptance_criteria = ?, objectives = ?, requirements = ?, decisions = ?, relevant_files = ?, important_context = ?, completed = ?, updated_at = ? WHERE id = ?'
   )
   const deleteStatement = connection.prepare('DELETE FROM tasks WHERE id = ?')
   const listTaskEventsStatement = connection.prepare(`
@@ -281,7 +291,8 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
 
   const TASK_ACTIVITY_FIELDS = [
     'title', 'description', 'project', 'status', 'priority', 'task_type',
-    'acceptance_criteria'
+    'acceptance_criteria', 'objectives', 'requirements', 'decisions',
+    'relevant_files', 'important_context'
   ]
 
   function readTask(id) {
@@ -314,6 +325,11 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       fields.priority,
       fields.task_type,
       fields.acceptance_criteria,
+      fields.objectives,
+      fields.requirements,
+      fields.decisions,
+      fields.relevant_files,
+      fields.important_context,
       fields.status === 'done' ? 1 : 0,
       now,
       now
@@ -344,7 +360,12 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       status,
       priority: changes.priority ?? current.priority,
       task_type: changes.task_type ?? current.task_type,
-      acceptance_criteria: changes.acceptance_criteria ?? current.acceptance_criteria
+      acceptance_criteria: changes.acceptance_criteria ?? current.acceptance_criteria,
+      objectives: changes.objectives ?? current.objectives,
+      requirements: changes.requirements ?? current.requirements,
+      decisions: changes.decisions ?? current.decisions,
+      relevant_files: changes.relevant_files ?? current.relevant_files,
+      important_context: changes.important_context ?? current.important_context
     }
     const changedFields = TASK_ACTIVITY_FIELDS.filter(
       (field) => current[field] !== next[field]
@@ -360,6 +381,11 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       next.priority,
       next.task_type,
       next.acceptance_criteria,
+      next.objectives,
+      next.requirements,
+      next.decisions,
+      next.relevant_files,
+      next.important_context,
       next.status === 'done' ? 1 : 0,
       updatedAt,
       id
@@ -388,9 +414,15 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
         }
       }
       if (filters.search) {
-        conditions.push("(title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' OR acceptance_criteria LIKE ? ESCAPE '\\')")
+        const searchFields = [
+          'title', 'description', 'acceptance_criteria', 'objectives',
+          'requirements', 'decisions', 'relevant_files', 'important_context'
+        ]
+        conditions.push(
+          `(${searchFields.map((field) => `${field} LIKE ? ESCAPE '\\'`).join(' OR ')})`
+        )
         const search = `%${filters.search.replace(/[\\%_]/g, '\\$&')}%`
-        values.push(search, search, search)
+        values.push(...searchFields.map(() => search))
       }
 
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
@@ -427,7 +459,12 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       status = 'todo',
       priority = 'medium',
       task_type = 'feature',
-      acceptance_criteria = ''
+      acceptance_criteria = '',
+      objectives = '',
+      requirements = '',
+      decisions = '',
+      relevant_files = '',
+      important_context = ''
     }) {
       const id = insertTaskRecord({
         title,
@@ -436,7 +473,12 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
         status,
         priority,
         task_type,
-        acceptance_criteria
+        acceptance_criteria,
+        objectives,
+        requirements,
+        decisions,
+        relevant_files,
+        important_context
       })
       return readTask(id)
     },

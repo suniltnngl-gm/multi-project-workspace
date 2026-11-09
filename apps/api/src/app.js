@@ -16,6 +16,26 @@ const MAX_TITLE_LENGTH = 200
 const MAX_DESCRIPTION_LENGTH = 2000
 const MAX_PROJECT_LENGTH = 80
 const MAX_ACCEPTANCE_CRITERIA_LENGTH = 2000
+const MAX_PLANNING_TEXT_LENGTH = 2000
+const PLANNING_TEXT_FIELDS = [
+  'objectives', 'requirements', 'decisions', 'relevant_files', 'important_context'
+]
+const TASK_TEXT_LIMITS = {
+  description: MAX_DESCRIPTION_LENGTH,
+  acceptance_criteria: MAX_ACCEPTANCE_CRITERIA_LENGTH,
+  ...Object.fromEntries(
+    PLANNING_TEXT_FIELDS.map((field) => [field, MAX_PLANNING_TEXT_LENGTH])
+  )
+}
+const TASK_TEXT_LABELS = {
+  description: 'Description',
+  acceptance_criteria: 'Acceptance criteria',
+  objectives: 'Objectives',
+  requirements: 'Requirements',
+  decisions: 'Decisions',
+  relevant_files: 'Relevant files',
+  important_context: 'Important context'
+}
 const TASK_STATUSES = new Set(['todo', 'in_progress', 'blocked', 'done'])
 const TASK_PRIORITIES = new Set(['low', 'medium', 'high', 'urgent'])
 const TASK_TYPES = new Set(['feature', 'bug', 'chore', 'test', 'docs'])
@@ -103,17 +123,19 @@ function validateRefineInput(input, { requireModel = false } = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return 'Request body must be a JSON object.'
   }
-  if (Object.keys(input).some((key) => !['title', 'description', 'acceptance_criteria', 'project', 'task_type', 'model', 'task_id'].includes(key))) {
+  const draftFields = [
+    'title', ...Object.keys(TASK_TEXT_LIMITS), 'project', 'task_type', 'model', 'task_id'
+  ]
+  if (Object.keys(input).some((key) => !draftFields.includes(key))) {
     return 'Request includes an unsupported task field.'
   }
   if (!isValidText(input.title, MAX_TITLE_LENGTH) || !input.title.trim()) {
     return 'Title must be a non-empty string of at most 200 characters.'
   }
-  if (input.description !== undefined && !isValidText(input.description, MAX_AI_INPUT_LENGTH)) {
-    return 'Description must be at most 2000 characters.'
-  }
-  if (input.acceptance_criteria !== undefined && !isValidText(input.acceptance_criteria, MAX_AI_INPUT_LENGTH)) {
-    return 'Acceptance criteria must be at most 2000 characters.'
+  for (const field of Object.keys(TASK_TEXT_LIMITS)) {
+    if (input[field] !== undefined && !isValidText(input[field], MAX_AI_INPUT_LENGTH)) {
+      return `${TASK_TEXT_LABELS[field]} must be at most ${MAX_AI_INPUT_LENGTH} characters.`
+    }
   }
   if (input.project !== undefined && (typeof input.project !== 'string' || input.project.length > MAX_PROJECT_LENGTH)) {
     return 'Project must be a string of at most 80 characters.'
@@ -142,7 +164,12 @@ function taskFromRefineInput(input) {
     project: input.project || 'workspace',
     task_type: input.task_type || 'feature',
     description: input.description || '',
-    acceptance_criteria: input.acceptance_criteria || ''
+    acceptance_criteria: input.acceptance_criteria || '',
+    objectives: input.objectives || '',
+    requirements: input.requirements || '',
+    decisions: input.decisions || '',
+    relevant_files: input.relevant_files || '',
+    important_context: input.important_context || ''
   }
 }
 
@@ -153,7 +180,7 @@ function validateTaskInput(body, { partial = false } = {}) {
 
   const allowedFields = new Set([
     'title', 'description', 'completed', 'project', 'status', 'priority',
-    'task_type', 'acceptance_criteria'
+    'task_type', 'acceptance_criteria', ...PLANNING_TEXT_FIELDS
   ])
   if (Object.keys(body).some((key) => !allowedFields.has(key))) {
     return 'Request includes an unsupported task field.'
@@ -195,18 +222,13 @@ function validateTaskInput(body, { partial = false } = {}) {
       return `Project must be at most ${MAX_PROJECT_LENGTH} characters.`
     }
   }
-  if (Object.hasOwn(body, 'description')) {
-    if (typeof body.description !== 'string') return 'Description must be a string.'
-    if (body.description.length > MAX_DESCRIPTION_LENGTH) {
-      return `Description must be at most ${MAX_DESCRIPTION_LENGTH} characters.`
+  for (const [field, maxLength] of Object.entries(TASK_TEXT_LIMITS)) {
+    if (!Object.hasOwn(body, field)) continue
+    if (typeof body[field] !== 'string') {
+      return `${TASK_TEXT_LABELS[field]} must be a string.`
     }
-  }
-  if (Object.hasOwn(body, 'acceptance_criteria')) {
-    if (typeof body.acceptance_criteria !== 'string') {
-      return 'Acceptance criteria must be a string.'
-    }
-    if (body.acceptance_criteria.length > MAX_ACCEPTANCE_CRITERIA_LENGTH) {
-      return `Acceptance criteria must be at most ${MAX_ACCEPTANCE_CRITERIA_LENGTH} characters.`
+    if (body[field].length > maxLength) {
+      return `${TASK_TEXT_LABELS[field]} must be at most ${maxLength} characters.`
     }
   }
 
@@ -548,7 +570,12 @@ export function createApp(database, {
       status: request.body.status ?? 'todo',
       priority: request.body.priority ?? 'medium',
       task_type: request.body.task_type ?? 'feature',
-      acceptance_criteria: (request.body.acceptance_criteria ?? '').trim()
+      acceptance_criteria: (request.body.acceptance_criteria ?? '').trim(),
+      objectives: (request.body.objectives ?? '').trim(),
+      requirements: (request.body.requirements ?? '').trim(),
+      decisions: (request.body.decisions ?? '').trim(),
+      relevant_files: (request.body.relevant_files ?? '').trim(),
+      important_context: (request.body.important_context ?? '').trim()
     })
     return response.status(201).json(task)
   })
@@ -562,7 +589,7 @@ export function createApp(database, {
 
     const changes = { ...request.body }
     if (Object.hasOwn(changes, 'title')) changes.title = changes.title.trim()
-    for (const field of ['description', 'acceptance_criteria', 'project']) {
+    for (const field of [...Object.keys(TASK_TEXT_LIMITS), 'project']) {
       if (Object.hasOwn(changes, field)) changes[field] = changes[field].trim()
     }
 

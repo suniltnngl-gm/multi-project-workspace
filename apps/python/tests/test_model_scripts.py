@@ -67,6 +67,14 @@ class ModelScriptTests(unittest.TestCase):
 
         self.assertEqual(task["description"], "")
         self.assertEqual(task["acceptance_criteria"], "")
+        for field in (
+            "objectives",
+            "requirements",
+            "decisions",
+            "relevant_files",
+            "important_context",
+        ):
+            self.assertEqual(task[field], "")
 
     def test_kaggle_task_requires_title_project_and_type(self):
         module = load_module("kaggle_run_required", KAGGLE_PATH)

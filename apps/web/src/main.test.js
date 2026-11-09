@@ -10,6 +10,11 @@ const tasks = [
     priority: 'high',
     task_type: 'feature',
     acceptance_criteria: 'Tasks render.',
+    objectives: 'Make the board useful.',
+    requirements: 'Keep tasks structured.',
+    decisions: 'Use dedicated SQLite columns.',
+    relevant_files: 'apps/web/src/main.js',
+    important_context: 'Keep services loopback-only.',
     created_at: '2026-11-09T10:00:00.000Z',
     updated_at: '2026-11-09T12:00:00.000Z'
   },
@@ -158,6 +163,32 @@ describe('development board', () => {
 
     expect(document.querySelector('#task-count').textContent).toBe('2 shown')
     expect(document.querySelector('.task-item strong').textContent).toBe('Ship board')
+  })
+
+  it('renders structured planning sections on task cards', async () => {
+    await vi.waitFor(() => {
+      expect(document.querySelectorAll('.task-item')).toHaveLength(2)
+    })
+
+    const item = document.querySelector('.task-item')
+    expect([...item.querySelectorAll('.task-notes summary')].map((node) => node.textContent))
+      .toEqual([
+        'Objectives',
+        'Requirements',
+        'Decisions',
+        'Relevant files',
+        'Important context',
+        'Acceptance criteria'
+      ])
+    expect([...item.querySelectorAll('.task-notes p')].map((node) => node.textContent))
+      .toEqual([
+        'Make the board useful.',
+        'Keep tasks structured.',
+        'Use dedicated SQLite columns.',
+        'apps/web/src/main.js',
+        'Keep services loopback-only.',
+        'Tasks render.'
+      ])
   })
 
   it('shows the Python satellite summary', async () => {
@@ -328,6 +359,8 @@ describe('development board', () => {
     const item = document.querySelector('.task-item')
     item.querySelector('button[data-action="edit"]').click()
     const form = item.querySelector('.task-edit-form')
+    expect(form.elements.objectives.value).toBe('Make the board useful.')
+    expect(form.elements.important_context.value).toBe('Keep services loopback-only.')
     form.querySelector('button[data-action="draft-edit"]').click()
 
     await vi.waitFor(() => {
@@ -337,6 +370,8 @@ describe('development board', () => {
 
     expect(draftBody.task_id).toBe(1)
     expect(draftBody.title).toBe('Ship board')
+    expect(draftBody.objectives).toBe('Make the board useful.')
+    expect(draftBody.relevant_files).toBe('apps/web/src/main.js')
     expect(draftBody.priority).toBeUndefined()
 
     await vi.waitFor(() => {
