@@ -39,7 +39,9 @@ def connect(database):
 
 
 def git_output(root, *args):
-    return subprocess.check_output(["git", "-C", str(root), *args], text=True)
+    return subprocess.check_output(
+        ["git", "-C", str(root), *args], text=True, stderr=subprocess.DEVNULL
+    )
 
 
 def collect_entries(root):

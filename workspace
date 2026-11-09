@@ -211,20 +211,6 @@ case "$command_name" in
   colab)
     run_with_env node "$ROOT_DIR/scripts/colab-session.mjs" "${2:-status}" "${3:-}"
     ;;
-  ai)
-    subcommand="${2:-doctor}"
-    case "$subcommand" in
-      doctor)
-        shift 2 || true
-        run_with_env node "$ROOT_DIR/scripts/ai-doctor.mjs" "$@"
-        ;;
-      *)
-        error "Unknown ai subcommand: $subcommand"
-        printf 'Usage: ./workspace ai doctor [--json] [--strict]\n' >&2
-        exit 2
-        ;;
-    esac
-    ;;
   doctor)
     shift || true
     run_with_env node "$ROOT_DIR/scripts/ai-doctor.mjs" "$@"
@@ -420,6 +406,52 @@ case "$command_name" in
     info 'Tracking domains:'
     printf '  tasks, user_files, folders, git_worktrees, tools, environments\n'
     info 'Use ./workspace <domain> scan|list|check for each domain.'
+    ;;
+  self-check)
+    info 'Running deterministic workspace self-check...'
+    require_npm
+    require_uv
+    status_code=0
+    node "$ROOT_DIR/scripts/with-env.mjs" npm run lint || status_code=1
+    node "$ROOT_DIR/scripts/with-env.mjs" npm test || status_code=1
+    node "$ROOT_DIR/scripts/with-env.mjs" npm run build || status_code=1
+    "$ROOT_DIR/workspace" files check || status_code=1
+    "$ROOT_DIR/workspace" folders check || status_code=1
+    "$ROOT_DIR/workspace" git-context check || status_code=1
+    "$ROOT_DIR/workspace" tools check || status_code=1
+    "$ROOT_DIR/workspace" environment check || status_code=1
+    if [[ "$status_code" -eq 0 ]]; then
+      success 'Self-check passed.'
+    else
+      error 'Self-check found failures.'
+    fi
+    exit "$status_code"
+    ;;
+  ai)
+    subcommand="${2:-doctor}"
+    case "$subcommand" in
+      doctor)
+        shift 2 || true
+        run_with_env node "$ROOT_DIR/scripts/ai-doctor.mjs" "$@"
+        ;;
+      improve)
+        shift 2 || true
+        info 'Workspace tracking summary:'
+        require_uv
+        "$UV" run --project apps/python python "$ROOT_DIR/scripts/tracking_status.py"
+        info 'Run ./workspace self-check for deterministic validation.'
+        info 'AI improvement prompt:'
+        cat <<'PROMPT'
+Analyze the workspace tracking summary and repository status. Propose the smallest high-value improvements, prioritized by risk and impact. For each proposal include: title, rationale, affected files, validation commands, and rollback. Do not make changes without approval.
+PROMPT
+        ;;
+      *)
+        error "Unknown ai subcommand: $subcommand"
+        printf 'Usage: ./workspace ai doctor [--json] [--strict]\n' >&2
+        printf '       ./workspace ai improve\n' >&2
+        exit 2
+        ;;
+    esac
     ;;
   help|-h|--help)
     print_help
