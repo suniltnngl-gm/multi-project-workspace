@@ -28,8 +28,25 @@ function jsonResponse(payload) {
 }
 
 const models = [
-  { id: 'local-0.5b', label: 'Qwen2.5-Coder 0.5B (local)', provider: 'local', execution: 'live', callable: true, autoSelect: true },
-  { id: 'local-1.5b', label: 'Qwen2.5-Coder 1.5B (local)', provider: 'local', execution: 'live', callable: true, autoSelect: true },
+  {
+    id: 'local-0.5b',
+    label: 'Qwen2.5-Coder 0.5B (local)',
+    provider: 'local',
+    execution: 'live',
+    callable: true,
+    autoSelect: true,
+    requests: 3,
+    failures: 1,
+    lastDurationMs: 1500
+  },
+  {
+    id: 'local-1.5b',
+    label: 'Qwen2.5-Coder 1.5B (local)',
+    provider: 'local',
+    execution: 'live',
+    callable: true,
+    autoSelect: true
+  },
   {
     id: 'colab-3b',
     label: 'Qwen2.5-Coder 3B (Colab)',
@@ -37,7 +54,9 @@ const models = [
     execution: 'live',
     callable: true,
     autoSelect: false,
-    notes: 'Calls a reusable Colab session through the colab CLI.'
+    notes: 'Calls a reusable Colab session through the colab CLI.',
+    sessionState: 'absent',
+    budget: { used: 2, limit: 10 }
   },
   {
     id: 'kaggle-3b',
@@ -46,7 +65,8 @@ const models = [
     execution: 'batch',
     callable: true,
     autoSelect: false,
-    notes: 'Submits a private Kaggle notebook through the kaggle CLI.'
+    notes: 'Submits a private Kaggle notebook through the kaggle CLI.',
+    budget: { used: 1, limit: 5 }
   }
 ]
 
@@ -98,6 +118,19 @@ describe('development board', () => {
       ])
   })
 
+  it('shows budget, session, and usage details', async () => {
+    await vi.waitFor(() => {
+      expect(document.querySelectorAll('.model-meta')).toHaveLength(3)
+    })
+
+    expect([...document.querySelectorAll('.model-meta')].map((node) => node.textContent))
+      .toEqual([
+        '3 requests · 1 failed · last 2s',
+        'budget 2/10 today · session absent',
+        'budget 1/5 today'
+      ])
+  })
+
   it('offers callable models in the draft picker', async () => {
     await vi.waitFor(() => {
       expect(document.querySelectorAll('#draft-model option')).toHaveLength(5)
@@ -113,5 +146,58 @@ describe('development board', () => {
       ['colab-3b', 'Qwen2.5-Coder 3B (Colab) — explicit'],
       ['kaggle-3b', 'Qwen2.5-Coder 3B (Kaggle) — explicit']
     ])
+  })
+
+  it('cancels a running batch job from the draft button', async () => {
+    const job = {
+      id: 'job-1',
+      state: 'running',
+      phase: 'generating',
+      model: 'kaggle-3b',
+      elapsedMs: 65_000
+    }
+    let deleted = false
+
+    vi.mocked(fetch).mockImplementation(async (path, options = {}) => {
+      if (path === '/api/local-ai/status') {
+        return jsonResponse({
+          state: 'ready',
+          models: [{
+            id: 'kaggle-3b',
+            label: 'Qwen2.5-Coder 3B (Kaggle)',
+            execution: 'batch',
+            state: 'ready'
+          }]
+        })
+      }
+      if (path === '/api/local-ai/jobs' && options.method === 'POST') {
+        return jsonResponse({ id: 'job-1', state: 'queued', model: 'kaggle-3b' })
+      }
+      if (path === '/api/local-ai/jobs/job-1' && options.method === 'DELETE') {
+        deleted = true
+        return jsonResponse({ ...job, state: 'cancelled' })
+      }
+      if (path === '/api/local-ai/jobs/job-1') return jsonResponse(job)
+      throw new Error(`Unexpected request: ${path}`)
+    })
+
+    const form = document.querySelector('#task-form')
+    form.elements.title.value = 'Draft this task'
+    document.querySelector('#draft-model').value = 'kaggle-3b'
+    const button = document.querySelector('#draft-task')
+    button.click()
+
+    await vi.waitFor(() => {
+      expect(document.querySelector('#task-status').textContent)
+        .toContain('Batch job job-1 is generating · 1m 5s')
+    })
+
+    button.click()
+
+    await vi.waitFor(() => {
+      expect(deleted).toBe(true)
+      expect(document.querySelector('#task-status').textContent)
+        .toBe('Cancelled batch job job-1.')
+    })
   })
 })

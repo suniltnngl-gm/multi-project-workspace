@@ -1,5 +1,53 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { buildTaskQuery, formatBusyMessage, waitForRetry } from './lib.js'
+import {
+  buildTaskQuery,
+  formatBusyMessage,
+  formatDuration,
+  formatJobProgress,
+  formatModelMeta,
+  waitForRetry
+} from './lib.js'
+
+describe('formatDuration', () => {
+  it('formats seconds, minutes, and hours', () => {
+    expect(formatDuration(1500)).toBe('2s')
+    expect(formatDuration(90_000)).toBe('1m 30s')
+    expect(formatDuration(3_726_000)).toBe('1h 2m')
+  })
+
+  it('rejects missing durations', () => {
+    expect(formatDuration(undefined)).toBe('unknown')
+    expect(formatDuration(-1)).toBe('unknown')
+  })
+})
+
+describe('formatModelMeta', () => {
+  it('joins budget, session, and usage details', () => {
+    expect(formatModelMeta({
+      budget: { used: 2, limit: 10 },
+      sessionState: 'absent',
+      requests: 3,
+      failures: 1,
+      lastDurationMs: 1500
+    })).toBe('budget 2/10 today · session absent · 3 requests · 1 failed · last 2s')
+  })
+
+  it('returns an empty string without details', () => {
+    expect(formatModelMeta({ id: 'local' })).toBe('')
+  })
+})
+
+describe('formatJobProgress', () => {
+  it('includes the phase and elapsed time', () => {
+    expect(formatJobProgress({ id: 'job-2', state: 'running', phase: 'generating', elapsedMs: 65_000 }))
+      .toBe('Batch job job-2 is generating · 1m 5s. Waiting…')
+  })
+
+  it('falls back to the job state', () => {
+    expect(formatJobProgress({ id: 'job-3', state: 'queued' }))
+      .toBe('Batch job job-3 is queued. Waiting…')
+  })
+})
 
 describe('formatBusyMessage', () => {
   it('joins resource reasons and includes the retry delay', () => {

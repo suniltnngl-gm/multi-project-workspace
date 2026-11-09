@@ -3,6 +3,8 @@ import { getProjectCards, workspaceSummary } from '../../../packages/shared/inde
 import {
   buildTaskQuery,
   formatBusyMessage,
+  formatJobProgress,
+  formatModelMeta,
   priorities,
   statuses,
   taskTypes,
@@ -162,6 +164,7 @@ const modelRoster = document.querySelector('#model-roster')
 const modelRosterStatus = document.querySelector('#model-roster-status')
 let tasks = []
 let draftController = null
+let activeJobId = null
 
 async function request(path, options) {
   const response = await fetch(path, options)
@@ -199,6 +202,14 @@ function renderModelRoster(models) {
     const selection = model.autoSelect === false ? ' · explicit selection only' : ''
     note.textContent = (model.notes || `${model.provider} · ${model.execution}`) + selection
     item.append(name, state, note)
+
+    const metaText = formatModelMeta(model)
+    if (metaText) {
+      const meta = document.createElement('span')
+      meta.className = 'model-meta'
+      meta.textContent = metaText
+      item.append(meta)
+    }
     modelRoster.append(item)
   }
 }
@@ -448,17 +459,31 @@ taskForm.addEventListener('submit', async (event) => {
   }
 })
 
+async function cancelJob(jobId) {
+  try {
+    await request(`/api/local-ai/jobs/${jobId}`, { method: 'DELETE' })
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function waitForJob(jobId, signal) {
   let delay = 2000
   while (true) {
     const job = await request(`/api/local-ai/jobs/${jobId}`, { signal })
     if (job.state === 'done') return job.result
+    if (job.state === 'cancelled') {
+      activeJobId = null
+      throw new DOMException('The batch job was cancelled.', 'AbortError')
+    }
     if (job.state === 'error') {
       const error = new Error(job.error || 'The batch job failed.')
       error.status = job.status
+      error.retryAfter = job.retryAfter
       throw error
     }
-    showStatus(`Batch job ${job.id} is ${job.state}. Waiting…`)
+    showStatus(formatJobProgress(job))
     await waitForRetry(delay, signal)
     delay = Math.min(10000, Math.round(delay * 1.5))
   }
@@ -524,9 +549,13 @@ draftTaskButton.addEventListener('click', async () => {
           const job = await request('/api/local-ai/jobs', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-            signal
+            body: JSON.stringify(body)
           })
+          activeJobId = job.id
+          if (signal.aborted) {
+            await cancelJob(job.id)
+            throw new DOMException('Draft cancelled.', 'AbortError')
+          }
           showStatus(`Submitted batch job ${job.id}. Waiting for ${job.model}…`)
           draft = await waitForJob(job.id, signal)
         } else {
@@ -553,11 +582,21 @@ draftTaskButton.addEventListener('click', async () => {
     }
   } catch (error) {
     if (error.name === 'AbortError') {
-      showStatus('AI draft cancelled.')
+      if (activeJobId) {
+        const cancelled = await cancelJob(activeJobId)
+        showStatus(
+          cancelled
+            ? `Cancelled batch job ${activeJobId}.`
+            : 'Draft cancelled, but the remote job may still finish.'
+        )
+      } else {
+        showStatus('AI draft cancelled.')
+      }
     } else {
       showStatus(`Could not draft task: ${error.message}`, true)
     }
   } finally {
+    activeJobId = null
     if (draftController === controller) {
       draftController = null
       draftTaskButton.textContent = 'Draft brief with AI'

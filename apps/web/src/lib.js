@@ -14,6 +14,40 @@ export function formatBusyMessage(reasons, retryAfter = 5) {
   return `Local AI paused: ${details}. Checking again in ${retryAfter} seconds.`
 }
 
+export function formatDuration(milliseconds) {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return 'unknown'
+  const seconds = Math.round(milliseconds / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`
+  const hours = Math.floor(minutes / 60)
+  return `${hours}h ${minutes % 60}m`
+}
+
+export function formatModelMeta(model) {
+  const parts = []
+  if (model.budget) {
+    parts.push(`budget ${model.budget.used}/${model.budget.limit} today`)
+  }
+  if (model.sessionState) parts.push(`session ${model.sessionState}`)
+  if (model.requests) {
+    parts.push(`${model.requests} request${model.requests === 1 ? '' : 's'}`)
+  }
+  if (model.failures) {
+    parts.push(`${model.failures} failed`)
+  }
+  if (Number.isFinite(model.lastDurationMs)) {
+    parts.push(`last ${formatDuration(model.lastDurationMs)}`)
+  }
+  return parts.join(' · ')
+}
+
+export function formatJobProgress(job) {
+  const phase = job.phase && job.phase !== job.state ? job.phase : job.state
+  const elapsed = Number.isFinite(job.elapsedMs) ? ` · ${formatDuration(job.elapsedMs)}` : ''
+  return `Batch job ${job.id} is ${phase}${elapsed}. Waiting…`
+}
+
 export function waitForRetry(milliseconds, signal) {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
