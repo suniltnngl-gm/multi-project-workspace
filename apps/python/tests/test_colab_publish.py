@@ -62,9 +62,29 @@ class ColabPublishTests(unittest.TestCase):
         credentials, _ = self.module.resolve_credentials(env={}, secret_getter=getter)
         self.assertEqual(credentials, {"KAGGLE_API_TOKEN": "secret-token"})
 
+    def test_environment_credentials_win_over_colab_secrets(self):
+        credentials, source = self.module.resolve_credentials(
+            env={"KAGGLE_USERNAME": "user", "KAGGLE_KEY": "key"},
+            secret_getter=lambda name: "secret-token"
+            if name == "KAGGLE_API_TOKEN"
+            else "",
+        )
+        self.assertEqual(
+            credentials,
+            {"KAGGLE_USERNAME": "user", "KAGGLE_KEY": "key"},
+        )
+        self.assertIn("environment", source)
+
     def test_missing_credentials_are_reported(self):
         with self.assertRaises(self.module.PublishError):
             self.module.resolve_credentials(env={}, secret_getter=lambda _name: "")
+
+    def test_redact_removes_credential_values(self):
+        text = self.module.redact(
+            "failed with token abcdefghij",
+            {"KAGGLE_API_TOKEN": "abcdefghij"},
+        )
+        self.assertEqual(text, "failed with token ***")
 
     def test_metadata_is_always_private(self):
         metadata = self.module.build_metadata("owner/workspace-artifacts")
@@ -88,12 +108,47 @@ class ColabPublishTests(unittest.TestCase):
             (source / "kaggle.json").write_text("{}", encoding="utf-8")
             (source / ".git").mkdir()
             (source / ".git" / "config").write_text("secret", encoding="utf-8")
+            (source / ".cache").mkdir()
+            (source / ".cache" / "huggingface").write_text("cache", encoding="utf-8")
 
             files = self.module.stage_source(source, Path(staging_directory))
             names = sorted(path.name for path in files)
             self.assertEqual(names, ["model.pt"])
             self.assertFalse((Path(staging_directory) / ".env").exists())
             self.assertFalse((Path(staging_directory) / "kaggle.json").exists())
+            self.assertFalse((Path(staging_directory) / ".cache").exists())
+
+    def test_single_file_secret_is_rejected(self):
+        for name in (".env", "kaggle.json", "access_token.txt", "id_rsa", "credentials.json"):
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as directory:
+                    source = Path(directory) / name
+                    source.write_text("secret", encoding="utf-8")
+                    with self.assertRaises(self.module.PublishError):
+                        self.module.iter_source_files(source)
+
+    def test_symlinks_are_skipped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "real.bin").write_text("data", encoding="utf-8")
+            try:
+                (source / "link.bin").symlink_to(source / "real.bin")
+            except (NotImplementedError, OSError):
+                self.skipTest("symlinks are unavailable on this platform")
+
+            files = self.module.iter_source_files(source)
+            self.assertEqual([path.name for path in files], ["real.bin"])
+
+    def test_custom_exclude_patterns_skip_matching_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "keep.bin").write_text("data", encoding="utf-8")
+            (source / "skip.tmp").write_text("data", encoding="utf-8")
+            (source / "nested").mkdir()
+            (source / "nested" / "skip.tmp").write_text("data", encoding="utf-8")
+
+            files = self.module.iter_source_files(source, ["*.tmp"])
+            self.assertEqual([path.name for path in files], ["keep.bin"])
 
     def test_dataset_exists_uses_the_kaggle_files_command(self):
         calls = []
@@ -107,6 +162,7 @@ class ColabPublishTests(unittest.TestCase):
         )
         self.assertEqual(calls[0][0][:3], ["kaggle", "datasets", "files"])
         self.assertEqual(calls[0][0][3], "owner/artifacts")
+        self.assertEqual(calls[0][0][-2:], ["--page-size", "1"])
 
     def test_dataset_exists_surfaces_unexpected_errors(self):
         def runner(command, **kwargs):
@@ -128,8 +184,30 @@ class ColabPublishTests(unittest.TestCase):
 
         self.assertEqual(calls[0][:4], ["kaggle", "datasets", "create", "-p"])
         self.assertIn("--dir-mode", calls[0])
+        self.assertEqual(calls[0][calls[0].index("--dir-mode") + 1], "zip")
         self.assertEqual(calls[1][:4], ["kaggle", "datasets", "version", "-p"])
         self.assertEqual(calls[1][calls[1].index("-m") + 1], "message")
+
+    def test_publish_passes_timeout_and_directory_mode(self):
+        calls = []
+
+        def runner(command, **kwargs):
+            calls.append((command, kwargs))
+            return subprocess.CompletedProcess(command, 0, "ok", "")
+
+        self.module.publish(
+            Path("/tmp/staging"),
+            "owner/artifacts",
+            "version",
+            "message",
+            {},
+            runner,
+            timeout=42,
+            dir_mode="tar",
+        )
+        command, kwargs = calls[0]
+        self.assertEqual(kwargs["timeout"], 42)
+        self.assertEqual(command[command.index("--dir-mode") + 1], "tar")
 
     def test_dry_run_validates_without_credentials_or_cli(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -180,7 +258,42 @@ class ColabPublishTests(unittest.TestCase):
             payload = json.loads(output.getvalue())
             self.assertTrue(payload["dryRun"])
             self.assertTrue(payload["metadata"]["isPrivate"])
+            self.assertEqual(payload["bytes"], 4)
 
+    def test_dry_run_does_not_stage_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "artifact.bin").write_text("data", encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch.dict(os.environ, {}, clear=True), \
+                    mock.patch.object(
+                        self.module,
+                        "stage_files",
+                        side_effect=AssertionError("dry run must not stage files"),
+                    ), \
+                    contextlib.redirect_stdout(output):
+                code = self.module.main([
+                    "--source", str(source),
+                    "--dataset", "owner/artifacts",
+                    "--dry-run",
+                ])
+            self.assertEqual(code, 0)
+
+    def test_max_size_guard_fails_before_staging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "artifact.bin").write_bytes(b"x" * (1024**2 + 1))
+            stderr = io.StringIO()
+            with mock.patch.dict(os.environ, {}, clear=True), \
+                    contextlib.redirect_stderr(stderr):
+                code = self.module.main([
+                    "--source", str(source),
+                    "--dataset", "owner/artifacts",
+                    "--max-size-mb", "1",
+                    "--dry-run",
+                ])
+            self.assertEqual(code, 1)
+            self.assertIn("--max-size-mb 1", stderr.getvalue())
 
     def test_notebook_publish_cell_is_safe_and_runs_before_cleanup(self):
         notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
@@ -197,6 +310,8 @@ class ColabPublishTests(unittest.TestCase):
         source = "".join(notebook["cells"][publish_index]["source"])
         compile(source, str(NOTEBOOK_PATH), "exec")
         self.assertIn("DRY_RUN = True", source)
+        self.assertIn("MAX_SIZE_MB = 0", source)
+        self.assertIn('DIR_MODE = "zip"', source)
         self.assertIn("colab_publish_kaggle.py", source)
         self.assertIn('DATASET.startswith("your-user/")', source)
 

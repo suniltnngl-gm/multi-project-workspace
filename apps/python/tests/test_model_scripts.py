@@ -139,6 +139,67 @@ class ModelScriptTests(unittest.TestCase):
 
         self.assertEqual(cancelled, [])
 
+    def test_kaggle_output_download_filters_to_response_json(self):
+        module = load_module("kaggle_run_output_filter", KAGGLE_PATH)
+        task = {
+            "title": "Draft a task",
+            "project": "workspace",
+            "task_type": "feature",
+            "description": "",
+            "acceptance_criteria": "",
+        }
+        output_commands = []
+
+        def fake_run_kaggle(arguments, timeout=60):
+            if arguments[:3] == ["kaggle", "kernels", "status"]:
+                return "KernelWorkerStatus.COMPLETE"
+            if arguments[:3] == ["kaggle", "kernels", "output"]:
+                output_commands.append(arguments)
+                output_dir = Path(arguments[arguments.index("-p") + 1])
+                (output_dir / "response.json").write_text(
+                    json.dumps(
+                        {"description": "draft", "acceptance_criteria": "done"}
+                    ),
+                    encoding="utf-8",
+                )
+            return "ok"
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "response.json"
+            with mock.patch.object(
+                module, "run_kaggle", side_effect=fake_run_kaggle
+            ):
+                module.execute(task, output, 30, 1)
+
+        self.assertEqual(len(output_commands), 1)
+        command = output_commands[0]
+        self.assertIn("--file-pattern", command)
+        self.assertEqual(
+            command[command.index("--file-pattern") + 1],
+            r"response\.json$",
+        )
+
+    def test_kaggle_status_ignores_not_complete_text(self):
+        module = load_module("kaggle_run_not_complete", KAGGLE_PATH)
+        statuses = iter(
+            [
+                "KernelWorkerStatus.QUEUED (not complete)",
+                "KernelWorkerStatus.COMPLETE",
+            ]
+        )
+        calls = []
+
+        def fake_run_kaggle(arguments, timeout=60):
+            calls.append(arguments)
+            return next(statuses)
+
+        with mock.patch.object(
+            module, "run_kaggle", side_effect=fake_run_kaggle
+        ):
+            module.wait_for_completion("owner/kernel", 5, 0)
+
+        self.assertEqual(len(calls), 2)
+
     def test_kaggle_cancel_falls_back_to_delete_only_when_requested(self):
         module = load_module("kaggle_run_cancel_fallback", KAGGLE_PATH)
         calls = []

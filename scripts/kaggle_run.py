@@ -145,7 +145,9 @@ def wait_for_completion(kernel_id, timeout_seconds, poll_interval):
             timeout=60,
         )
         normalized = status.lower()
-        if re.search(r"\b(?:kernelworkerstatus\.)?complete\b", normalized):
+        if "not complete" not in normalized and re.search(
+            r"\b(?:kernelworkerstatus\.)?complete\b", normalized
+        ):
             return
         if re.search(
             r"\b(?:kernelworkerstatus\.)?(?:error|failed|cancelled|canceled)\b",
@@ -204,6 +206,8 @@ def execute(task, output_path, timeout_seconds, poll_interval, cancel_fallback="
                             kernel_id,
                             "-p",
                             output_dir,
+                            "--file-pattern",
+                            r"response\.json$",
                         ],
                         timeout=180,
                     ),
@@ -300,7 +304,7 @@ def main(argv=None):
         print("Kaggle inference cancelled.", file=sys.stderr)
         return 130
     except (
-        FileNotFoundError,
+        OSError,
         json.JSONDecodeError,
         subprocess.TimeoutExpired,
         TimeoutError,
