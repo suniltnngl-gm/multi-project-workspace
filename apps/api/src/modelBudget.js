@@ -25,7 +25,8 @@ const zoneFormats = new Map()
 const LEGACY_LIMITS = [
   ['serverless', 'SERVERLESS_AI_MAX_REQUESTS_PER_DAY'],
   ['colab-3b', 'COLAB_AI_MAX_REQUESTS_PER_DAY'],
-  ['kaggle-3b', 'KAGGLE_AI_MAX_REQUESTS_PER_DAY']
+  ['kaggle-3b', 'KAGGLE_AI_MAX_REQUESTS_PER_DAY'],
+  ['opencode', 'OPENCODE_AI_MAX_REQUESTS_PER_DAY']
 ]
 
 function readLimit(env, key) {
