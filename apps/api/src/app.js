@@ -5,6 +5,7 @@ import { buildTaskPrompt } from './localAiPrompt.js'
 import { createModelRegistry, publicModelDefinition } from './modelRegistry.js'
 import { createModelScheduler } from './modelScheduler.js'
 import { createModelClient } from './modelClient.js'
+import { createTaskJobStore } from './taskJobStore.js'
 import { loadWorkspaceEnv } from '../../../scripts/env.mjs'
 
 loadWorkspaceEnv()
@@ -93,6 +94,47 @@ function parseAssistantDraft(content) {
     description: draft.description.slice(0, MAX_AI_INPUT_LENGTH),
     acceptance_criteria: formatAcceptanceCriteria(draft.acceptance_criteria)
       .slice(0, MAX_AI_INPUT_LENGTH)
+  }
+}
+
+function validateRefineInput(input, { requireModel = false } = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return 'Request body must be a JSON object.'
+  }
+  if (Object.keys(input).some((key) => !['title', 'description', 'acceptance_criteria', 'project', 'task_type', 'model'].includes(key))) {
+    return 'Request includes an unsupported task field.'
+  }
+  if (!isValidText(input.title, MAX_TITLE_LENGTH) || !input.title.trim()) {
+    return 'Title must be a non-empty string of at most 200 characters.'
+  }
+  if (input.description !== undefined && !isValidText(input.description, MAX_AI_INPUT_LENGTH)) {
+    return 'Description must be at most 2000 characters.'
+  }
+  if (input.acceptance_criteria !== undefined && !isValidText(input.acceptance_criteria, MAX_AI_INPUT_LENGTH)) {
+    return 'Acceptance criteria must be at most 2000 characters.'
+  }
+  if (input.project !== undefined && (typeof input.project !== 'string' || input.project.length > MAX_PROJECT_LENGTH)) {
+    return 'Project must be a string of at most 80 characters.'
+  }
+  if (input.task_type !== undefined && !TASK_TYPES.has(input.task_type)) {
+    return `Task type must be one of: ${[...TASK_TYPES].join(', ')}.`
+  }
+  if (input.model !== undefined && (!isValidText(input.model, 80) || !input.model.trim())) {
+    return 'Model must be a non-empty model ID of at most 80 characters.'
+  }
+  if (requireModel && input.model === undefined) {
+    return 'Model is required for a background job.'
+  }
+  return undefined
+}
+
+function taskFromRefineInput(input) {
+  return {
+    title: input.title,
+    project: input.project || 'workspace',
+    task_type: input.task_type || 'feature',
+    description: input.description || '',
+    acceptance_criteria: input.acceptance_criteria || ''
   }
 }
 
@@ -199,6 +241,7 @@ export function createApp(database, {
     maxDiskBusyPercent: LOCAL_AI_MAX_DISK_BUSY_PERCENT,
     turnCooldownMs: LOCAL_AI_TURN_COOLDOWN_MS
   })
+  const jobStore = createTaskJobStore()
   app.use(express.json({ limit: '16kb' }))
 
   app.get('/health', (_request, response) => {
@@ -254,29 +297,9 @@ export function createApp(database, {
 
   app.post('/api/local-ai/refine-task', async (request, response) => {
     const input = request.body
-    if (!input || typeof input !== 'object' || Array.isArray(input)) {
-      return response.status(400).json({ error: 'Request body must be a JSON object.' })
-    }
-    if (Object.keys(input).some((key) => !['title', 'description', 'acceptance_criteria', 'project', 'task_type', 'model'].includes(key))) {
-      return response.status(400).json({ error: 'Request includes an unsupported task field.' })
-    }
-    if (!isValidText(input.title, MAX_TITLE_LENGTH) || !input.title.trim()) {
-      return response.status(400).json({ error: 'Title must be a non-empty string of at most 200 characters.' })
-    }
-    if (input.description !== undefined && !isValidText(input.description, MAX_AI_INPUT_LENGTH)) {
-      return response.status(400).json({ error: 'Description must be at most 2000 characters.' })
-    }
-    if (input.acceptance_criteria !== undefined && !isValidText(input.acceptance_criteria, MAX_AI_INPUT_LENGTH)) {
-      return response.status(400).json({ error: 'Acceptance criteria must be at most 2000 characters.' })
-    }
-    if (input.project !== undefined && (typeof input.project !== 'string' || input.project.length > MAX_PROJECT_LENGTH)) {
-      return response.status(400).json({ error: 'Project must be a string of at most 80 characters.' })
-    }
-    if (input.task_type !== undefined && !TASK_TYPES.has(input.task_type)) {
-      return response.status(400).json({ error: `Task type must be one of: ${[...TASK_TYPES].join(', ')}.` })
-    }
-    if (input.model !== undefined && (!isValidText(input.model, 80) || !input.model.trim())) {
-      return response.status(400).json({ error: 'Model must be a non-empty model ID of at most 80 characters.' })
+    const validationError = validateRefineInput(input)
+    if (validationError) {
+      return response.status(400).json({ error: validationError })
     }
 
     let selection
@@ -296,13 +319,7 @@ export function createApp(database, {
     const model = selection.model
     let inferenceStarted = false
     try {
-      const task = {
-        title: input.title,
-        project: input.project || 'workspace',
-        task_type: input.task_type || 'feature',
-        description: input.description || '',
-        acceptance_criteria: input.acceptance_criteria || ''
-      }
+      const task = taskFromRefineInput(input)
       const prompt = buildTaskPrompt(task)
 
       try {
@@ -328,6 +345,63 @@ export function createApp(database, {
     } finally {
       selection.release({ inferenceStarted })
     }
+  })
+
+  app.get('/api/local-ai/jobs', (_request, response) => {
+    response.json(jobStore.list())
+  })
+
+  app.get('/api/local-ai/jobs/:id', (request, response) => {
+    const job = jobStore.get(request.params.id)
+    if (!job) {
+      return response.status(404).json({ error: `Unknown job: ${request.params.id}.` })
+    }
+    return response.json(job)
+  })
+
+  app.post('/api/local-ai/jobs', async (request, response) => {
+    const input = request.body
+    const validationError = validateRefineInput(input, { requireModel: true })
+    if (validationError) {
+      return response.status(400).json({ error: validationError })
+    }
+
+    let selection
+    try {
+      selection = await scheduler.select(input.model.trim())
+    } catch (error) {
+      console.error('Local AI job selection failed:', error)
+      return response.status(503).json({
+        error: 'Local AI model selection failed.',
+        state: 'unavailable'
+      })
+    }
+    if (selection.error) {
+      return response.status(selection.error.status).json(selection.error.body)
+    }
+
+    const task = taskFromRefineInput(input)
+    const prompt = buildTaskPrompt(task)
+    const job = jobStore.submit({
+      model: selection.model.id,
+      title: task.title,
+      runner: async () => {
+        let inferenceStarted = false
+        try {
+          inferenceStarted = true
+          const content = await modelClient.complete(selection.model, {
+            messages: prompt.messages,
+            maxTokens: prompt.maxTokens,
+            task
+          })
+          return parseAssistantDraft(content)
+        } finally {
+          selection.release({ inferenceStarted })
+        }
+      }
+    })
+
+    return response.status(202).json(job)
   })
 
   app.post('/api/tasks', (request, response) => {
