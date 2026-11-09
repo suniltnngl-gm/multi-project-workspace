@@ -63,6 +63,106 @@ class ModelScriptTests(unittest.TestCase):
         self.assertIn("project", str(caught.exception))
         self.assertIn("task_type", str(caught.exception))
 
+    def test_kaggle_timeout_attempts_to_cancel_the_kernel(self):
+        module = load_module("kaggle_run_timeout_cancel", KAGGLE_PATH)
+        task = {
+            "title": "Draft a task",
+            "project": "workspace",
+            "task_type": "feature",
+            "description": "",
+            "acceptance_criteria": "",
+        }
+        cancelled = []
+
+        def fake_run_kaggle(arguments, timeout=60):
+            if arguments[:3] == ["kaggle", "kernels", "status"]:
+                return "KernelWorkerStatus.QUEUED"
+            return "submitted"
+
+        def fake_cancel(kernel_id, fallback="none"):
+            cancelled.append((kernel_id, fallback))
+            return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "response.json"
+            with mock.patch.object(
+                module, "run_kaggle", side_effect=fake_run_kaggle
+            ), mock.patch.object(module, "cancel_kernel", side_effect=fake_cancel):
+                with self.assertRaises(TimeoutError):
+                    module.execute(task, output, 0, 1, "delete")
+
+        self.assertEqual(
+            cancelled, [("edmundrosariosunil/kaggle-qwen-coder", "delete")]
+        )
+
+    def test_kaggle_success_does_not_cancel_the_kernel(self):
+        module = load_module("kaggle_run_success", KAGGLE_PATH)
+        task = {
+            "title": "Draft a task",
+            "project": "workspace",
+            "task_type": "feature",
+            "description": "",
+            "acceptance_criteria": "",
+        }
+        cancelled = []
+
+        def fake_run_kaggle(arguments, timeout=60):
+            if arguments[:3] == ["kaggle", "kernels", "status"]:
+                return "KernelWorkerStatus.COMPLETE"
+            if arguments[:3] == ["kaggle", "kernels", "output"]:
+                output_dir = Path(arguments[arguments.index("-p") + 1])
+                (output_dir / "response.json").write_text(
+                    json.dumps(
+                        {"description": "draft", "acceptance_criteria": "done"}
+                    ),
+                    encoding="utf-8",
+                )
+            return "ok"
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "response.json"
+            with mock.patch.object(
+                module, "run_kaggle", side_effect=fake_run_kaggle
+            ), mock.patch.object(
+                module,
+                "cancel_kernel",
+                side_effect=lambda kernel_id, fallback="none": cancelled.append(
+                    (kernel_id, fallback)
+                ),
+            ):
+                module.execute(task, output, 30, 1)
+
+            self.assertEqual(json.loads(output.read_text()), {
+                "description": "draft",
+                "acceptance_criteria": "done",
+            })
+
+        self.assertEqual(cancelled, [])
+
+    def test_kaggle_cancel_falls_back_to_delete_only_when_requested(self):
+        module = load_module("kaggle_run_cancel_fallback", KAGGLE_PATH)
+        calls = []
+
+        class Result:
+            def __init__(self, returncode):
+                self.returncode = returncode
+
+        def fake_run(arguments, **_kwargs):
+            calls.append(arguments)
+            return Result(1 if arguments[2] == "cancel" else 0)
+
+        with mock.patch.object(module.subprocess, "run", side_effect=fake_run):
+            self.assertTrue(module.cancel_kernel("owner/kernel", "delete"))
+
+        self.assertEqual(calls[0][:3], ["kaggle", "kernels", "cancel"])
+        self.assertEqual(calls[1][:3], ["kaggle", "kernels", "delete"])
+
+        calls.clear()
+        with mock.patch.object(module.subprocess, "run", side_effect=fake_run):
+            self.assertFalse(module.cancel_kernel("owner/kernel", "none"))
+
+        self.assertEqual(len(calls), 1)
+
     def test_server_bootstraps_only_when_unhealthy(self):
         source = SERVER_PATH.read_text(encoding="utf-8")
         self.assertIn("if not is_healthy():", source)

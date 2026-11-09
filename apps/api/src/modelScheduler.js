@@ -62,7 +62,8 @@ export function createModelScheduler({
   minCpuLoad,
   maxCpuLoad,
   maxDiskBusyPercent,
-  turnCooldownMs
+  turnCooldownMs,
+  getModelMetrics
 }) {
   const callableModels = models.filter(isCallable)
   const states = new Map(callableModels.map((model) => [model.id, { inFlight: false }]))
@@ -164,10 +165,19 @@ export function createModelScheduler({
           error: health.error || `The endpoint for ${model.label} is unavailable.`
         })
       }
-      return modelStatus(model, { state: 'ready', available: true })
+      return modelStatus(model, {
+        state: 'ready',
+        available: true,
+        ...(health.sessionState ? { sessionState: health.sessionState } : {})
+      })
     }))
 
-    const result = { models: statuses }
+    const result = {
+      models: statuses.map((status) => {
+        const metrics = getModelMetrics?.(status.id)
+        return metrics ? { ...status, ...metrics } : status
+      })
+    }
     if (metrics) {
       result.metrics = metrics
       result.limits = limitsFor(cpuLoadLimit)

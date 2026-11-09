@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -96,6 +98,45 @@ def run_kaggle(arguments, timeout=60):
     return output
 
 
+def cancel_kernel(kernel_id, fallback="none"):
+    """Best-effort cancellation for a kernel left behind by a timeout.
+
+    Kaggle CLI 2.2.5 does not expose ``kernels cancel`` yet, so the first
+    attempt is forward-compatible rather than guaranteed. Setting
+    ``KAGGLE_AI_CANCEL_FALLBACK=delete`` deletes the kernel as a last resort;
+    that stops the run but also removes the private notebook, which the next
+    submission recreates.
+    """
+    commands = [["kaggle", "kernels", "cancel", kernel_id]]
+    if fallback == "delete":
+        commands.append(["kaggle", "kernels", "delete", kernel_id, "-y"])
+
+    for command in commands:
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            print(
+                f"Could not cancel Kaggle kernel {kernel_id}: {error}",
+                file=sys.stderr,
+            )
+            continue
+        if result.returncode == 0:
+            print(f"Cancelled Kaggle kernel {kernel_id}.", file=sys.stderr)
+            return True
+
+    print(
+        f"Warning: could not cancel Kaggle kernel {kernel_id}. "
+        "Stop it from https://www.kaggle.com/code if it is still queued or running.",
+        file=sys.stderr,
+    )
+    return False
+
+
 def wait_for_completion(kernel_id, timeout_seconds, poll_interval):
     deadline = time.monotonic() + timeout_seconds
     while True:
@@ -133,7 +174,7 @@ def validate_response(response_path):
     return response
 
 
-def execute(task, output_path, timeout_seconds, poll_interval):
+def execute(task, output_path, timeout_seconds, poll_interval, cancel_fallback="none"):
     if shutil.which("kaggle") is None:
         raise FileNotFoundError(
             "Kaggle CLI is required. Install it and configure your Kaggle API credentials."
@@ -141,39 +182,45 @@ def execute(task, output_path, timeout_seconds, poll_interval):
 
     with tempfile.TemporaryDirectory(prefix="kaggle-qwen-run-") as temporary_dir:
         kernel_id, _ = prepare_run_directory(task, Path(temporary_dir))
-        print(f"Submitting one private Kaggle notebook run: {kernel_id}", flush=True)
-        print(
-            run_kaggle(
-                ["kaggle", "kernels", "push", "-p", temporary_dir],
-                timeout=180,
-            ),
-            flush=True,
-        )
-        wait_for_completion(kernel_id, timeout_seconds, poll_interval)
-
-        with tempfile.TemporaryDirectory(prefix="kaggle-qwen-output-") as output_dir:
-            print("Downloading completed notebook output.", flush=True)
+        try:
+            print(f"Submitting one private Kaggle notebook run: {kernel_id}", flush=True)
             print(
                 run_kaggle(
-                    [
-                        "kaggle",
-                        "kernels",
-                        "output",
-                        kernel_id,
-                        "-p",
-                        output_dir,
-                    ],
+                    ["kaggle", "kernels", "push", "-p", temporary_dir],
                     timeout=180,
                 ),
                 flush=True,
             )
-            response_files = list(Path(output_dir).rglob("response.json"))
-            if len(response_files) != 1:
-                raise FileNotFoundError(
-                    "Expected one response.json in Kaggle output; "
-                    f"found {response_files}."
+            wait_for_completion(kernel_id, timeout_seconds, poll_interval)
+
+            with tempfile.TemporaryDirectory(prefix="kaggle-qwen-output-") as output_dir:
+                print("Downloading completed notebook output.", flush=True)
+                print(
+                    run_kaggle(
+                        [
+                            "kaggle",
+                            "kernels",
+                            "output",
+                            kernel_id,
+                            "-p",
+                            output_dir,
+                        ],
+                        timeout=180,
+                    ),
+                    flush=True,
                 )
-            response = validate_response(response_files[0])
+                response_files = list(Path(output_dir).rglob("response.json"))
+                if len(response_files) != 1:
+                    raise FileNotFoundError(
+                        "Expected one response.json in Kaggle output; "
+                        f"found {response_files}."
+                    )
+                response = validate_response(response_files[0])
+        except BaseException:
+            # A timed-out or interrupted runner must not leave the kernel
+            # consuming queue space or GPU time.
+            cancel_kernel(kernel_id, cancel_fallback)
+            raise
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
@@ -214,14 +261,32 @@ def parse_arguments(argv=None):
         default=30,
         help="Seconds between Kaggle status checks (default: 30)",
     )
+    parser.add_argument(
+        "--cancel-fallback",
+        choices=("none", "delete"),
+        default=os.environ.get("KAGGLE_AI_CANCEL_FALLBACK", "none"),
+        help=(
+            "Best-effort cleanup after a timeout. 'delete' also deletes the "
+            "private kernel if the CLI has no cancel command (default: none)"
+        ),
+    )
     arguments = parser.parse_args(argv)
     if arguments.timeout < 1 or arguments.poll_interval < 1:
         parser.error("--timeout and --poll-interval must be positive integers")
     return arguments
 
 
+def raise_interrupt(_signum, _frame):
+    raise KeyboardInterrupt
+
+
 def main(argv=None):
     arguments = parse_arguments(argv)
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(signum, raise_interrupt)
+        except (OSError, ValueError):
+            pass
     try:
         task = load_task(arguments.task_json)
         execute(
@@ -229,7 +294,11 @@ def main(argv=None):
             arguments.output,
             arguments.timeout,
             arguments.poll_interval,
+            arguments.cancel_fallback,
         )
+    except KeyboardInterrupt:
+        print("Kaggle inference cancelled.", file=sys.stderr)
+        return 130
     except (
         FileNotFoundError,
         json.JSONDecodeError,

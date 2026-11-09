@@ -14,25 +14,60 @@ const DEFAULT_KAGGLE_TIMEOUT_MS = 3600000
 const SCRIPTS_DIR = fileURLToPath(new URL('../../../scripts', import.meta.url))
 
 export class ModelCallError extends Error {
-  constructor(message, status = 502) {
+  constructor(message, status = 502, { retryAfter } = {}) {
     super(message)
     this.name = 'ModelCallError'
     this.status = status
+    if (Number.isFinite(retryAfter)) this.retryAfter = Math.max(0, Math.ceil(retryAfter))
   }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function errorText(error) {
+  return String(error?.message || error || '').toLowerCase()
+}
+
+function isCapacityError(error) {
+  const message = errorText(error)
+  return (
+    message.includes('service unavailable')
+    || message.includes('503')
+    || message.includes('capacity')
+    || message.includes('resource exhausted')
+    || message.includes('try again later')
+  )
+}
+
+function isEntitlementError(error) {
+  const message = errorText(error)
+  return (
+    message.includes('rejected accelerator')
+    || message.includes('quota or entitlement')
+    || message.includes('not have quota')
+    || message.includes('entitlement')
+  )
 }
 
 async function defaultRunCommand(command, args, {
   timeoutMs = 600000,
-  env = process.env
+  env = process.env,
+  signal
 } = {}) {
   try {
     const { stdout, stderr } = await execFileAsync(command, args, {
       timeout: timeoutMs,
       maxBuffer: 10 * 1024 * 1024,
-      env
+      env,
+      signal
     })
     return { stdout, stderr }
   } catch (error) {
+    if (signal?.aborted) {
+      throw new ModelCallError(`${command} was cancelled.`, 499)
+    }
     if (error.killed || error.signal === 'SIGTERM' || error.code === 'ETIMEDOUT') {
       throw new ModelCallError(
         `${command} timed out after ${Math.ceil(timeoutMs / 1000)} seconds.`,
@@ -54,6 +89,14 @@ function parseContent(result) {
     throw new ModelCallError('The model returned an empty response.', 502)
   }
   return content
+}
+
+function reportPhase(request, phase) {
+  try {
+    request?.onPhase?.(phase)
+  } catch {
+    // Progress reporting must never break inference.
+  }
 }
 
 export function createModelClient({
@@ -87,34 +130,55 @@ export function createModelClient({
     return false
   }
 
+  async function probeColabSession(model) {
+    try {
+      const { stdout } = await runCommand(
+        model.cli.command,
+        ['status', '-s', model.cli.session],
+        { timeoutMs: 15000 }
+      )
+      return /not found|no active session|not running/i.test(stdout)
+        ? 'absent'
+        : 'present'
+    } catch {
+      return 'unknown'
+    }
+  }
+
   async function probeCli(model) {
     const command = model.cli.command
+    const cacheKey = command === 'colab'
+      ? `colab:${model.cli.session}`
+      : command
     const now = Date.now()
-    const cached = probeCache.get(command)
-    if (cached && now - cached.at < PROBE_CACHE_MS) return cached.ok
+    const cached = probeCache.get(cacheKey)
+    if (cached && now - cached.at < PROBE_CACHE_MS) return cached.value
 
-    let ok = false
+    let value = { ok: false }
     try {
       const args = model.cli.probeArgs
         ?? (command === 'colab' ? ['version'] : ['--version'])
       await runCommand(command, args, { timeoutMs: 20000 })
-      ok = true
+      value = { ok: true }
+      if (command === 'colab') {
+        value.sessionState = await probeColabSession(model)
+      }
     } catch {
-      ok = false
+      value = { ok: false }
     }
-    probeCache.set(command, { ok, at: now })
-    return ok
+    probeCache.set(cacheKey, { value, at: now })
+    return value
   }
 
   async function probe(model) {
     const cliBackend = model.backend === 'colab-cli' || model.backend === 'kaggle-cli'
-    let ok
+    let result
     if (cliBackend) {
-      ok = await probeCli(model)
+      result = await probeCli(model)
     } else {
-      ok = await probeHttp(model)
+      result = { ok: await probeHttp(model) }
     }
-    if (ok) return { ok: true }
+    if (result.ok) return result
     return {
       ok: false,
       error: cliBackend
@@ -124,12 +188,17 @@ export function createModelClient({
   }
 
   async function completeHttp(model, request) {
+    reportPhase(request, 'generating')
     let response
+    const timeout = AbortSignal.timeout(model.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS)
+    const signal = request.signal
+      ? AbortSignal.any([timeout, request.signal])
+      : timeout
     try {
       response = await fetchImpl(`${model.url}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders(model) },
-        signal: AbortSignal.timeout(model.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS),
+        signal,
         body: JSON.stringify({
           model: model.id,
           temperature: 0.2,
@@ -139,6 +208,9 @@ export function createModelClient({
         })
       })
     } catch (error) {
+      if (request.signal?.aborted) {
+        throw new ModelCallError(`The request to ${model.label} was cancelled.`, 499)
+      }
       if (error.name === 'TimeoutError' || error.name === 'AbortError') {
         throw new ModelCallError(`The model ${model.label} took too long to respond.`, 504)
       }
@@ -171,7 +243,7 @@ export function createModelClient({
     )
   }
 
-  async function bootstrapColab(model) {
+  async function bootstrapColab(model, signal) {
     const { command, session, port, modelId, bootstrapTimeoutMs } = model.cli
     const bootstrapSeconds = Math.max(60, Math.ceil(bootstrapTimeoutMs / 1000))
     await runCommand(command, [
@@ -181,25 +253,61 @@ export function createModelClient({
       '--timeout', String(bootstrapSeconds),
       '--env', `WORKSPACE_MODEL_PORT=${port}`,
       '--env', `WORKSPACE_MODEL_ID=${modelId}`
-    ], { timeoutMs: bootstrapTimeoutMs + 60000 })
+    ], { timeoutMs: bootstrapTimeoutMs + 60000, signal })
   }
 
-  async function ensureColabSession(model) {
+  async function createColabSession(model, signal) {
+    const { command, session, gpus, gpu, newRetries, retryBackoffMs } = model.cli
+    const candidates = gpus?.length ? gpus : [gpu || 'T4']
+    const retries = Number.isFinite(newRetries) ? Math.max(0, newRetries) : 0
+    const backoff = Number.isFinite(retryBackoffMs) ? Math.max(0, retryBackoffMs) : 0
+    const attempts = []
+
+    for (const accelerator of candidates) {
+      for (let attempt = 0; attempt <= retries; attempt += 1) {
+        try {
+          await runCommand(command, ['new', '-s', session, '--gpu', accelerator], {
+            timeoutMs: 300000,
+            signal
+          })
+          return accelerator
+        } catch (error) {
+          if (signal?.aborted) throw error
+          attempts.push(`${accelerator}: ${error.message}`)
+          // Entitlement failures cannot be fixed by retrying the same shape.
+          if (isEntitlementError(error)) break
+          if (!isCapacityError(error)) throw error
+          if (attempt < retries) await sleep(backoff)
+        }
+      }
+    }
+
+    const retryAfterSeconds = Math.max(
+      5,
+      Math.ceil((Number.isFinite(retryBackoffMs) ? retryBackoffMs : 15000) / 1000)
+    )
+    throw new ModelCallError(
+      `Colab could not allocate a GPU (${attempts.at(-1) || 'no accelerator available'}). `
+        + 'Try again later or set COLAB_AI_GPUS to an accelerator your account can use.',
+      503,
+      { retryAfter: retryAfterSeconds }
+    )
+  }
+
+  async function ensureColabSession(model, signal) {
     const state = colabState(model)
     if (state.ready) return
 
-    const { command, session, gpu } = model.cli
+    const { command, session } = model.cli
     try {
       // `colab status` exits successfully even when the session is missing, so
       // probe by bootstrapping and create a session only for that specific
       // failure. Other errors (pip, model download) should surface as-is.
-      await bootstrapColab(model)
+      await bootstrapColab(model, signal)
     } catch (error) {
       if (!isMissingSessionError(error)) throw error
-      await runCommand(command, ['new', '-s', session, '--gpu', gpu], {
-        timeoutMs: 300000
-      })
-      await bootstrapColab(model)
+      await createColabSession(model, signal)
+      await bootstrapColab(model, signal)
     }
     state.ready = true
   }
@@ -232,7 +340,9 @@ export function createModelClient({
   }
 
   async function completeColab(model, request) {
-    await ensureColabSession(model)
+    reportPhase(request, 'bootstrapping')
+    await ensureColabSession(model, request.signal)
+    reportPhase(request, 'generating')
     const state = colabState(model)
     const { command, session, port } = model.cli
     const timeoutMs = model.timeoutMs ?? DEFAULT_COLAB_TIMEOUT_MS
@@ -259,7 +369,7 @@ export function createModelClient({
           '--timeout', String(Math.max(30, Math.ceil(timeoutMs / 1000))),
           '--env', `WORKSPACE_MODEL_PORT=${port}`,
           '--env', `WORKSPACE_MODEL_REQUEST=${payload}`
-        ], { timeoutMs: timeoutMs + 60000 }))
+        ], { timeoutMs: timeoutMs + 60000, signal: request.signal }))
       } catch (error) {
         // The session may have expired or the server thread may have died.
         // Force a bootstrap on the next call.
@@ -312,14 +422,17 @@ export function createModelClient({
       await writeFile(taskPath, JSON.stringify(request.task), 'utf8')
 
       const timeoutMs = model.timeoutMs ?? DEFAULT_KAGGLE_TIMEOUT_MS
+      reportPhase(request, 'submitting')
       await runCommand(model.cli.python, [
         join(scriptsDir, 'kaggle_run.py'),
         '--task-json', taskPath,
         '--output', outputPath,
         '--timeout', String(Math.max(60, Math.floor(timeoutMs / 1000))),
-        '--poll-interval', String(Math.max(1, model.cli.pollIntervalSeconds ?? 30))
-      ], { timeoutMs: timeoutMs + 120000 })
+        '--poll-interval', String(Math.max(1, model.cli.pollIntervalSeconds ?? 30)),
+        '--cancel-fallback', model.cli.cancelFallback ?? 'none'
+      ], { timeoutMs: timeoutMs + 120000, signal: request.signal })
 
+      reportPhase(request, 'generating')
       const parsed = JSON.parse(await readFile(outputPath, 'utf8'))
       if (
         typeof parsed.description !== 'string' ||

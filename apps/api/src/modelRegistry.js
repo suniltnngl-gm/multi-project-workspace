@@ -112,6 +112,15 @@ function readBoolean(env, key, fallback) {
   return !['0', 'false', 'no', 'off'].includes(String(value).toLowerCase())
 }
 
+function readList(env, key, fallback = []) {
+  const value = env[key]
+  if (value === undefined || value === '') return fallback
+  return String(value)
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
 function trimUrl(url) {
   return url.replace(/\/+$/, '')
 }
@@ -148,13 +157,22 @@ function readUrl(env, key) {
 }
 
 function createCliConfig(env) {
+  const colabGpus = readList(
+    env,
+    'COLAB_AI_GPUS',
+    [readText(env, 'COLAB_AI_GPU', 'T4')]
+  )
   return {
     colab: {
       command: 'colab',
       probeArgs: ['sessions'],
       session: readText(env, 'COLAB_AI_SESSION', 'workspace-qwen'),
       auditDir: readText(env, 'COLAB_AI_AUDIT_DIR', ''),
-      gpu: readText(env, 'COLAB_AI_GPU', 'T4'),
+      // `gpu` stays for compatibility; `gpus` is the ordered fallback list.
+      gpu: colabGpus[0] ?? 'T4',
+      gpus: colabGpus.length > 0 ? colabGpus : ['T4'],
+      newRetries: readNumber(env, 'COLAB_AI_NEW_RETRIES', 1),
+      retryBackoffMs: readNumber(env, 'COLAB_AI_RETRY_BACKOFF_MS', 15000),
       port: readNumber(env, 'COLAB_AI_PORT', 8765),
       modelId: readText(env, 'COLAB_AI_MODEL', 'Qwen/Qwen2.5-Coder-3B-Instruct'),
       bootstrapTimeoutMs: readNumber(env, 'COLAB_AI_BOOTSTRAP_TIMEOUT_MS', 1800000)
@@ -163,7 +181,8 @@ function createCliConfig(env) {
       command: 'kaggle',
       probeArgs: ['config', 'view'],
       python: readText(env, 'KAGGLE_AI_PYTHON', 'python3'),
-      pollIntervalSeconds: readNumber(env, 'KAGGLE_AI_POLL_INTERVAL_SECONDS', 30)
+      pollIntervalSeconds: readNumber(env, 'KAGGLE_AI_POLL_INTERVAL_SECONDS', 30),
+      cancelFallback: readText(env, 'KAGGLE_AI_CANCEL_FALLBACK', 'none')
     }
   }
 }

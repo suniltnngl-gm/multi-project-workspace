@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import { after, before, test } from 'node:test'
 import { createApp } from '../src/app.js'
 import { createDatabase } from '../src/database.js'
+import { createModelBudget } from '../src/modelBudget.js'
+import { ModelCallError } from '../src/modelClient.js'
 import {
   createModelRegistry,
   planLocalModelLaunches
@@ -123,8 +125,25 @@ test('registry contains two callable local models and two CLI-backed remote mode
   assert.equal(models[2].cli.session, 'workspace-qwen')
   assert.deepEqual(models[2].cli.probeArgs, ['sessions'])
   assert.equal(models[2].cli.auditDir, '')
+  assert.deepEqual(models[2].cli.gpus, ['T4'])
+  assert.equal(models[2].cli.newRetries, 1)
+  assert.equal(models[2].cli.retryBackoffMs, 15000)
   assert.equal(models[3].cli.command, 'kaggle')
   assert.deepEqual(models[3].cli.probeArgs, ['config', 'view'])
+  assert.equal(models[3].cli.cancelFallback, 'none')
+
+  const accelerated = createModelRegistry({
+    env: {
+      COLAB_AI_GPUS: 'T4, L4',
+      COLAB_AI_NEW_RETRIES: '2',
+      COLAB_AI_RETRY_BACKOFF_MS: '1000',
+      KAGGLE_AI_CANCEL_FALLBACK: 'delete'
+    }
+  })
+  assert.deepEqual(accelerated[2].cli.gpus, ['T4', 'L4'])
+  assert.equal(accelerated[2].cli.gpu, 'T4')
+  assert.equal(accelerated[2].cli.newRetries, 2)
+  assert.equal(accelerated[3].cli.cancelFallback, 'delete')
 
   const custom = createModelRegistry({ env: { LOCAL_AI_URL: 'http://127.0.0.1:9090/' } })
   assert.equal(custom[0].url, 'http://127.0.0.1:9090')
@@ -465,5 +484,82 @@ test('unknown models are rejected before inference', async () => {
     assert.equal(response.status, 400)
     assert.match((await response.json()).error, /Unknown model/)
     assert.equal(modelCalled, false)
+  })
+})
+
+test('status reports the reusable Colab session state', async () => {
+  const colab = {
+    id: 'colab',
+    label: 'Colab model',
+    provider: 'colab',
+    execution: 'live',
+    backend: 'colab-cli',
+    callable: true,
+    remote: true,
+    autoSelect: false,
+    priority: 1,
+    minAvailableMemoryMb: 0,
+    cli: { command: 'colab', session: 'workspace-qwen' }
+  }
+
+  await withApp({
+    models: [colab],
+    getResourceMetrics: async () => idleMetrics(),
+    modelClient: {
+      probe: async () => ({ ok: true, sessionState: 'absent' })
+    }
+  }, async (url) => {
+    const status = await (await fetch(`${url}/api/local-ai/status`)).json()
+    const model = status.models.find((entry) => entry.id === 'colab')
+    assert.equal(model.state, 'ready')
+    assert.equal(model.sessionState, 'absent')
+  })
+})
+
+test('capacity failures keep their retry delay in the API response', async () => {
+  await withApp({
+    getResourceMetrics: async () => idleMetrics(),
+    modelClient: {
+      probe: async () => ({ ok: true }),
+      complete: async () => {
+        throw new ModelCallError('Colab could not allocate a GPU.', 503, { retryAfter: 42 })
+      }
+    }
+  }, async (url) => {
+    const response = await refine(url, { model: 'local-small' })
+    assert.equal(response.status, 503)
+    const payload = await response.json()
+    assert.equal(payload.error, 'Colab could not allocate a GPU.')
+    assert.equal(payload.retryAfter, 42)
+  })
+})
+
+test('model responses include a persisted daily budget when configured', async () => {
+  const rows = new Map()
+  const modelBudget = createModelBudget({
+    env: { KAGGLE_AI_MAX_REQUESTS_PER_DAY: '3' },
+    repository: {
+      getBudget: (model, day) => rows.get(`${model}:${day}`) ?? 0,
+      incrementBudget: (model, day) => {
+        const key = `${model}:${day}`
+        const used = (rows.get(key) ?? 0) + 1
+        rows.set(key, used)
+        return used
+      },
+      pruneBudgetBefore: () => {}
+    }
+  })
+  modelBudget.record('kaggle-3b')
+  modelBudget.record('kaggle-3b')
+  const models = MODELS.map((model) => (
+    model.id === 'kaggle' ? { ...model, id: 'kaggle-3b' } : model
+  ))
+
+  await withApp({ models, modelBudget }, async (url) => {
+    const registry = await (await fetch(`${url}/api/models`)).json()
+    const kaggle = registry.find((model) => model.id === 'kaggle-3b')
+    assert.equal(kaggle.budget.limit, 3)
+    assert.equal(kaggle.budget.used, 2)
+    assert.equal(kaggle.budget.remaining, 1)
   })
 })

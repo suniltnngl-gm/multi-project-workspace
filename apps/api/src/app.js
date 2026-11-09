@@ -6,6 +6,8 @@ import { createModelRegistry, publicModelDefinition } from './modelRegistry.js'
 import { createModelScheduler } from './modelScheduler.js'
 import { createModelClient } from './modelClient.js'
 import { createTaskJobStore } from './taskJobStore.js'
+import { createModelMetrics } from './modelMetrics.js'
+import { createModelBudget } from './modelBudget.js'
 import { loadWorkspaceEnv } from '../../../scripts/env.mjs'
 
 loadWorkspaceEnv()
@@ -225,7 +227,10 @@ export function createApp(database, {
   localAiUrl = LOCAL_AI_URL,
   localAiApiKey = LOCAL_AI_API_KEY,
   models = createModelRegistry({ localAiUrl }),
-  modelClient = createModelClient({ fetchImpl, apiKey: localAiApiKey })
+  modelClient = createModelClient({ fetchImpl, apiKey: localAiApiKey }),
+  modelMetrics = createModelMetrics(),
+  modelBudget = createModelBudget({ repository: database }),
+  turnCooldownMs = LOCAL_AI_TURN_COOLDOWN_MS
 } = {}) {
   const app = express()
   const scheduler = createModelScheduler({
@@ -239,9 +244,10 @@ export function createApp(database, {
     minCpuLoad: LOCAL_AI_MIN_LOAD,
     maxCpuLoad: LOCAL_AI_MAX_LOAD,
     maxDiskBusyPercent: LOCAL_AI_MAX_DISK_BUSY_PERCENT,
-    turnCooldownMs: LOCAL_AI_TURN_COOLDOWN_MS
+    turnCooldownMs,
+    getModelMetrics: modelMetrics.snapshot
   })
-  const jobStore = createTaskJobStore()
+  const jobStore = createTaskJobStore({ repository: database })
   app.use(express.json({ limit: '16kb' }))
 
   app.get('/health', (_request, response) => {
@@ -279,13 +285,25 @@ export function createApp(database, {
     response.json(['workspace', ...database.listProjects().filter((project) => project !== 'workspace')])
   })
 
+  function withBudget(status) {
+    const budget = modelBudget.snapshot(status.id)
+    return budget ? { ...status, budget } : status
+  }
+
   app.get('/api/models', (_request, response) => {
-    response.json(models.map(publicModelDefinition))
+    response.json(models.map((model) => withBudget({
+      ...publicModelDefinition(model),
+      ...(modelMetrics.snapshot(model.id) || {})
+    })))
   })
 
   app.get('/api/local-ai/status', async (_request, response) => {
     try {
-      return response.json(await scheduler.status())
+      const status = await scheduler.status()
+      return response.json({
+        ...status,
+        models: status.models.map(withBudget)
+      })
     } catch (error) {
       console.error('Local AI status failed:', error)
       return response.json({
@@ -317,18 +335,32 @@ export function createApp(database, {
     }
 
     const model = selection.model
+    const budget = modelBudget.check(model.id)
+    if (!budget.ok) {
+      selection.release({ inferenceStarted: false })
+      return response.status(429).json({
+        error: `${model.label} reached its daily request limit (${budget.budget.used}/${budget.budget.limit}).`,
+        ...budget
+      })
+    }
+
     let inferenceStarted = false
+    let startedAt
     try {
       const task = taskFromRefineInput(input)
       const prompt = buildTaskPrompt(task)
 
       try {
         inferenceStarted = true
+        startedAt = Date.now()
+        modelBudget.record(model.id)
+        modelMetrics.recordStart(model.id)
         const content = await modelClient.complete(model, {
           messages: prompt.messages,
           maxTokens: prompt.maxTokens,
           task
         })
+        modelMetrics.recordSuccess(model.id, { durationMs: Date.now() - startedAt })
 
         try {
           return response.json(parseAssistantDraft(content))
@@ -337,9 +369,13 @@ export function createApp(database, {
           return response.status(502).json({ error: 'The local model returned an invalid task draft. Please retry.' })
         }
       } catch (error) {
+        modelMetrics.recordError(model.id, error, {
+          durationMs: startedAt === undefined ? undefined : Date.now() - startedAt
+        })
         console.error(`Local AI request to ${model.id} failed:`, error)
         return response.status(error.status ?? 503).json({
-          error: error.message || `The model ${model.label} is unavailable.`
+          error: error.message || `The model ${model.label} is unavailable.`,
+          ...(error.retryAfter !== undefined ? { retryAfter: error.retryAfter } : {})
         })
       }
     } finally {
@@ -357,6 +393,14 @@ export function createApp(database, {
       return response.status(404).json({ error: `Unknown job: ${request.params.id}.` })
     }
     return response.json(job)
+  })
+
+  app.delete('/api/local-ai/jobs/:id', (request, response) => {
+    const result = jobStore.cancel(request.params.id)
+    if (!result) {
+      return response.status(404).json({ error: `Unknown job: ${request.params.id}.` })
+    }
+    return response.status(result.cancelled ? 202 : 409).json(result.job)
   })
 
   app.post('/api/local-ai/jobs', async (request, response) => {
@@ -380,21 +424,43 @@ export function createApp(database, {
       return response.status(selection.error.status).json(selection.error.body)
     }
 
+    const model = selection.model
+    const budget = modelBudget.check(model.id)
+    if (!budget.ok) {
+      selection.release({ inferenceStarted: false })
+      return response.status(429).json({
+        error: `${model.label} reached its daily request limit (${budget.budget.used}/${budget.budget.limit}).`,
+        ...budget
+      })
+    }
+
     const task = taskFromRefineInput(input)
     const prompt = buildTaskPrompt(task)
+    modelBudget.record(model.id)
     const job = jobStore.submit({
-      model: selection.model.id,
+      model: model.id,
       title: task.title,
-      runner: async () => {
+      runner: async ({ signal, onPhase }) => {
         let inferenceStarted = false
+        let startedAt
         try {
           inferenceStarted = true
-          const content = await modelClient.complete(selection.model, {
+          startedAt = Date.now()
+          modelMetrics.recordStart(model.id)
+          const content = await modelClient.complete(model, {
             messages: prompt.messages,
             maxTokens: prompt.maxTokens,
-            task
+            task,
+            signal,
+            onPhase
           })
+          modelMetrics.recordSuccess(model.id, { durationMs: Date.now() - startedAt })
           return parseAssistantDraft(content)
+        } catch (error) {
+          modelMetrics.recordError(model.id, error, {
+            durationMs: startedAt === undefined ? undefined : Date.now() - startedAt
+          })
+          throw error
         } finally {
           selection.release({ inferenceStarted })
         }

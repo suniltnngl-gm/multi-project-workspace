@@ -17,6 +17,26 @@ function toTask(row) {
   return { ...row, completed: row.status === 'done' || Boolean(row.completed) }
 }
 
+function toJob(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    state: row.state,
+    phase: row.phase,
+    model: row.model,
+    title: row.title,
+    createdAt: row.created_at,
+    ...(row.started_at !== null ? { startedAt: row.started_at } : {}),
+    ...(row.finished_at !== null ? { finishedAt: row.finished_at } : {}),
+    ...(row.result !== null ? { result: JSON.parse(row.result) } : {}),
+    ...(row.error !== null ? { error: row.error } : {}),
+    ...(row.status !== null ? { status: row.status } : {}),
+    ...(row.retry_after !== null && row.retry_after !== undefined
+      ? { retryAfter: row.retry_after }
+      : {})
+  }
+}
+
 export function createDatabase(databasePath = process.env.DATABASE_PATH || defaultDatabasePath) {
   const resolvedPath = resolve(databasePath)
   mkdirSync(dirname(resolvedPath), { recursive: true })
@@ -37,7 +57,29 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       acceptance_criteria TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
-    )
+    );
+
+    CREATE TABLE IF NOT EXISTS ai_jobs (
+      id TEXT PRIMARY KEY,
+      state TEXT NOT NULL,
+      phase TEXT NOT NULL DEFAULT 'queued',
+      model TEXT NOT NULL,
+      title TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      started_at INTEGER,
+      finished_at INTEGER,
+      result TEXT,
+      error TEXT,
+      status INTEGER,
+      retry_after INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS ai_budget (
+      model TEXT NOT NULL,
+      day TEXT NOT NULL,
+      used INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (model, day)
+    );
   `)
 
   const existingColumns = new Set(
@@ -47,6 +89,12 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     if (!existingColumns.has(column)) {
       connection.exec(`ALTER TABLE tasks ADD COLUMN ${column} ${definition}`)
     }
+  }
+  const jobColumns = new Set(
+    connection.prepare('PRAGMA table_info(ai_jobs)').all().map((column) => column.name)
+  )
+  if (!jobColumns.has('retry_after')) {
+    connection.exec('ALTER TABLE ai_jobs ADD COLUMN retry_after INTEGER')
   }
   connection.exec(`
     UPDATE tasks SET status = 'done' WHERE completed = 1 AND status = 'todo';
@@ -66,6 +114,45 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
   )
   const deleteStatement = connection.prepare('DELETE FROM tasks WHERE id = ?')
   const projectsStatement = connection.prepare('SELECT DISTINCT project FROM tasks ORDER BY project COLLATE NOCASE')
+  const listJobsStatement = connection.prepare(
+    'SELECT * FROM ai_jobs ORDER BY created_at ASC, id ASC'
+  )
+  const saveJobStatement = connection.prepare(`
+    INSERT INTO ai_jobs (
+      id, state, phase, model, title, created_at, started_at, finished_at,
+      result, error, status, retry_after
+    ) VALUES (
+      @id, @state, @phase, @model, @title, @createdAt, @startedAt, @finishedAt,
+      @result, @error, @status, @retryAfter
+    )
+    ON CONFLICT(id) DO UPDATE SET
+      state = excluded.state,
+      phase = excluded.phase,
+      started_at = excluded.started_at,
+      finished_at = excluded.finished_at,
+      result = excluded.result,
+      error = excluded.error,
+      status = excluded.status,
+      retry_after = excluded.retry_after
+  `)
+  const getJobStatement = connection.prepare('SELECT * FROM ai_jobs WHERE id = ?')
+  const deleteJobStatement = connection.prepare('DELETE FROM ai_jobs WHERE id = ?')
+  const interruptJobsStatement = connection.prepare(`
+    UPDATE ai_jobs
+    SET state = 'error', phase = 'finished', error = ?, finished_at = ?
+    WHERE state IN ('queued', 'running')
+  `)
+  const getBudgetStatement = connection.prepare(
+    'SELECT used FROM ai_budget WHERE model = ? AND day = ?'
+  )
+  const incrementBudgetStatement = connection.prepare(`
+    INSERT INTO ai_budget (model, day, used)
+    VALUES (?, ?, 1)
+    ON CONFLICT(model, day) DO UPDATE SET used = used + 1
+  `)
+  const pruneBudgetStatement = connection.prepare(
+    'DELETE FROM ai_budget WHERE day < ?'
+  )
 
   return {
     listTasks(filters = {}) {
@@ -133,6 +220,42 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     },
     deleteTask(id) {
       return deleteStatement.run(id).changes > 0
+    },
+    listJobs() {
+      return listJobsStatement.all().map(toJob)
+    },
+    saveJob(job) {
+      saveJobStatement.run({
+        id: job.id,
+        state: job.state,
+        phase: job.phase ?? 'queued',
+        model: job.model,
+        title: job.title,
+        createdAt: job.createdAt,
+        startedAt: job.startedAt ?? null,
+        finishedAt: job.finishedAt ?? null,
+        result: job.result === undefined ? null : JSON.stringify(job.result),
+        error: job.error ?? null,
+        status: job.status ?? null,
+        retryAfter: job.retryAfter ?? null
+      })
+      return toJob(getJobStatement.get(job.id))
+    },
+    deleteJob(id) {
+      return deleteJobStatement.run(id).changes > 0
+    },
+    markInterruptedJobs(message, finishedAt = Date.now()) {
+      return interruptJobsStatement.run(message, finishedAt).changes
+    },
+    getBudget(model, day) {
+      return getBudgetStatement.get(model, day)?.used ?? 0
+    },
+    incrementBudget(model, day) {
+      incrementBudgetStatement.run(model, day)
+      return getBudgetStatement.get(model, day)?.used ?? 0
+    },
+    pruneBudgetBefore(day) {
+      return pruneBudgetStatement.run(day).changes
     },
     close() {
       connection.close()

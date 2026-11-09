@@ -2,9 +2,12 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { after, before, test } from 'node:test'
+import { after, before, beforeEach, test } from 'node:test'
 import { createApp } from '../src/app.js'
 import { createDatabase } from '../src/database.js'
+import { createModelBudget } from '../src/modelBudget.js'
+import { createTaskJobStore } from '../src/taskJobStore.js'
+import { ModelCallError } from '../src/modelClient.js'
 
 const DRAFT = {
   description: 'A batch draft.',
@@ -42,6 +45,10 @@ before(async () => {
   database = createDatabase(join(directory, 'jobs.sqlite'))
 })
 
+beforeEach(() => {
+  for (const job of database.listJobs()) database.deleteJob(job.id)
+})
+
 after(async () => {
   database?.close()
   if (directory) await rm(directory, { recursive: true, force: true })
@@ -62,13 +69,15 @@ async function withApp(options, run) {
   }
 }
 
-async function waitForJob(url, id) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+async function waitForJob(url, id, expected) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
     const job = await (await fetch(`${url}/api/local-ai/jobs/${id}`)).json()
-    if (job.state === 'done' || job.state === 'error') return job
+    if (expected ? job.state === expected : ['done', 'error', 'cancelled'].includes(job.state)) {
+      return job
+    }
     await new Promise((resolve) => setTimeout(resolve, 5))
   }
-  throw new Error(`Job ${id} did not finish.`)
+  throw new Error(`Job ${id} did not reach ${expected || 'a terminal state'}.`)
 }
 
 function postJob(url, body = {}) {
@@ -107,6 +116,16 @@ test('background jobs run a model and expose the parsed draft', async () => {
 
     const list = await (await fetch(`${url}/api/local-ai/jobs`)).json()
     assert.deepEqual(list.map((entry) => entry.id), [submitted.id])
+
+    const models = await (await fetch(`${url}/api/models`)).json()
+    const kaggle = models.find((model) => model.id === 'kaggle-3b')
+    assert.equal(kaggle.requests, 1)
+    assert.equal(kaggle.failures, 0)
+    assert.equal(typeof kaggle.lastUsedAt, 'number')
+    assert.equal(typeof kaggle.lastDurationMs, 'number')
+
+    assert.equal(job.elapsedMs >= 0, true)
+    assert.equal(job.cancelable, false)
   })
 })
 
@@ -126,6 +145,162 @@ test('background jobs capture model failures', async () => {
     assert.equal(job.status, 502)
     assert.equal(job.result, undefined)
   })
+})
+
+test('background jobs can be cancelled while running', async () => {
+  let markStarted
+  const started = new Promise((resolve) => {
+    markStarted = resolve
+  })
+
+  await withApp({
+    modelClient: {
+      probe: async () => ({ ok: true }),
+      complete: async (_model, request) => {
+        markStarted()
+        return new Promise((resolve, reject) => {
+          request.signal.addEventListener('abort', () => {
+            reject(new ModelCallError('The request was cancelled.', 499))
+          })
+        })
+      }
+    }
+  }, async (url) => {
+    const submitted = await (await postJob(url)).json()
+    await started
+    const running = await waitForJob(url, submitted.id, 'running')
+    assert.equal(running.cancelable, true)
+
+    const cancelled = await fetch(`${url}/api/local-ai/jobs/${submitted.id}`, {
+      method: 'DELETE'
+    })
+    assert.equal(cancelled.status, 202)
+    assert.equal((await cancelled.json()).cancelRequested, true)
+
+    const job = await waitForJob(url, submitted.id)
+    assert.equal(job.state, 'cancelled')
+    assert.equal(job.error, 'The job was cancelled.')
+    assert.equal(job.cancelable, false)
+
+    const again = await fetch(`${url}/api/local-ai/jobs/${submitted.id}`, {
+      method: 'DELETE'
+    })
+    assert.equal(again.status, 409)
+  })
+})
+
+test('background jobs expose their current phase', async () => {
+  let release
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+
+  await withApp({
+    modelClient: {
+      probe: async () => ({ ok: true }),
+      complete: async (_model, request) => {
+        request.onPhase('submitting')
+        await gate
+        request.onPhase('generating')
+        return JSON.stringify(DRAFT)
+      }
+    }
+  }, async (url) => {
+    const submitted = await (await postJob(url)).json()
+    const running = await waitForJob(url, submitted.id, 'running')
+    assert.equal(running.phase, 'submitting')
+    release()
+    const job = await waitForJob(url, submitted.id)
+    assert.equal(job.state, 'done')
+    assert.equal(job.phase, 'finished')
+  })
+})
+
+test('remote daily budgets reject requests and are exposed in the model registry', async () => {
+  const rows = new Map()
+  const repository = {
+    getBudget: (model, day) => rows.get(`${model}:${day}`) ?? 0,
+    incrementBudget: (model, day) => {
+      const key = `${model}:${day}`
+      const used = (rows.get(key) ?? 0) + 1
+      rows.set(key, used)
+      return used
+    },
+    pruneBudgetBefore: () => {}
+  }
+  const modelBudget = createModelBudget({
+    env: { KAGGLE_AI_MAX_REQUESTS_PER_DAY: '1' },
+    repository
+  })
+
+  await withApp({
+    modelBudget,
+    turnCooldownMs: 0,
+    modelClient: {
+      probe: async () => ({ ok: true }),
+      complete: async () => JSON.stringify(DRAFT)
+    }
+  }, async (url) => {
+    const first = await postJob(url)
+    assert.equal(first.status, 202)
+    await waitForJob(url, (await first.json()).id)
+
+    const second = await postJob(url)
+    assert.equal(second.status, 429)
+    const payload = await second.json()
+    assert.match(payload.error, /daily request limit/)
+    assert.equal(payload.budget.remaining, 0)
+
+    const models = await (await fetch(`${url}/api/models`)).json()
+    const kaggle = models.find((model) => model.id === 'kaggle-3b')
+    assert.equal(kaggle.budget.limit, 1)
+    assert.equal(kaggle.budget.used, 1)
+    assert.equal(kaggle.budget.remaining, 0)
+  })
+})
+
+test('persisted jobs are reported as interrupted after a restart', async () => {
+  const persistedDirectory = await mkdtemp(join(tmpdir(), 'workspace-jobs-persist-'))
+  const persisted = createDatabase(join(persistedDirectory, 'jobs.sqlite'))
+  try {
+    const firstStore = createTaskJobStore({ repository: persisted })
+    const submitted = firstStore.submit({
+      model: 'kaggle-3b',
+      title: 'Long batch',
+      runner: () => new Promise(() => {})
+    })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    const restarted = createTaskJobStore({ repository: persisted })
+    const job = restarted.get(submitted.id)
+    assert.equal(job.state, 'error')
+    assert.match(job.error, /API restarted/)
+    assert.equal(typeof job.finishedAt, 'number')
+  } finally {
+    persisted.close()
+    await rm(persistedDirectory, { recursive: true, force: true })
+  }
+})
+
+test('daily budgets persist across budget instances', async () => {
+  const budgetDirectory = await mkdtemp(join(tmpdir(), 'workspace-budget-'))
+  const persisted = createDatabase(join(budgetDirectory, 'budget.sqlite'))
+  try {
+    const env = { KAGGLE_AI_MAX_REQUESTS_PER_DAY: '2' }
+    const first = createModelBudget({ env, repository: persisted })
+    first.record('kaggle-3b')
+    first.record('kaggle-3b')
+    assert.equal(first.check('kaggle-3b').ok, false)
+
+    const restarted = createModelBudget({ env, repository: persisted })
+    const budget = restarted.snapshot('kaggle-3b')
+    assert.equal(budget.used, 2)
+    assert.equal(budget.remaining, 0)
+    assert.equal(restarted.check('kaggle-3b').ok, false)
+  } finally {
+    persisted.close()
+    await rm(budgetDirectory, { recursive: true, force: true })
+  }
 })
 
 test('background jobs validate input and require an explicit model', async () => {

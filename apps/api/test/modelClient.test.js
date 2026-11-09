@@ -305,6 +305,7 @@ test('Kaggle writes the task, runs the batch runner, and reads its response', as
   assert.equal(invocation.args[0], join(SCRIPTS, 'kaggle_run.py'))
   assert.equal(invocation.args[invocation.args.indexOf('--timeout') + 1], '3600')
   assert.equal(invocation.args[invocation.args.indexOf('--poll-interval') + 1], '30')
+  assert.equal(invocation.args[invocation.args.indexOf('--cancel-fallback') + 1], 'none')
   assert.equal(invocation.options.timeoutMs, 3600000 + 120000)
   assert.deepEqual(taskContent, REQUEST.task)
   assert.deepEqual(JSON.parse(result), {
@@ -352,13 +353,37 @@ test('CLI probes are cached per command', async () => {
     scriptsDir: SCRIPTS
   })
 
-  assert.deepEqual(await client.probe(colabModel()), { ok: true })
-  assert.deepEqual(await client.probe(colabModel()), { ok: true })
+  assert.deepEqual(await client.probe(colabModel()), {
+    ok: true,
+    sessionState: 'present'
+  })
+  assert.deepEqual(await client.probe(colabModel()), {
+    ok: true,
+    sessionState: 'present'
+  })
   assert.deepEqual(await client.probe(kaggleModel()), { ok: true })
   assert.deepEqual(calls.map((call) => [call.command, call.args]), [
     ['colab', ['version']],
+    ['colab', ['status', '-s', 'workspace-qwen']],
     ['kaggle', ['--version']]
   ])
+})
+
+test('Colab probes report a missing reusable session', async () => {
+  const client = createModelClient({
+    runCommand: async (command, args) => {
+      if (command === 'colab' && args[0] === 'status') {
+        return { stdout: "[colab] Session 'workspace-qwen' not found.\n", stderr: '' }
+      }
+      return { stdout: '', stderr: '' }
+    },
+    scriptsDir: SCRIPTS
+  })
+
+  assert.deepEqual(await client.probe(colabModel()), {
+    ok: true,
+    sessionState: 'absent'
+  })
 })
 
 test('CLI probe failures report the missing CLI', async () => {
@@ -404,6 +429,191 @@ test('HTTP probes accept /v1/models and only forward the matching bearer key', a
   }
   await client.probe(remote)
   assert.equal(requests[2].headers.Authorization, undefined)
+})
+
+test('Colab falls back through configured GPU shapes after capacity errors', async () => {
+  const calls = []
+  let bootstraps = 0
+  const runCommand = async (command, args) => {
+    calls.push(args)
+    if (args[0] === 'new') {
+      if (args.includes('T4')) throw new ModelCallError('Service Unavailable', 502)
+      return { stdout: '', stderr: '' }
+    }
+    if (args.includes(join(SCRIPTS, 'colab_model_server.py'))) {
+      bootstraps += 1
+      if (bootstraps === 1) {
+        throw new ModelCallError(
+          "colab failed: [colab] Session 'workspace-qwen' not found.",
+          502
+        )
+      }
+      return { stdout: '', stderr: '' }
+    }
+    return {
+      stdout: `${RESULT_SENTINEL}${JSON.stringify({
+        choices: [{ message: { content: 'draft' } }]
+      })}`,
+      stderr: ''
+    }
+  }
+
+  const model = colabModel({
+    cli: {
+      ...colabModel().cli,
+      gpus: ['T4', 'L4'],
+      newRetries: 0,
+      retryBackoffMs: 0
+    }
+  })
+  const client = createModelClient({ runCommand, scriptsDir: SCRIPTS })
+  assert.equal(await client.complete(model, REQUEST), 'draft')
+  assert.deepEqual(calls.map((args) => args.slice(0, 2)), [
+    ['exec', '-s'],
+    ['new', '-s'],
+    ['new', '-s'],
+    ['exec', '-s'],
+    ['exec', '-s']
+  ])
+  assert.deepEqual(calls[1].slice(-2), ['--gpu', 'T4'])
+  assert.deepEqual(calls[2].slice(-2), ['--gpu', 'L4'])
+})
+
+test('Colab reports capacity failures with a retry delay', async () => {
+  const runCommand = async (command, args) => {
+    if (args[0] === 'exec') {
+      throw new ModelCallError(
+        "colab failed: [colab] Session 'workspace-qwen' not found.",
+        502
+      )
+    }
+    throw new ModelCallError('Service Unavailable', 502)
+  }
+
+  const model = colabModel({
+    cli: {
+      ...colabModel().cli,
+      gpus: ['T4', 'L4'],
+      newRetries: 0,
+      retryBackoffMs: 30000
+    }
+  })
+  const client = createModelClient({ runCommand, scriptsDir: SCRIPTS })
+  await assert.rejects(
+    () => client.complete(model, REQUEST),
+    (error) => (
+      error instanceof ModelCallError
+      && error.status === 503
+      && error.retryAfter === 30
+      && /could not allocate a GPU/.test(error.message)
+    )
+  )
+})
+
+test('Colab does not retry an accelerator the account cannot use', async () => {
+  const calls = []
+  const runCommand = async (command, args) => {
+    calls.push(args)
+    if (args[0] === 'exec') {
+      throw new ModelCallError(
+        "colab failed: [colab] Session 'workspace-qwen' not found.",
+        502
+      )
+    }
+    throw new ModelCallError(
+      'rejected accelerator: account does not have quota or entitlement for L4',
+      502
+    )
+  }
+
+  const model = colabModel({
+    cli: {
+      ...colabModel().cli,
+      gpus: ['L4'],
+      newRetries: 3,
+      retryBackoffMs: 0
+    }
+  })
+  const client = createModelClient({ runCommand, scriptsDir: SCRIPTS })
+  await assert.rejects(
+    () => client.complete(model, REQUEST),
+    (error) => error instanceof ModelCallError && error.status === 503
+  )
+  assert.equal(calls.filter((args) => args[0] === 'new').length, 1)
+})
+
+test('model clients report job phases', async () => {
+  const phases = []
+  const client = createModelClient({
+    fetchImpl: async () => Response.json({
+      choices: [{ message: { content: 'draft' } }]
+    })
+  })
+  await client.complete(
+    { id: 'http', label: 'HTTP', backend: 'http', url: 'http://model.test' },
+    { ...REQUEST, onPhase: (phase) => phases.push(phase) }
+  )
+  assert.deepEqual(phases, ['generating'])
+
+  const colabPhases = []
+  const colabClient = createModelClient({
+    runCommand: async (command, args) => {
+      if (args.includes(join(SCRIPTS, 'colab_model_server.py'))) {
+        return { stdout: '', stderr: '' }
+      }
+      return {
+        stdout: `${RESULT_SENTINEL}${JSON.stringify({
+          choices: [{ message: { content: 'draft' } }]
+        })}`,
+        stderr: ''
+      }
+    },
+    scriptsDir: SCRIPTS
+  })
+  await colabClient.complete(colabModel(), {
+    ...REQUEST,
+    onPhase: (phase) => colabPhases.push(phase)
+  })
+  assert.deepEqual(colabPhases, ['bootstrapping', 'generating'])
+
+  const kagglePhases = []
+  const kaggleClient = createModelClient({
+    runCommand: async (command, args) => {
+      await writeFile(
+        args[args.indexOf('--output') + 1],
+        JSON.stringify({ description: 'draft', acceptance_criteria: 'done' }),
+        'utf8'
+      )
+      return { stdout: '', stderr: '' }
+    },
+    scriptsDir: SCRIPTS
+  })
+  await kaggleClient.complete(kaggleModel(), {
+    ...REQUEST,
+    onPhase: (phase) => kagglePhases.push(phase)
+  })
+  assert.deepEqual(kagglePhases, ['submitting', 'generating'])
+})
+
+test('HTTP completions honour a caller abort signal', async () => {
+  const controller = new AbortController()
+  const client = createModelClient({
+    fetchImpl: async (_url, options) => new Promise((resolve, reject) => {
+      options.signal.addEventListener('abort', () => {
+        reject(new DOMException('Aborted', 'AbortError'))
+      })
+    })
+  })
+
+  const pending = client.complete(
+    { id: 'http', label: 'HTTP', backend: 'http', url: 'http://model.test', timeoutMs: 60000 },
+    { ...REQUEST, signal: controller.signal }
+  )
+  controller.abort()
+  await assert.rejects(
+    () => pending,
+    (error) => error instanceof ModelCallError && error.status === 499
+  )
 })
 
 test('HTTP completions report timeouts and rejection statuses', async () => {
