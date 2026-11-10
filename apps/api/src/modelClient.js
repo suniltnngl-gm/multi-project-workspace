@@ -546,25 +546,49 @@ export function createModelClient({
       throw new ModelCallError('The OpenCode CLI returned no model output.', 502)
     }
 
-    const auditDir = model.cli?.auditDir
+    return content
+  }
+
+  async function complete(model, request) {
+    const startedAt = Date.now()
+    const auditDir = process.env.AI_AUDIT_DIR || ''
+    let content
+    let error
+    try {
+      if (model.backend === 'colab-cli') content = await completeColab(model, request)
+      else if (model.backend === 'kaggle-cli') content = await completeKaggle(model, request)
+      else if (model.backend === 'opencode-cli') content = await completeOpencode(model, request)
+      else content = await completeHttp(model, request)
+    } catch (caught) {
+      error = caught
+    }
+
     if (auditDir) {
       try {
         await mkdir(auditDir, { recursive: true })
-        const auditPath = join(auditDir, `opencode-${Date.now()}.json`)
-        await writeFile(auditPath, stdout, 'utf8')
+        await writeFile(
+          join(auditDir, `${model.id}-${Date.now()}.json`),
+          JSON.stringify({
+            model: model.id,
+            backend: model.backend,
+            request: {
+              messages: request.messages,
+              task: request.task,
+              maxTokens: request.maxTokens
+            },
+            content: content ?? null,
+            error: error ? String(error.message || error) : null,
+            durationMs: Date.now() - startedAt
+          }, null, 2),
+          'utf8'
+        )
       } catch {
         // Auditing is best-effort and never blocks inference.
       }
     }
 
+    if (error) throw error
     return content
-  }
-
-  async function complete(model, request) {
-    if (model.backend === 'colab-cli') return completeColab(model, request)
-    if (model.backend === 'kaggle-cli') return completeKaggle(model, request)
-    if (model.backend === 'opencode-cli') return completeOpencode(model, request)
-    return completeHttp(model, request)
   }
 
   return { complete, probe }
