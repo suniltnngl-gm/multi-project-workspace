@@ -524,22 +524,14 @@ export function createModelClient({
     if (model.cli?.model) args.push('--model', model.cli.model)
     if (model.cli?.agent) args.push('--agent', model.cli.agent)
 
-    const baseTimeoutMs = model.timeoutMs ?? 300000
-    const timeoutMs = Math.min(600000, adaptiveTimeouts.get(model.id) ?? baseTimeoutMs)
-    const startedAt = Date.now()
+    const timeoutMs = model.timeoutMs ?? 300000
     let stdout
     try {
       ({ stdout } = await runCommand(model.cli.command, args, {
         timeoutMs,
         signal: request.signal
       }))
-      const observed = Date.now() - startedAt
-      adaptiveTimeouts.set(model.id, Math.min(600000, Math.max(baseTimeoutMs, observed * 2)))
     } catch (error) {
-      const message = String(error?.message || error)
-      if (/timed? ?out|timeout/i.test(message)) {
-        adaptiveTimeouts.set(model.id, Math.min(600000, timeoutMs * 2))
-      }
       throw new ModelCallError(`The OpenCode CLI failed: ${error.message}`, 502)
     }
 
@@ -584,6 +576,10 @@ export function createModelClient({
       if (cached) promptCache.delete(cacheKey)
     }
 
+    const baseTimeoutMs = model.timeoutMs ?? 120000
+    const effectiveTimeoutMs = Math.min(baseTimeoutMs * 2, adaptiveTimeouts.get(model.id) ?? baseTimeoutMs)
+    model.timeoutMs = effectiveTimeoutMs
+
     let content
     let error
     try {
@@ -591,7 +587,13 @@ export function createModelClient({
       else if (model.backend === 'kaggle-cli') content = await completeKaggle(model, request)
       else if (model.backend === 'opencode-cli') content = await completeOpencode(model, request)
       else content = await completeHttp(model, request)
+      const observed = Date.now() - startedAt
+      adaptiveTimeouts.set(model.id, Math.min(baseTimeoutMs * 2, Math.max(baseTimeoutMs, observed * 2)))
     } catch (caught) {
+      const message = String(caught?.message || caught)
+      if (/timed? ?out|timeout/i.test(message)) {
+        adaptiveTimeouts.set(model.id, Math.min(baseTimeoutMs * 2, effectiveTimeoutMs * 2))
+      }
       error = caught
     }
 
