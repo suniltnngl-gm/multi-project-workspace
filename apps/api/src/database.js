@@ -137,6 +137,8 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       command TEXT NOT NULL,
       version TEXT NOT NULL DEFAULT '',
       available INTEGER NOT NULL DEFAULT 0,
+      success_count INTEGER NOT NULL DEFAULT 0,
+      failure_count INTEGER NOT NULL DEFAULT 0,
       checked_at TEXT NOT NULL
     );
   `)
@@ -256,6 +258,26 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
           connection.exec(`ALTER TABLE ${tableName} DROP COLUMN ${column}`)
         } catch (error) {
           // Older SQLite builds cannot drop columns; leave them unused.
+        }
+      }
+    }
+  }
+
+  // Add outcome-tracking columns to tables that predate them.
+  for (const [tableName, columnsToAdd] of [
+    ['tools', ['success_count', 'failure_count']]
+  ]) {
+    const columns = new Set(
+      connection.prepare(`PRAGMA table_info(${tableName})`).all().map((column) => column.name)
+    )
+    for (const column of columnsToAdd) {
+      if (!columns.has(column)) {
+        try {
+          connection.exec(
+            `ALTER TABLE ${tableName} ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`
+          )
+        } catch (error) {
+          // Ignore if the column already exists or cannot be added.
         }
       }
     }
@@ -542,12 +564,14 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     )
     const listToolsStatement = connection.prepare('SELECT * FROM tools ORDER BY name')
     const upsertToolStatement = connection.prepare(
-      `INSERT INTO tools (name, command, version, available, checked_at)
-       VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO tools (name, command, version, available, success_count, failure_count, checked_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(name) DO UPDATE SET
          command = excluded.command,
          version = excluded.version,
          available = excluded.available,
+         success_count = tools.success_count + excluded.success_count,
+         failure_count = tools.failure_count + excluded.failure_count,
          checked_at = excluded.checked_at`
     )
 
@@ -892,17 +916,22 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
         command: row.command,
         version: row.version,
         available: Boolean(row.available),
+        successCount: row.success_count,
+        failureCount: row.failure_count,
         checkedAt: row.checked_at
       }))
     },
     scanTools(entries) {
       const now = new Date().toISOString()
       for (const entry of entries) {
+        const available = entry.available ? 1 : 0
         upsertToolStatement.run(
           entry.name,
           entry.command,
           entry.version || '',
-          entry.available ? 1 : 0,
+          available,
+          available,
+          available ? 0 : 1,
           now
         )
       }

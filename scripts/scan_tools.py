@@ -39,6 +39,8 @@ def connect(database):
           command TEXT NOT NULL,
           version TEXT NOT NULL DEFAULT '',
           available INTEGER NOT NULL DEFAULT 0,
+          success_count INTEGER NOT NULL DEFAULT 0,
+          failure_count INTEGER NOT NULL DEFAULT 0,
           checked_at TEXT NOT NULL
         )
         """
@@ -64,17 +66,20 @@ def scan(connection):
     now = datetime.datetime.now().isoformat(timespec="seconds")
     for name, command in TOOLS:
         available, version = tool_version(command)
+        available_flag = 1 if available else 0
         connection.execute(
             """
-            INSERT INTO tools (name, command, version, available, checked_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO tools (name, command, version, available, success_count, failure_count, checked_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
               command = excluded.command,
               version = excluded.version,
               available = excluded.available,
+              success_count = tools.success_count + excluded.success_count,
+              failure_count = tools.failure_count + excluded.failure_count,
               checked_at = excluded.checked_at
             """,
-            (name, command, version, 1 if available else 0, now),
+            (name, command, version, available_flag, available_flag, 0 if available else 1, now),
         )
     connection.commit()
     return len(TOOLS)
