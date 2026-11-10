@@ -275,7 +275,12 @@ export function createModelScheduler({
         if (status.state !== 'ready') return false
         return requested ? status.id === requested.id : status.autoSelect
       })
-      .sort((a, b) => b.priority - a.priority)
+      .sort((a, b) => {
+        const failuresA = Number.isFinite(a.failures) ? a.failures : 0
+        const failuresB = Number.isFinite(b.failures) ? b.failures : 0
+        if (failuresA !== failuresB) return failuresA - failuresB
+        return b.priority - a.priority
+      })
     const chosen = candidates.find((status) => !states.get(status.id).inFlight)
     if (!chosen) {
       if (!requested) {
