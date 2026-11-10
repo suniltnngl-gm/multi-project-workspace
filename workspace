@@ -164,6 +164,7 @@ print_help() {
   printf '  %-24s %s\n' 'tracks' 'List available tracking domains'
   printf '  %-24s %s\n' 'maintain' 'Run tracking scans and self-check'
   printf '  %-24s %s\n' 'backup' 'Back up the SQLite database'
+  printf '  %-24s %s\n' 'env-encrypt [src] [dst]' 'Encrypt a .env file into .env.enc'
   printf '  %-24s %s\n' 'status' 'Show tools, ports, and tracking counts'
   printf '\n%sAI and remote%s\n' "$C_BOLD" "$C_RESET"
   printf '  %-24s %s\n' 'local-ai [all|0.5b|1.5b]' 'Start local models within memory limits'
@@ -470,6 +471,13 @@ PROMPT
     "$ROOT_DIR/workspace" tools scan
     "$ROOT_DIR/workspace" environment scan
     "$ROOT_DIR/workspace" self-check
+    ;;
+  env-encrypt)
+    require_uv
+    shift || true
+    source_path="${1:-.env}"
+    destination_path="${2:-.env.enc}"
+    WORKSPACE_ENV_KEY="${WORKSPACE_ENV_KEY:-}" "$UV" run --project apps/python python "$ROOT_DIR/scripts/encrypt_env.py" "$source_path" "$destination_path"
     ;;
   backup)
     require_uv
