@@ -1,4 +1,5 @@
 const MAX_USER_PROMPT_CHARS = Number(process.env.MAX_AI_PROMPT_CHARS ?? 2200)
+const SESSION_SUMMARY_MAX_CHARS = Number(process.env.MAX_AI_SESSION_SUMMARY_CHARS ?? 400)
 const DETAILED_ROUTE_THRESHOLD = 600
 const BRIEF_MAX_TOKENS = 180
 const DETAILED_MAX_TOKENS = 300
@@ -24,7 +25,7 @@ function truncateText(value, maxLength) {
   return `${text.slice(0, maxLength - 1).trimEnd()}…`
 }
 
-function formatUserPrompt(task, values) {
+function formatUserPrompt(task, values, sessionSummary = '') {
   const lines = [
     `Task: ${task.title.trim()}`,
     `Project: ${task.project.trim()}`,
@@ -32,6 +33,9 @@ function formatUserPrompt(task, values) {
   ]
   for (const [field, label] of PROMPT_TEXT_FIELDS) {
     lines.push(`${label}:`, values[field] || '(not provided)')
+  }
+  if (sessionSummary) {
+    lines.push('Session context:', truncateText(sessionSummary, SESSION_SUMMARY_MAX_CHARS))
   }
   return lines.join('\n')
 }
@@ -65,14 +69,15 @@ function boundFieldValues(task, contentBudget) {
   return { values: bounded, wasTruncated: true }
 }
 
-export function buildTaskPrompt(task) {
+export function buildTaskPrompt(task, { sessionSummary = '' } = {}) {
   const emptyValues = Object.fromEntries(PROMPT_TEXT_FIELDS.map(([field]) => [field, '']))
+  const summary = sessionSummary.trim()
   const contentBudget = Math.max(
     0,
-    MAX_USER_PROMPT_CHARS - formatUserPrompt(task, emptyValues).length
+    MAX_USER_PROMPT_CHARS - formatUserPrompt(task, emptyValues, summary).length
   )
   const { values, wasTruncated } = boundFieldValues(task, contentBudget)
-  const userPrompt = formatUserPrompt(task, values)
+  const userPrompt = formatUserPrompt(task, values, summary)
   const providedLength = PROMPT_TEXT_FIELDS.reduce(
     (sum, [field]) => sum + (task[field] ?? '').trim().length,
     0

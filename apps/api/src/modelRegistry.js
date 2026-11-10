@@ -330,7 +330,9 @@ function buildServerlessModel(definition, config) {
 
 function createOllamaModel(env) {
   const url = readUrl(env, 'OLLAMA_AI_URL') || (env.OLLAMA_API_BASE ? trimUrl(env.OLLAMA_API_BASE) : null)
-  if (!url && !env.OLLAMA_API_KEY && !env.OLLAMA_AI_MODEL) return null
+  // A key alone is only a credential; the model registers on explicit URL or
+  // model opt-in so a stale key cannot fail availability checks.
+  if (!url && !env.OLLAMA_AI_MODEL) return null
 
   const base = trimUrl(url || 'https://ollama.com/api')
   const chatUrl = base.endsWith('/chat') ? base : `${base}/chat`

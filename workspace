@@ -185,6 +185,7 @@ print_help() {
   printf '  %-24s %s\n' 'local-ai [all|0.5b|1.5b]' 'Start local models within memory limits'
   printf '  %-24s %s\n' 'colab [status|stop] [session]' 'Inspect or stop the reusable Colab session'
   printf '  %-24s %s\n' 'ai doctor [...]' 'Check local and remote model configuration'
+  printf '  %-24s %s\n' 'ai ask [--model ID] ...' 'Ask the running API a direct AI question'
   printf '  %-24s %s\n' 'doctor' 'Alias for ai doctor'
   printf '\n%sDependencies%s\n' "$C_BOLD" "$C_RESET"
   printf '  %-24s %s\n' 'install' 'Install npm dependencies and sync the Python project'
@@ -469,10 +470,102 @@ case "$command_name" in
 Analyze the workspace tracking summary and repository status. Propose the smallest high-value improvements, prioritized by risk and impact. For each proposal include: title, rationale, affected files, validation commands, and rollback. Do not make changes without approval.
 PROMPT
         ;;
+      ask)
+        shift 2 || true
+        ask_model=""
+        ask_session=""
+        while [[ "$#" -gt 0 ]]; do
+          case "$1" in
+            --model)
+              [[ $# -ge 2 ]] || { error 'Usage: ./workspace ai ask [--model ID] [--session ID] "prompt"'; exit 2; }
+              ask_model="$2"
+              shift 2
+              ;;
+            --session)
+              [[ $# -ge 2 ]] || { error 'Usage: ./workspace ai ask [--model ID] [--session ID] "prompt"'; exit 2; }
+              ask_session="$2"
+              shift 2
+              ;;
+            --*)
+              error "Unknown ai ask option: $1"
+              exit 2
+              ;;
+            *)
+              break
+              ;;
+          esac
+        done
+        if [[ $# -lt 1 || -z "$1" ]]; then
+          error 'Usage: ./workspace ai ask [--model ID] [--session ID] "prompt"'
+          exit 2
+        fi
+        if [[ -n "$ask_session" && ! "$ask_session" =~ ^[1-9][0-9]*$ ]]; then
+          error 'Session ID must be a positive integer.'
+          exit 2
+        fi
+        if ! command -v curl >/dev/null 2>&1; then
+          error 'curl is required for ai ask.'
+          exit 1
+        fi
+        if ! port_in_use "$API_PORT"; then
+          error "The Node API is not running on port $API_PORT. Start it with ./workspace dev or ./workspace node."
+          exit 1
+        fi
+        ask_prompt="$1"
+        ask_payload="$(python3 - "$ask_prompt" "$ask_model" "$ask_session" <<'PY'
+import json
+import sys
+
+prompt, model, session = sys.argv[1], sys.argv[2], sys.argv[3]
+payload = {"prompt": prompt}
+if model:
+    payload["model"] = model
+if session:
+    payload["session_id"] = int(session)
+print(json.dumps(payload))
+PY
+)"
+        if ! ask_result="$(curl -sS -w '\n%{http_code}' "http://127.0.0.1:${API_PORT}/api/ai/complete" \
+          -H 'Content-Type: application/json' \
+          -d "$ask_payload")"; then
+          error 'The AI request failed. Check ./workspace ai doctor or the API logs.'
+          exit 1
+        fi
+        ask_body="${ask_result%$'\n'*}"
+        ask_code="${ask_result##*$'\n'}"
+        if [[ "$ask_code" != "2"* ]]; then
+          python3 - "$ask_body" "$ask_code" <<'PY'
+import json
+import sys
+
+body, code = sys.argv[1], sys.argv[2]
+try:
+    data = json.loads(body) or {}
+except json.JSONDecodeError:
+    data = {}
+message = data.get("error") or f"The AI request failed (HTTP {code})."
+print(message, file=sys.stderr)
+if data.get("retryAfter"):
+    print(f"Retry after about {data['retryAfter']} seconds.", file=sys.stderr)
+sys.exit(1)
+PY
+        fi
+        python3 - "$ask_body" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+if isinstance(data, dict) and "content" in data:
+    print(data["content"])
+else:
+    print(json.dumps(data))
+PY
+        ;;
       *)
         error "Unknown ai subcommand: $subcommand"
         printf 'Usage: ./workspace ai doctor [--json] [--strict]\n' >&2
         printf '       ./workspace ai improve\n' >&2
+        printf '       ./workspace ai ask [--model ID] [--session ID] "prompt"\n' >&2
         exit 2
         ;;
     esac

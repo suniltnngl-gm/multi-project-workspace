@@ -22,6 +22,7 @@ Useful commands:
 - `./workspace local-ai [all|0.5b|1.5b]` — start local models within memory limits
 - `./workspace colab [status|stop] [session]` — inspect or stop the reusable Colab session
 - `./workspace ai doctor [--json] [--strict]` — check model endpoints, CLIs, budgets, and the database without running inference
+- `./workspace ai ask [--model ID] [--session ID] "prompt"` — ask a direct AI question through the running Node API (`POST /api/ai/complete`); with `--session`, the exchange is stored in that AI session
 - `./workspace install` — install npm dependencies and sync the uv-managed Python environment
 - `./workspace python-add <package>` — add a tracked Python dependency with uv
 - `./workspace python-pip install <package>` — use uv's pip-compatible interface in the workspace environment
@@ -50,8 +51,9 @@ Set `DATABASE_PATH` to use a different SQLite file. Set `PORT` for the Node API 
 - `POST /api/files/scan` — scan tracked Git files and register user files, excluding vendor/transient paths
 - `POST /api/files`, `PATCH /api/files/:id`, `DELETE /api/files/:id` — manage user-file metadata
 - `GET /api/ai/sessions`, `POST /api/ai/sessions`, `GET /api/ai/sessions/:id`, `POST /api/ai/sessions/:id/messages`, `POST /api/ai/sessions/:id/compact`, `DELETE /api/ai/sessions/:id` — manage AI chat sessions, messages, and compacted summaries
-- `GET /api/prompt-templates`, `POST /api/prompt-templates`, `GET /api/prompt-templates/:id`, `PATCH /api/prompt-templates/:id`, `DELETE /api/prompt-templates/:id` — manage reusable prompt templates
+- `GET /api/prompt-templates`, `POST /api/prompt-templates`, `GET /api/prompt-templates/:id`, `PATCH /api/prompt-templates/:id`, `DELETE /api/prompt-templates/:id` — manage reusable prompt templates; templates render `{{variable}}` placeholders from a request's `variables` object
 - `POST /api/ai/improve` — generate AI improvement suggestions from workspace tracking summary; optional `create_tasks` creates task entries
+- `POST /api/ai/complete` — direct AI chat: `prompt`/`messages` plus optional `system`, `model`, `max_tokens`, `variables`, `prompt_template_id`, `session_id`, and `task_id`; returns `{ content, model, backend, jobId }`; sessions persist the exchange and jobs keep provenance
 - `GET /api/folders`, `POST /api/folders/scan`, `POST /api/folders`, `PATCH /api/folders/:id`, `DELETE /api/folders/:id` — manage folder-level objectives
 - `GET /api/models` — list the model registry, including in-process request/failure metrics and any configured quota budget
 - `GET /api/local-ai/status` — report each model's live state, session state, resource limits, and metrics
@@ -80,12 +82,20 @@ Use `./workspace tracks`, `./workspace status`, and `<domain> scan|list|check` c
 
 ## Local task assistant
 
-The board's **Draft brief with AI** action on the create form, and **Draft with AI** on an existing task's edit form, ask a selected model to refine a task description and acceptance criteria using the task's objectives, requirements, decisions, relevant files, and important context. Existing drafts send their `task_id` so the run appears in that task's AI-run history; the result is only placed into the form for review and is never saved automatically. Draft input excludes fields the model does not need, such as priority and status. Start the local models separately:
+The board's **Draft brief with AI** action on the create form, and **Draft with AI** on an existing task's edit form, ask a selected model to refine a task description and acceptance criteria using the task's objectives, requirements, decisions, relevant files, and important context. Existing drafts send their `task_id` so the run appears in that task's AI-run history; the result is only placed into the form for review and is never saved automatically. Draft input excludes fields the model does not need, such as priority and status. A draft may also pass `session_id`; the session's compacted summary is appended to the prompt as session context so prior decisions are respected. Start the local models separately:
 
 ```sh
 ./workspace local-ai        # start every installed model within memory limits
 ./workspace local-ai 0.5b   # start only the 0.5B model on :8080
 ./workspace local-ai 1.5b   # start only the 1.5B model on :8081
+```
+
+Beyond task drafts, `POST /api/ai/complete` offers direct AI chat: pass `prompt` or `messages`, with optional `system`, `model`, `max_tokens`, `prompt_template_id` plus a `variables` object (templates render `{{variable}}` placeholders), `session_id`, and `task_id`. Direct completions reuse the same model selection, budget, cooldown, job layer, and audit path as task drafts, so quota and provenance behave identically; requests with `session_id` include the session's summary and recent messages as context and store the exchange back into that session. `./workspace ai ask [--model ID] [--session ID] "prompt"` calls the same endpoint from the command line:
+
+```sh
+curl http://localhost:3001/api/ai/complete \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "Why is the sky blue?", "model": "serverless"}'
 ```
 
 The workspace tracks five models in one registry: the two local Qwen2.5-Coder models (0.5B and 1.5B), the two web notebooks (Colab 3B and Kaggle 3B), and OpenCode headless. OpenCode headless is CLI-backed and optional; set `OPENCODE_AI_MODEL` to a working/free model such as `opencode/beam-free` or `console-openrouter/openrouter/free`, and `OPENCODE_AI_AUTO_SELECT=false` to avoid implicit quota use. OpenCode provider availability varies by account and guardrails. `GET /api/models` returns the registry, and `GET /api/local-ai/status` reports each model's live state. The 0.5B and 1.5B Q4_K_M servers can run at the same time; the launcher starts each only when its model file exists and enough free memory remains for its configured threshold. Set `LOCAL_AI_CONTEXT` or `LOCAL_AI_THREADS` to change the defaults (`1024` context tokens and `2` threads), and use `LOCAL_AI_0_5B_PORT` / `LOCAL_AI_1_5B_PORT` if the defaults conflict.

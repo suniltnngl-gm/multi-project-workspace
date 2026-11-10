@@ -71,6 +71,19 @@ const LOCAL_AI_TURN_COOLDOWN_MS = Number(process.env.LOCAL_AI_TURN_COOLDOWN_MS ?
 const LOCAL_AI_URL = (process.env.LOCAL_AI_URL ?? 'http://127.0.0.1:8080').replace(/\/+$/, '')
 const LOCAL_AI_API_KEY = process.env.LOCAL_AI_API_KEY ?? ''
 const MAX_AI_INPUT_LENGTH = 2000
+const AI_MESSAGE_MAX_LENGTH = 20000
+const MAX_AI_MESSAGES = Number(process.env.AI_MAX_MESSAGES ?? 20)
+const MAX_AI_VARIABLES = 20
+const MAX_AI_VARIABLE_LENGTH = 2000
+const AI_SESSION_CONTEXT_MESSAGES = Number(process.env.AI_SESSION_CONTEXT_MESSAGES ?? 10)
+const AI_SESSION_SUMMARY_MAX_CHARS = 2000
+const AI_COMPLETE_DEFAULT_MAX_TOKENS = 400
+const AI_COMPLETE_MAX_TOKENS_LIMIT = 2000
+const COMPLETE_MESSAGE_ROLES = new Set(['system', 'user', 'assistant'])
+const COMPLETE_INPUT_FIELDS = new Set([
+  'prompt', 'system', 'messages', 'model', 'prompt_template_id', 'variables',
+  'session_id', 'task_id', 'max_tokens'
+])
 
 if (!Number.isFinite(LOCAL_AI_MIN_LOAD) || LOCAL_AI_MIN_LOAD < 0) {
   throw new Error('LOCAL_AI_MIN_LOAD must be a non-negative number.')
@@ -148,7 +161,7 @@ function validateRefineInput(input, { requireModel = false } = {}) {
     return 'Request body must be a JSON object.'
   }
   const draftFields = [
-    'title', ...Object.keys(TASK_TEXT_LIMITS), 'project', 'task_type', 'model', 'task_id'
+    'title', ...Object.keys(TASK_TEXT_LIMITS), 'project', 'task_type', 'model', 'task_id', 'session_id'
   ]
   if (Object.keys(input).some((key) => !draftFields.includes(key))) {
     return 'Request includes an unsupported task field.'
@@ -176,6 +189,12 @@ function validateRefineInput(input, { requireModel = false } = {}) {
   ) {
     return 'Task ID must be a positive integer.'
   }
+  if (
+    input.session_id !== undefined &&
+    (!Number.isSafeInteger(input.session_id) || input.session_id < 1)
+  ) {
+    return 'Session ID must be a positive integer.'
+  }
   if (requireModel && input.model === undefined) {
     return 'Model is required for a background job.'
   }
@@ -199,6 +218,121 @@ function taskFromRefineInput(input) {
     work_blocked: input.work_blocked || '',
     next_move: input.next_move || ''
   }
+}
+
+function validateCompleteInput(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return 'Request body must be a JSON object.'
+  }
+  for (const key of Object.keys(body)) {
+    if (!COMPLETE_INPUT_FIELDS.has(key)) {
+      return `Request includes an unsupported field: ${key}.`
+    }
+  }
+  if (body.prompt !== undefined && !isValidText(body.prompt, AI_MESSAGE_MAX_LENGTH)) {
+    return `Prompt must be a non-empty string of at most ${AI_MESSAGE_MAX_LENGTH} characters.`
+  }
+  if (body.system !== undefined && !isValidText(body.system, AI_MESSAGE_MAX_LENGTH)) {
+    return `System must be a non-empty string of at most ${AI_MESSAGE_MAX_LENGTH} characters.`
+  }
+  if (body.model !== undefined && (!isValidText(body.model, 80) || !body.model.trim())) {
+    return 'Model must be a non-empty model ID of at most 80 characters.'
+  }
+  if (body.messages !== undefined) {
+    if (!Array.isArray(body.messages) || body.messages.length === 0 || body.messages.length > MAX_AI_MESSAGES) {
+      return `Messages must be an array of 1 to ${MAX_AI_MESSAGES} entries.`
+    }
+    for (const message of body.messages) {
+      if (!message || typeof message !== 'object' || Array.isArray(message)) {
+        return 'Each message must be an object with role and content.'
+      }
+      if (!COMPLETE_MESSAGE_ROLES.has(message.role)) {
+        return 'Message role must be system, user, or assistant.'
+      }
+      if (!isValidText(message.content, AI_MESSAGE_MAX_LENGTH) || !message.content.trim()) {
+        return `Message content must be a non-empty string of at most ${AI_MESSAGE_MAX_LENGTH} characters.`
+      }
+      const unsupported = Object.keys(message).find((key) => key !== 'role' && key !== 'content')
+      if (unsupported !== undefined) {
+        return `Message includes an unsupported field: ${unsupported}.`
+      }
+    }
+  }
+  if (body.variables !== undefined) {
+    if (!body.variables || typeof body.variables !== 'object' || Array.isArray(body.variables)) {
+      return 'Variables must be an object of template values.'
+    }
+    const entries = Object.entries(body.variables)
+    if (entries.length > MAX_AI_VARIABLES) {
+      return `Variables must contain at most ${MAX_AI_VARIABLES} entries.`
+    }
+    for (const [key, value] of entries) {
+      if (!/^[A-Za-z0-9_]+$/.test(key)) {
+        return 'Variable names may contain only letters, numbers, and underscores.'
+      }
+      if (typeof value !== 'string' || value.length > MAX_AI_VARIABLE_LENGTH) {
+        return `Variable ${key} must be a string of at most ${MAX_AI_VARIABLE_LENGTH} characters.`
+      }
+    }
+  }
+  for (const field of ['prompt_template_id', 'session_id', 'task_id']) {
+    if (body[field] !== undefined && (!Number.isSafeInteger(body[field]) || body[field] < 1)) {
+      return `${field} must be a positive integer.`
+    }
+  }
+  if (body.max_tokens !== undefined) {
+    if (!Number.isSafeInteger(body.max_tokens) || body.max_tokens < 1 || body.max_tokens > AI_COMPLETE_MAX_TOKENS_LIMIT) {
+      return `max_tokens must be an integer between 1 and ${AI_COMPLETE_MAX_TOKENS_LIMIT}.`
+    }
+  }
+  if (body.prompt === undefined && body.messages === undefined && body.prompt_template_id === undefined) {
+    return 'Provide prompt, messages, or prompt_template_id.'
+  }
+  return undefined
+}
+
+function renderTemplateText(text, variables) {
+  return String(text).replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g, (original, key) => (
+    variables && Object.hasOwn(variables, key) ? variables[key] : original
+  ))
+}
+
+function buildCompleteMessages(body, template, session) {
+  const context = []
+  const systemPrompt = template && template.systemPrompt.trim()
+    ? renderTemplateText(template.systemPrompt, body.variables)
+    : (typeof body.system === 'string' && body.system.trim() ? body.system : '')
+  if (systemPrompt) {
+    context.push({ role: 'system', content: systemPrompt })
+  }
+  if (session) {
+    if (typeof session.summary === 'string' && session.summary.trim()) {
+      context.push({
+        role: 'system',
+        content: `Previous conversation summary:\n${session.summary.slice(0, AI_SESSION_SUMMARY_MAX_CHARS)}`
+      })
+    }
+    const history = session.messages.slice(-AI_SESSION_CONTEXT_MESSAGES)
+    for (const message of history) {
+      if (!COMPLETE_MESSAGE_ROLES.has(message.role)) continue
+      context.push({
+        role: message.role,
+        content: String(message.content).slice(0, AI_MESSAGE_MAX_LENGTH)
+      })
+    }
+  }
+
+  const newMessages = []
+  if (template && template.userTemplate.trim()) {
+    newMessages.push({ role: 'user', content: renderTemplateText(template.userTemplate, body.variables) })
+  }
+  if (typeof body.prompt === 'string' && body.prompt.trim()) {
+    newMessages.push({ role: 'user', content: body.prompt })
+  }
+  for (const message of body.messages ?? []) {
+    newMessages.push({ role: message.role, content: message.content })
+  }
+  return { messages: [...context, ...newMessages], newMessages }
 }
 
 function validateTaskInput(body, { partial = false } = {}) {
@@ -500,7 +634,10 @@ export function createApp(database, {
 
   function submitDraftJob(input, model, selection) {
     const task = taskFromRefineInput(input)
-    const prompt = buildTaskPrompt(task)
+    const sessionSummary = input.session_id !== undefined
+      ? String(database.getAiSession(input.session_id)?.summary ?? '')
+      : ''
+    const prompt = buildTaskPrompt(task, { sessionSummary })
     modelBudget.record(model.id)
 
     const runner = async ({ signal, onPhase }) => {
@@ -559,6 +696,10 @@ export function createApp(database, {
       selected.selection.release({ inferenceStarted: false })
       return { error: { status: 404, body: { error: 'Task not found.' } } }
     }
+    if (sessionNotFound(input)) {
+      selected.selection.release({ inferenceStarted: false })
+      return { error: { status: 404, body: { error: 'AI session not found.' } } }
+    }
     try {
       return { job: submitDraftJob(input, selected.model, selected.selection) }
     } catch (error) {
@@ -569,6 +710,10 @@ export function createApp(database, {
 
   function taskNotFound(input) {
     return input.task_id !== undefined && !database.getTask(input.task_id)
+  }
+
+  function sessionNotFound(input) {
+    return input.session_id !== undefined && !database.getAiSession(input.session_id)
   }
 
   app.get('/api/models', (_request, response) => {
@@ -602,6 +747,9 @@ export function createApp(database, {
     }
     if (taskNotFound(input)) {
       return response.status(404).json({ error: 'Task not found.' })
+    }
+    if (sessionNotFound(input)) {
+      return response.status(404).json({ error: 'AI session not found.' })
     }
 
     const started = await startDraftJob(input)
@@ -648,6 +796,9 @@ export function createApp(database, {
     }
     if (taskNotFound(input)) {
       return response.status(404).json({ error: 'Task not found.' })
+    }
+    if (sessionNotFound(input)) {
+      return response.status(404).json({ error: 'AI session not found.' })
     }
 
     const started = await startDraftJob(input)
@@ -1114,6 +1265,111 @@ export function createApp(database, {
     if (id === null) return response.status(400).json({ error: 'Template ID must be a positive integer.' })
     if (!database.deletePromptTemplate(id)) return response.status(404).json({ error: 'Prompt template not found.' })
     return response.status(204).end()
+  })
+
+  app.post('/api/ai/complete', async (request, response) => {
+    const body = request.body && typeof request.body === 'object' && !Array.isArray(request.body)
+      ? request.body
+      : {}
+    const validationError = validateCompleteInput(body)
+    if (validationError) return response.status(400).json({ error: validationError })
+
+    if (taskNotFound(body)) return response.status(404).json({ error: 'Task not found.' })
+    const session = body.session_id !== undefined ? database.getAiSession(body.session_id) : null
+    if (body.session_id !== undefined && !session) {
+      return response.status(404).json({ error: 'AI session not found.' })
+    }
+    const template = body.prompt_template_id !== undefined
+      ? database.getPromptTemplate(body.prompt_template_id)
+      : null
+    if (body.prompt_template_id !== undefined && !template) {
+      return response.status(404).json({ error: 'Prompt template not found.' })
+    }
+
+    const { messages, newMessages } = buildCompleteMessages(body, template, session)
+
+    const selected = await selectDraftModel({ model: body.model })
+    if (selected.error) {
+      return response.status(selected.error.status).json(selected.error.body)
+    }
+    const { model, selection } = selected
+    const maxTokens = body.max_tokens ?? AI_COMPLETE_DEFAULT_MAX_TOKENS
+    const jobTitle = typeof body.prompt === 'string' && body.prompt.trim()
+      ? body.prompt.trim().slice(0, 80)
+      : 'AI chat'
+
+    modelBudget.record(model.id)
+
+    const runner = async ({ signal, onPhase }) => {
+      let inferenceStarted = false
+      let startedAt
+      try {
+        inferenceStarted = true
+        startedAt = Date.now()
+        modelMetrics.recordStart(model.id)
+        let content
+        try {
+          content = await modelClient.complete(model, {
+            messages,
+            maxTokens,
+            task: { title: jobTitle, project: 'workspace', task_type: 'chore' },
+            signal,
+            onPhase,
+            onUsage: (usage) => modelBudget.recordUsage?.(model.id, usage)
+          })
+          modelMetrics.recordSuccess(model.id, { durationMs: Date.now() - startedAt })
+        } catch (error) {
+          applyCooldown(modelBudget, model, error)
+          modelMetrics.recordError(model.id, error, {
+            durationMs: startedAt === undefined ? undefined : Date.now() - startedAt
+          })
+          throw error
+        }
+        if (session) {
+          for (const message of newMessages) {
+            if (message.role === 'user' || message.role === 'assistant') {
+              database.addAiMessage(session.id, message)
+            }
+          }
+          database.addAiMessage(session.id, { role: 'assistant', content })
+        }
+        return { content }
+      } finally {
+        selection.release({ inferenceStarted })
+      }
+    }
+
+    let job
+    try {
+      job = jobStore.submit({
+        model: model.id,
+        backend: model.backend,
+        title: jobTitle,
+        taskId: body.task_id,
+        runner
+      })
+    } catch (error) {
+      selection.release({ inferenceStarted: false })
+      throw error
+    }
+
+    const finished = await jobStore.wait(job.id)
+    if (finished.state === 'done') {
+      return response.json({
+        content: finished.result.content,
+        model: model.id,
+        backend: model.backend,
+        jobId: job.id,
+        ...(session ? { sessionId: session.id } : {})
+      })
+    }
+    if (finished.state === 'cancelled') {
+      return response.status(499).json({ error: finished.error || 'The AI request was cancelled.' })
+    }
+    return response.status(finished.status ?? 503).json({
+      error: finished.error || 'The model is unavailable.',
+      ...(finished.retryAfter !== undefined ? { retryAfter: finished.retryAfter } : {})
+    })
   })
 
   app.post('/api/ai/improve', async (request, response) => {
