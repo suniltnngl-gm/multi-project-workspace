@@ -247,6 +247,8 @@ const draftModel = document.querySelector('#draft-model')
 const modelRoster = document.querySelector('#model-roster')
 const modelRosterStatus = document.querySelector('#model-roster-status')
 let tasks = []
+let files = []
+let folders = []
 let draftController = null
 let activeJobId = null
 
@@ -690,7 +692,7 @@ async function loadTasks() {
 
 async function loadFiles() {
   try {
-    const files = await request('/api/files')
+    files = await request('/api/files')
     fileList.replaceChildren()
     fileCount.textContent = `${files.length} tracked`
     if (files.length === 0) {
@@ -703,7 +705,27 @@ async function loadFiles() {
     for (const file of files) {
       const item = document.createElement('li')
       item.className = 'file-item'
-      item.textContent = file.path
+      item.dataset.fileId = file.id
+
+      const path = document.createElement('span')
+      path.className = 'file-path'
+      path.textContent = file.path
+      item.append(path)
+
+      const edit = document.createElement('button')
+      edit.type = 'button'
+      edit.className = 'secondary-button'
+      edit.dataset.action = 'edit-file'
+      edit.textContent = 'Edit'
+      item.append(edit)
+
+      if (file.objective) {
+        const objective = document.createElement('p')
+        objective.className = 'file-objective'
+        objective.textContent = file.objective
+        item.append(objective)
+      }
+
       fileList.append(item)
     }
   } catch (error) {
@@ -714,7 +736,7 @@ async function loadFiles() {
 
 async function loadFolders() {
   try {
-    const folders = await request('/api/folders')
+    folders = await request('/api/folders')
     folderList.replaceChildren()
     folderCount.textContent = `${folders.length} tracked`
     if (folders.length === 0) {
@@ -727,7 +749,27 @@ async function loadFolders() {
     for (const folder of folders) {
       const item = document.createElement('li')
       item.className = 'folder-item'
-      item.textContent = folder.path
+      item.dataset.folderId = folder.id
+
+      const path = document.createElement('span')
+      path.className = 'folder-path'
+      path.textContent = folder.path
+      item.append(path)
+
+      const edit = document.createElement('button')
+      edit.type = 'button'
+      edit.className = 'secondary-button'
+      edit.dataset.action = 'edit-folder'
+      edit.textContent = 'Edit'
+      item.append(edit)
+
+      if (folder.objective) {
+        const objective = document.createElement('p')
+        objective.className = 'folder-objective'
+        objective.textContent = folder.objective
+        item.append(objective)
+      }
+
       folderList.append(item)
     }
   } catch (error) {
@@ -1059,6 +1101,42 @@ scanFilesButton.addEventListener('click', async () => {
   }
 })
 
+function createFileEditForm(file) {
+  const form = document.createElement('form')
+  form.className = 'file-edit-form'
+  for (const [labelText, name] of [
+    ['Objective', 'objective'],
+    ['Requirements', 'requirements'],
+    ['Decisions', 'decisions'],
+    ['Relevant files', 'relevant_files'],
+    ['Important context', 'important_context']
+  ]) {
+    addField(form, labelText, name, { value: file[name] ?? '', type: 'textarea', wide: true })
+  }
+  const actions = document.createElement('div')
+  actions.className = 'task-actions field-wide'
+  const save = document.createElement('button')
+  save.type = 'submit'
+  save.textContent = 'Save metadata'
+  actions.append(save, makeButton('Cancel', 'secondary-button', 'cancel-file-edit'))
+  form.append(actions)
+  return form
+}
+
+function createFolderEditForm(folder) {
+  const form = document.createElement('form')
+  form.className = 'folder-edit-form'
+  addField(form, 'Objective', 'objective', { value: folder.objective ?? '', type: 'textarea', wide: true })
+  const actions = document.createElement('div')
+  actions.className = 'task-actions field-wide'
+  const save = document.createElement('button')
+  save.type = 'submit'
+  save.textContent = 'Save objective'
+  actions.append(save, makeButton('Cancel', 'secondary-button', 'cancel-folder-edit'))
+  form.append(actions)
+  return form
+}
+
 scanFoldersButton.addEventListener('click', async () => {
   try {
     const result = await request('/api/folders/scan', { method: 'POST' })
@@ -1069,4 +1147,76 @@ scanFoldersButton.addEventListener('click', async () => {
     folderStatus.textContent = `Could not scan folders: ${error.message}`
     folderStatus.classList.add('is-error')
   }
+})
+
+fileList.addEventListener('click', async (event) => {
+  const button = event.target.closest('button[data-action="edit-file"]')
+  if (!button) return
+  const item = button.closest('.file-item')
+  const id = Number(item.dataset.fileId)
+  const file = files.find((candidate) => candidate.id === id)
+  item.querySelector('.file-edit-form')?.remove()
+  item.append(createFileEditForm(file))
+})
+
+fileList.addEventListener('submit', async (event) => {
+  if (!event.target.matches('.file-edit-form')) return
+  event.preventDefault()
+  const item = event.target.closest('.file-item')
+  const id = Number(item.dataset.fileId)
+  const values = Object.fromEntries(new FormData(event.target))
+  try {
+    await request(`/api/files/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(values)
+    })
+    fileStatus.textContent = 'File metadata saved.'
+    fileStatus.classList.remove('is-error')
+    await loadFiles()
+  } catch (error) {
+    fileStatus.textContent = `Could not save file metadata: ${error.message}`
+    fileStatus.classList.add('is-error')
+  }
+})
+
+fileList.addEventListener('click', (event) => {
+  if (!event.target.matches('button[data-action="cancel-file-edit"]')) return
+  event.target.closest('.file-edit-form')?.remove()
+})
+
+folderList.addEventListener('click', async (event) => {
+  const button = event.target.closest('button[data-action="edit-folder"]')
+  if (!button) return
+  const item = button.closest('.folder-item')
+  const id = Number(item.dataset.folderId)
+  const folder = folders.find((candidate) => candidate.id === id)
+  item.querySelector('.folder-edit-form')?.remove()
+  item.append(createFolderEditForm(folder))
+})
+
+folderList.addEventListener('submit', async (event) => {
+  if (!event.target.matches('.folder-edit-form')) return
+  event.preventDefault()
+  const item = event.target.closest('.folder-item')
+  const id = Number(item.dataset.folderId)
+  const values = Object.fromEntries(new FormData(event.target))
+  try {
+    await request(`/api/folders/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(values)
+    })
+    folderStatus.textContent = 'Folder objective saved.'
+    folderStatus.classList.remove('is-error')
+    await loadFolders()
+  } catch (error) {
+    folderStatus.textContent = `Could not save folder objective: ${error.message}`
+    folderStatus.classList.add('is-error')
+  }
+})
+
+folderList.addEventListener('click', (event) => {
+  if (!event.target.matches('button[data-action="cancel-folder-edit"]')) return
+  event.target.closest('.folder-edit-form')?.remove()
 })
