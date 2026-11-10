@@ -62,6 +62,19 @@ The web board supports adding, editing, filtering, searching, reprioritizing, mo
 
 Every draft is also recorded in `ai_jobs`, including synchronous local and serverless calls, so a task can retain its AI provenance after the transient progress indicator disappears. Jobs may carry a nullable `task_id`; drafts for a new task leave it unset and never save the task automatically. Unknown task ids are rejected before model selection. `GET /api/tasks/:id` returns at most `ai_limit` linked runs newest-first with the model, backend, state, phase, duration, error, and `retryAfter`. Deleting a task unlinks its AI runs instead of deleting them, so the run remains inspectable through the job API without referencing a missing task. Terminal jobs are pruned by count (`50` by default), which bounds the persisted history; queued or running jobs are never pruned.
 
+## Tracking domains
+
+The workspace tracks more than tasks:
+
+- Tasks: workflow, priority, project, type, acceptance criteria, planning fields, and work state.
+- User files: objective, requirements, decisions, relevant files, and important context.
+- Folders: folder-level objectives.
+- Git worktrees: repository root, worktree path, branch, HEAD, and remote URL.
+- Tools: availability and versions for core workflow tools.
+- Environments: OS, release, architecture, and runtime versions.
+
+Use `./workspace tracks`, `./workspace status`, and `<domain> scan|list|check` commands to inspect or refresh these domains. Tracking updates are scoped to touched surfaces, preserve history, and complement Git.
+
 ## Local task assistant
 
 The board's **Draft brief with AI** action on the create form, and **Draft with AI** on an existing task's edit form, ask a selected model to refine a task description and acceptance criteria using the task's objectives, requirements, decisions, relevant files, and important context. Existing drafts send their `task_id` so the run appears in that task's AI-run history; the result is only placed into the form for review and is never saved automatically. Draft input excludes fields the model does not need, such as priority and status. Start the local models separately:

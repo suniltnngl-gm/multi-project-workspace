@@ -425,6 +425,7 @@ case "$command_name" in
     "$ROOT_DIR/workspace" git-context check || status_code=1
     "$ROOT_DIR/workspace" tools check || status_code=1
     "$ROOT_DIR/workspace" environment check || status_code=1
+    node "$ROOT_DIR/scripts/with-env.mjs" node "$ROOT_DIR/scripts/ai-doctor.mjs" --strict || status_code=1
     if [[ "$status_code" -eq 0 ]]; then
       success 'Self-check passed.'
     else
