@@ -47,6 +47,16 @@ success() { printf '%s%s%s\n' "$C_GREEN" "$*" "$C_RESET"; }
 warn() { printf '%s%s%s\n' "$C_YELLOW" "$*" "$C_RESET" >&2; }
 error() { printf '%s%s%s\n' "$C_RED" "$*" "$C_RESET" >&2; }
 
+# Support a convenience flag for adding/updating one environment value.
+if [[ "${1:-}" == "--new-env" ]]; then
+  if [[ $# -lt 2 || "$2" != *=* ]]; then
+    error 'Usage: ./workspace --new-env "KEY=value"'
+    exit 2
+  fi
+  command_name="env"
+  set -- "env" "set" "$2"
+fi
+
 command_name="${1:-help}"
 
 require_npm() {
@@ -162,6 +172,11 @@ print_help() {
   printf '  %-24s %s\n' 'environment list' 'List tracked environment facts'
   printf '  %-24s %s\n' 'environment check' 'Verify environment facts are populated'
   printf '  %-24s %s\n' 'tracks' 'List available tracking domains'
+  printf '  %-24s %s\n' '--new-env "KEY=value"' 'Add or update one .env value'
+  printf '  %-24s %s\n' 'env set KEY=value ...' 'Add or update .env values'
+  printf '  %-24s %s\n' 'env get KEY' 'Read one .env value'
+  printf '  %-24s %s\n' 'env list' 'Show .env contents'
+  printf '  %-24s %s\n' 'env encrypt [src] [dst]' 'Encrypt .env into .env.enc'
   printf '  %-24s %s\n' 'maintain' 'Run tracking scans and self-check'
   printf '  %-24s %s\n' 'backup' 'Back up the SQLite database'
   printf '  %-24s %s\n' 'env-encrypt [src] [dst]' 'Encrypt a .env file into .env.enc'
@@ -487,6 +502,83 @@ PROMPT
     db_path="${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
     cp "$db_path" "$backup_dir/workspace-$timestamp.sqlite"
     success "Backed up database to $backup_dir/workspace-$timestamp.sqlite"
+    ;;
+  env)
+    subcommand="${2:-list}"
+    case "$subcommand" in
+      set)
+        shift 2 || true
+        if [[ $# -lt 1 ]]; then
+          error 'Usage: ./workspace env set KEY=value [KEY=value ...]'
+          exit 2
+        fi
+        env_file="$ROOT_DIR/.env"
+        touch "$env_file"
+        for assignment in "$@"; do
+          if [[ "$assignment" != *=* ]]; then
+            error "Invalid assignment: $assignment"
+            exit 2
+          fi
+          key="${assignment%%=*}"
+          value="${assignment#*=}"
+          if grep -qE "^[[:space:]]*${key}=" "$env_file"; then
+            # Replace the existing assignment while preserving other lines.
+            python3 - "$env_file" "$key" "$value" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+lines = path.read_text().splitlines()
+updated = False
+for index, line in enumerate(lines):
+    if line.lstrip().startswith(f"{key}="):
+        lines[index] = f"{key}={value}"
+        updated = True
+        break
+if not updated:
+    lines.append(f"{key}={value}")
+path.write_text("\n".join(lines) + "\n")
+PY
+          else
+            printf '%s=%s\n' "$key" "$value" >> "$env_file"
+          fi
+          success "Set $key in .env"
+        done
+        ;;
+      get)
+        key="${3:-}"
+        if [[ -z "$key" ]]; then
+          error 'Usage: ./workspace env get KEY'
+          exit 2
+        fi
+        env_file="$ROOT_DIR/.env"
+        if [[ ! -f "$env_file" ]]; then
+          error '.env does not exist.'
+          exit 1
+        fi
+        grep -E "^[[:space:]]*${key}=" "$env_file" | tail -1
+        ;;
+      list)
+        env_file="$ROOT_DIR/.env"
+        if [[ ! -f "$env_file" ]]; then
+          info '.env does not exist.'
+          exit 0
+        fi
+        cat "$env_file"
+        ;;
+      encrypt)
+        shift 2 || true
+        source_path="${1:-.env}"
+        destination_path="${2:-.env.enc}"
+        WORKSPACE_ENV_KEY="${WORKSPACE_ENV_KEY:-}" "$UV" run --project apps/python python "$ROOT_DIR/scripts/encrypt_env.py" "$source_path" "$destination_path"
+        ;;
+      *)
+        error "Unknown env subcommand: $subcommand"
+        printf 'Usage: ./workspace env [set|get|list|encrypt]\n' >&2
+        exit 2
+        ;;
+    esac
     ;;
   help|-h|--help)
     print_help
