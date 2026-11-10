@@ -557,7 +557,12 @@ PY
           error '.env does not exist.'
           exit 1
         fi
-        grep -E "^[[:space:]]*${key}=" "$env_file" | tail -1
+        value="$(grep -E "^[[:space:]]*${key}=" "$env_file" | tail -1)"
+        if [[ "$key" =~ (KEY|TOKEN|SECRET|PASSWORD) ]]; then
+          printf '%s=***\n' "$key"
+        else
+          printf '%s\n' "$value"
+        fi
         ;;
       list)
         env_file="$ROOT_DIR/.env"
@@ -565,7 +570,18 @@ PY
           info '.env does not exist.'
           exit 0
         fi
-        cat "$env_file"
+        while IFS= read -r line; do
+          if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            if [[ "$key" =~ (KEY|TOKEN|SECRET|PASSWORD) ]]; then
+              printf '%s=***\n' "$key"
+            else
+              printf '%s\n' "$line"
+            fi
+          else
+            printf '%s\n' "$line"
+          fi
+        done < "$env_file"
         ;;
       encrypt)
         shift 2 || true
