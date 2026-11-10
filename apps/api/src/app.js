@@ -1094,6 +1094,76 @@ export function createApp(database, {
     return response.status(204).end()
   })
 
+  app.post('/api/ai/improve', async (request, response) => {
+    const body = request.body && typeof request.body === 'object' && !Array.isArray(request.body)
+      ? request.body
+      : {}
+    const requestedModel = typeof body.model === 'string' ? body.model.trim() : undefined
+    const createTasks = body.create_tasks === true
+
+    const summary = {
+      tasks: database.listTasks().length,
+      userFiles: database.listUserFiles().length,
+      folders: database.listFolders().length,
+      gitWorktrees: database.listGitWorktrees().length,
+      tools: database.listTools().length,
+      environments: database.listEnvironments().length
+    }
+
+    const messages = [
+      {
+        role: 'system',
+        content: 'You are a workspace improvement assistant. Return only JSON: an array of objects with title, description, priority, and rationale. Keep proposals small, safe, and actionable.'
+      },
+      {
+        role: 'user',
+        content: `Workspace tracking summary: ${JSON.stringify(summary)}. Suggest up to 5 improvements.`
+      }
+    ]
+
+    const selected = await scheduler.select(requestedModel)
+    if (selected.error) {
+      return response.status(selected.error.status).json(selected.error.body)
+    }
+
+    let content
+    try {
+      content = await modelClient.complete(selected.model, {
+        messages,
+        maxTokens: 500,
+        task: { title: 'Improve workspace', project: 'workspace', task_type: 'chore' }
+      })
+    } catch (error) {
+      return response.status(error.status ?? 502).json({ error: error.message || 'AI improvement failed.' })
+    } finally {
+      selected.selection.release({ inferenceStarted: Boolean(content) })
+    }
+
+    let suggestions = []
+    try {
+      const parsed = JSON.parse(content.trim().replace(/^```(?:json)?\\s*|\\s*```$/g, ''))
+      if (Array.isArray(parsed)) suggestions = parsed
+    } catch {
+      suggestions = [{ title: 'Review AI improvement output', description: content, priority: 'medium', rationale: 'Model output was not JSON.' }]
+    }
+
+    const created = []
+    if (createTasks) {
+      for (const suggestion of suggestions) {
+        if (typeof suggestion?.title !== 'string' || !suggestion.title.trim()) continue
+        created.push(database.createTask({
+          title: suggestion.title.trim().slice(0, 200),
+          description: typeof suggestion.description === 'string' ? suggestion.description.slice(0, 2000) : '',
+          priority: ['low', 'medium', 'high', 'urgent'].includes(suggestion.priority) ? suggestion.priority : 'medium',
+          task_type: 'chore',
+          project: 'workspace'
+        }))
+      }
+    }
+
+    response.json({ suggestions, created, summary })
+  })
+
   app.use((error, _request, response, _next) => {
     if (error instanceof SyntaxError && 'body' in error) {
       return response.status(400).json({ error: 'Request body contains invalid JSON.' })
