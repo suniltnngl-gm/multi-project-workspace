@@ -162,6 +162,8 @@ print_help() {
   printf '  %-24s %s\n' 'environment list' 'List tracked environment facts'
   printf '  %-24s %s\n' 'environment check' 'Verify environment facts are populated'
   printf '  %-24s %s\n' 'tracks' 'List available tracking domains'
+  printf '  %-24s %s\n' 'maintain' 'Run tracking scans and self-check'
+  printf '  %-24s %s\n' 'backup' 'Back up the SQLite database'
   printf '  %-24s %s\n' 'status' 'Show tools, ports, and tracking counts'
   printf '\n%sAI and remote%s\n' "$C_BOLD" "$C_RESET"
   printf '  %-24s %s\n' 'local-ai [all|0.5b|1.5b]' 'Start local models within memory limits'
@@ -458,6 +460,25 @@ PROMPT
         exit 2
         ;;
     esac
+    ;;
+  maintain)
+    info 'Running maintenance cycle...'
+    require_uv
+    "$ROOT_DIR/workspace" files scan
+    "$ROOT_DIR/workspace" folders scan
+    "$ROOT_DIR/workspace" git-context scan
+    "$ROOT_DIR/workspace" tools scan
+    "$ROOT_DIR/workspace" environment scan
+    "$ROOT_DIR/workspace" self-check
+    ;;
+  backup)
+    require_uv
+    backup_dir="$ROOT_DIR/apps/api/data/backups"
+    mkdir -p "$backup_dir"
+    timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    db_path="${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+    cp "$db_path" "$backup_dir/workspace-$timestamp.sqlite"
+    success "Backed up database to $backup_dir/workspace-$timestamp.sqlite"
     ;;
   help|-h|--help)
     print_help
