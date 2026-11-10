@@ -4,11 +4,16 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
+import { createHash } from 'node:crypto'
 
 const execFileAsync = promisify(execFile)
 const RESULT_SENTINEL = '__WORKSPACE_MODEL_RESULT__'
 const PROBE_CACHE_MS = 60000
 const DEFAULT_HTTP_TIMEOUT_MS = 120000
+const PROMPT_CACHE_ENABLED = process.env.AI_PROMPT_CACHE === 'true'
+const PROMPT_CACHE_TTL_MS = Number(process.env.AI_PROMPT_CACHE_TTL_MS ?? 3600000)
+const PROMPT_CACHE_MAX_ENTRIES = Number(process.env.AI_PROMPT_CACHE_MAX_ENTRIES ?? 100)
+const promptCache = new Map()
 const DEFAULT_COLAB_TIMEOUT_MS = 900000
 const DEFAULT_KAGGLE_TIMEOUT_MS = 3600000
 const SCRIPTS_DIR = fileURLToPath(new URL('../../../scripts', import.meta.url))
@@ -549,9 +554,27 @@ export function createModelClient({
     return content
   }
 
+  function promptCacheKey(model, request) {
+    return createHash('sha256')
+      .update(model.id)
+      .update(JSON.stringify(request.messages ?? []))
+      .update(String(request.maxTokens ?? ''))
+      .digest('hex')
+  }
+
   async function complete(model, request) {
     const startedAt = Date.now()
     const auditDir = process.env.AI_AUDIT_DIR || ''
+    const cacheKey = PROMPT_CACHE_ENABLED ? promptCacheKey(model, request) : ''
+
+    if (cacheKey) {
+      const cached = promptCache.get(cacheKey)
+      if (cached && Date.now() - cached.createdAt < PROMPT_CACHE_TTL_MS) {
+        return cached.content
+      }
+      if (cached) promptCache.delete(cacheKey)
+    }
+
     let content
     let error
     try {
@@ -561,6 +584,14 @@ export function createModelClient({
       else content = await completeHttp(model, request)
     } catch (caught) {
       error = caught
+    }
+
+    if (cacheKey && content && !error) {
+      if (promptCache.size >= PROMPT_CACHE_MAX_ENTRIES) {
+        const oldestKey = promptCache.keys().next().value
+        if (oldestKey) promptCache.delete(oldestKey)
+      }
+      promptCache.set(cacheKey, { content, createdAt: Date.now() })
     }
 
     if (auditDir) {

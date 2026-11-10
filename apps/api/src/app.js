@@ -1,5 +1,6 @@
 import express from 'express'
 import { execFileSync } from 'node:child_process'
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 import { join, relative } from 'node:path'
 import { createResourceMonitor } from './resourceMonitor.js'
 import { createAdaptiveCpuLimit } from './adaptiveCpuLimit.js'
@@ -19,6 +20,32 @@ const MAX_DESCRIPTION_LENGTH = Number(process.env.MAX_TASK_DESCRIPTION_LENGTH ??
 const MAX_PROJECT_LENGTH = Number(process.env.MAX_TASK_PROJECT_LENGTH ?? 80)
 const MAX_ACCEPTANCE_CRITERIA_LENGTH = Number(process.env.MAX_TASK_ACCEPTANCE_CRITERIA_LENGTH ?? 2000)
 const MAX_PLANNING_TEXT_LENGTH = Number(process.env.MAX_TASK_PLANNING_TEXT_LENGTH ?? 2000)
+const AI_SESSION_ENCRYPTION_KEY = process.env.AI_SESSION_ENCRYPTION_KEY || ''
+
+function encryptSessionSummary(value) {
+  if (!AI_SESSION_ENCRYPTION_KEY) return value
+  const key = createHash('sha256').update(AI_SESSION_ENCRYPTION_KEY).digest()
+  const iv = randomBytes(12)
+  const cipher = createCipheriv('aes-256-gcm', key, iv)
+  const encrypted = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()])
+  const tag = cipher.getAuthTag()
+  return `enc:${iv.toString('base64')}:${tag.toString('base64')}:${encrypted.toString('base64')}`
+}
+
+function decryptSessionSummary(value) {
+  if (!AI_SESSION_ENCRYPTION_KEY || typeof value !== 'string' || !value.startsWith('enc:')) {
+    return value
+  }
+  const parts = value.split(':')
+  if (parts.length !== 4) return value
+  const key = createHash('sha256').update(AI_SESSION_ENCRYPTION_KEY).digest()
+  const iv = Buffer.from(parts[1], 'base64')
+  const tag = Buffer.from(parts[2], 'base64')
+  const encrypted = Buffer.from(parts[3], 'base64')
+  const decipher = createDecipheriv('aes-256-gcm', key, iv)
+  decipher.setAuthTag(tag)
+  return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8')
+}
 const PLANNING_TEXT_FIELDS = [
   'objectives', 'requirements', 'decisions', 'relevant_files', 'important_context',
   'work_completed', 'work_active', 'work_blocked', 'next_move'
@@ -990,6 +1017,81 @@ export function createApp(database, {
     } catch (error) {
       response.status(500).json({ error: 'Could not scan environments.' })
     }
+  })
+
+  app.get('/api/ai/sessions', (_request, response) => {
+    response.json(database.listAiSessions().map((session) => ({
+      ...session,
+      summary: decryptSessionSummary(session.summary)
+    })))
+  })
+
+  app.get('/api/ai/sessions/:id', (request, response) => {
+    const id = parseId(request.params.id)
+    if (id === null) return response.status(400).json({ error: 'Session ID must be a positive integer.' })
+    const session = database.getAiSession(id)
+    if (!session) return response.status(404).json({ error: 'AI session not found.' })
+    return response.json({ ...session, summary: decryptSessionSummary(session.summary) })
+  })
+
+  app.post('/api/ai/sessions', (request, response) => {
+    if (!request.body || typeof request.body !== 'object' || Array.isArray(request.body)) {
+      return response.status(400).json({ error: 'Request body must be a JSON object.' })
+    }
+    const title = typeof request.body.title === 'string' ? request.body.title.trim().slice(0, 200) : ''
+    let taskId
+    if (request.body.task_id !== undefined) {
+      if (!Number.isSafeInteger(request.body.task_id) || request.body.task_id < 1) {
+        return response.status(400).json({ error: 'Task ID must be a positive integer.' })
+      }
+      if (!database.getTask(request.body.task_id)) {
+        return response.status(404).json({ error: 'Task not found.' })
+      }
+      taskId = request.body.task_id
+    }
+    const session = database.createAiSession({ title, taskId })
+    return response.status(201).json(session)
+  })
+
+  app.post('/api/ai/sessions/:id/messages', (request, response) => {
+    const id = parseId(request.params.id)
+    if (id === null) return response.status(400).json({ error: 'Session ID must be a positive integer.' })
+    if (!request.body || typeof request.body !== 'object' || Array.isArray(request.body)) {
+      return response.status(400).json({ error: 'Request body must be a JSON object.' })
+    }
+    const role = request.body.role
+    const content = request.body.content
+    if (typeof role !== 'string' || !['system', 'user', 'assistant'].includes(role)) {
+      return response.status(400).json({ error: 'Role must be system, user, or assistant.' })
+    }
+    if (typeof content !== 'string' || content.length === 0 || content.length > 20000) {
+      return response.status(400).json({ error: 'Content must be between 1 and 20000 characters.' })
+    }
+    const session = database.addAiMessage(id, { role, content })
+    if (!session) return response.status(404).json({ error: 'AI session not found.' })
+    return response.json(session)
+  })
+
+  app.post('/api/ai/sessions/:id/compact', (request, response) => {
+    const id = parseId(request.params.id)
+    if (id === null) return response.status(400).json({ error: 'Session ID must be a positive integer.' })
+    if (!request.body || typeof request.body !== 'object' || Array.isArray(request.body)) {
+      return response.status(400).json({ error: 'Request body must be a JSON object.' })
+    }
+    const summary = request.body.summary
+    if (typeof summary !== 'string' || summary.length === 0 || summary.length > 20000) {
+      return response.status(400).json({ error: 'Summary must be between 1 and 20000 characters.' })
+    }
+    const session = database.compactAiSession(id, encryptSessionSummary(summary))
+    if (!session) return response.status(404).json({ error: 'AI session not found.' })
+    return response.json(session)
+  })
+
+  app.delete('/api/ai/sessions/:id', (request, response) => {
+    const id = parseId(request.params.id)
+    if (id === null) return response.status(400).json({ error: 'Session ID must be a positive integer.' })
+    if (!database.deleteAiSession(id)) return response.status(404).json({ error: 'AI session not found.' })
+    return response.status(204).end()
   })
 
   app.use((error, _request, response, _next) => {
