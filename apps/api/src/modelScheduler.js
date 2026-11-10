@@ -279,6 +279,11 @@ export function createModelScheduler({
         const failuresA = Number.isFinite(a.failures) ? a.failures : 0
         const failuresB = Number.isFinite(b.failures) ? b.failures : 0
         if (failuresA !== failuresB) return failuresA - failuresB
+
+        const durationA = Number.isFinite(a.lastDurationMs) ? a.lastDurationMs : Number.MAX_SAFE_INTEGER
+        const durationB = Number.isFinite(b.lastDurationMs) ? b.lastDurationMs : Number.MAX_SAFE_INTEGER
+        if (durationA !== durationB) return durationA - durationB
+
         return b.priority - a.priority
       })
     const chosen = candidates.find((status) => !states.get(status.id).inFlight)

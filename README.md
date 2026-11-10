@@ -50,6 +50,7 @@ Set `DATABASE_PATH` to use a different SQLite file. Set `PORT` for the Node API 
 - `POST /api/files/scan` — scan tracked Git files and register user files, excluding vendor/transient paths
 - `POST /api/files`, `PATCH /api/files/:id`, `DELETE /api/files/:id` — manage user-file metadata
 - `GET /api/ai/sessions`, `POST /api/ai/sessions`, `GET /api/ai/sessions/:id`, `POST /api/ai/sessions/:id/messages`, `POST /api/ai/sessions/:id/compact`, `DELETE /api/ai/sessions/:id` — manage AI chat sessions, messages, and compacted summaries
+- `GET /api/prompt-templates`, `POST /api/prompt-templates`, `GET /api/prompt-templates/:id`, `PATCH /api/prompt-templates/:id`, `DELETE /api/prompt-templates/:id` — manage reusable prompt templates
 - `POST /api/ai/improve` — generate AI improvement suggestions from workspace tracking summary; optional `create_tasks` creates task entries
 - `GET /api/folders`, `POST /api/folders/scan`, `POST /api/folders`, `PATCH /api/folders/:id`, `DELETE /api/folders/:id` — manage folder-level objectives
 - `GET /api/models` — list the model registry, including in-process request/failure metrics and any configured quota budget
