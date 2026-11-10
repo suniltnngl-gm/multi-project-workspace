@@ -563,6 +563,52 @@ export function createModelClient({
       .digest('hex')
   }
 
+  async function completeOllama(model, request) {
+    reportPhase(request, 'generating')
+    const endpoint = model.chatUrl || (String(model.url || '').replace(/\/+$/, '').endsWith('/chat')
+      ? model.url
+      : `${String(model.url || '').replace(/\/+$/, '')}/chat`)
+    let response
+    const timeout = AbortSignal.timeout(model.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS)
+    const signal = request.signal
+      ? AbortSignal.any([timeout, request.signal])
+      : timeout
+    try {
+      response = await fetchImpl(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(model) },
+        signal,
+        body: JSON.stringify({
+          model: model.apiModel ?? model.model ?? model.id,
+          messages: request.messages,
+          stream: false
+        })
+      })
+    } catch (error) {
+      if (request.signal?.aborted) {
+        throw new ModelCallError(`The request to ${model.label} was cancelled.`, 499)
+      }
+      if (error.name === 'TimeoutError' || error.name === 'AbortError') {
+        throw new ModelCallError(`The model ${model.label} took too long to respond.`, 504)
+      }
+      throw new ModelCallError(`The endpoint for ${model.label} is unavailable.`, 503)
+    }
+
+    if (!response.ok) {
+      const retryAfter = parseRetryAfter(response.headers?.get?.('retry-after'))
+      if (response.status === 429) {
+        throw new ModelCallError(`The model ${model.label} is rate-limited (HTTP 429).`, 429, { retryAfter })
+      }
+      throw new ModelCallError(`The model ${model.label} rejected the request (HTTP ${response.status}).`, 502)
+    }
+    const result = await response.json().catch(() => null)
+    const content = result?.message?.content
+    if (typeof content !== 'string' || !content) {
+      throw new ModelCallError(`The model ${model.label} returned no content.`, 502)
+    }
+    return content
+  }
+
   async function complete(model, request) {
     const startedAt = Date.now()
     const auditDir = process.env.AI_AUDIT_DIR || ''
@@ -586,6 +632,7 @@ export function createModelClient({
       if (model.backend === 'colab-cli') content = await completeColab(model, request)
       else if (model.backend === 'kaggle-cli') content = await completeKaggle(model, request)
       else if (model.backend === 'opencode-cli') content = await completeOpencode(model, request)
+      else if (model.backend === 'ollama') content = await completeOllama(model, request)
       else content = await completeHttp(model, request)
       const observed = Date.now() - startedAt
       adaptiveTimeouts.set(model.id, Math.min(baseTimeoutMs * 2, Math.max(baseTimeoutMs, observed * 2)))

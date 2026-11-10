@@ -328,6 +328,34 @@ function buildServerlessModel(definition, config) {
   }
 }
 
+function createOllamaModel(env) {
+  const url = readUrl(env, 'OLLAMA_AI_URL') || (env.OLLAMA_API_BASE ? trimUrl(env.OLLAMA_API_BASE) : null)
+  if (!url && !env.OLLAMA_API_KEY && !env.OLLAMA_AI_MODEL) return null
+
+  const base = trimUrl(url || 'https://ollama.com/api')
+  const chatUrl = base.endsWith('/chat') ? base : `${base}/chat`
+  const apiKey = env.OLLAMA_API_KEY || env.OLLAMA_AI_API_KEY
+  return {
+    id: 'ollama',
+    label: 'Ollama',
+    provider: 'ollama',
+    execution: 'live',
+    backend: 'ollama',
+    callable: true,
+    remote: true,
+    priority: 6,
+    autoSelect: readBoolean(env, 'OLLAMA_AI_AUTO_SELECT', false),
+    timeoutMs: readNumber(env, 'OLLAMA_AI_TIMEOUT_MS', 120000),
+    minAvailableMemoryMb: 0,
+    url: base,
+    chatUrl,
+    apiKey,
+    apiModel: readText(env, 'OLLAMA_AI_MODEL', 'gpt-oss:120b'),
+    healthPath: '/api/tags',
+    notes: 'Ollama native chat API; set OLLAMA_AI_MODEL to choose a model.'
+  }
+}
+
 function createServerlessModel(env) {
   const definition = SERVERLESS_MODEL_DEFINITION
   const url = readUrl(env, definition.urlEnv)
@@ -485,9 +513,11 @@ export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
     ...(legacyServerless ? [legacyServerless] : []),
     ...createServerlessSlots(env)
   ]
+  const ollamaModel = createOllamaModel(env)
   const models = [
     ...localModels,
     ...serverlessModels,
+    ...(ollamaModel ? [ollamaModel] : []),
     ...externalModels
   ]
 
