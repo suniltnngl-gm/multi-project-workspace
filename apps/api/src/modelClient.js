@@ -14,6 +14,7 @@ const PROMPT_CACHE_ENABLED = process.env.AI_PROMPT_CACHE === 'true'
 const PROMPT_CACHE_TTL_MS = Number(process.env.AI_PROMPT_CACHE_TTL_MS ?? 3600000)
 const PROMPT_CACHE_MAX_ENTRIES = Number(process.env.AI_PROMPT_CACHE_MAX_ENTRIES ?? 100)
 const promptCache = new Map()
+const adaptiveTimeouts = new Map()
 const DEFAULT_COLAB_TIMEOUT_MS = 900000
 const DEFAULT_KAGGLE_TIMEOUT_MS = 3600000
 const SCRIPTS_DIR = fileURLToPath(new URL('../../../scripts', import.meta.url))
@@ -523,14 +524,22 @@ export function createModelClient({
     if (model.cli?.model) args.push('--model', model.cli.model)
     if (model.cli?.agent) args.push('--agent', model.cli.agent)
 
-    const timeoutMs = model.timeoutMs ?? 300000
+    const baseTimeoutMs = model.timeoutMs ?? 300000
+    const timeoutMs = Math.min(600000, adaptiveTimeouts.get(model.id) ?? baseTimeoutMs)
+    const startedAt = Date.now()
     let stdout
     try {
       ({ stdout } = await runCommand(model.cli.command, args, {
         timeoutMs,
         signal: request.signal
       }))
+      const observed = Date.now() - startedAt
+      adaptiveTimeouts.set(model.id, Math.min(600000, Math.max(baseTimeoutMs, observed * 2)))
     } catch (error) {
+      const message = String(error?.message || error)
+      if (/timed? ?out|timeout/i.test(message)) {
+        adaptiveTimeouts.set(model.id, Math.min(600000, timeoutMs * 2))
+      }
       throw new ModelCallError(`The OpenCode CLI failed: ${error.message}`, 502)
     }
 
