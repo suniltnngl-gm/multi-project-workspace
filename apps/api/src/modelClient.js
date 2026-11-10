@@ -545,6 +545,18 @@ export function createModelClient({
     if (!content) {
       throw new ModelCallError('The OpenCode CLI returned no model output.', 502)
     }
+
+    const auditDir = model.cli?.auditDir
+    if (auditDir) {
+      try {
+        await mkdir(auditDir, { recursive: true })
+        const auditPath = join(auditDir, `opencode-${Date.now()}.json`)
+        await writeFile(auditPath, stdout, 'utf8')
+      } catch {
+        // Auditing is best-effort and never blocks inference.
+      }
+    }
+
     return content
   }
 
