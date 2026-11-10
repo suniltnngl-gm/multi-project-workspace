@@ -240,7 +240,7 @@ function createCliConfig(env) {
     opencode: {
       command: 'opencode',
       probeArgs: ['--version'],
-      model: readText(env, 'OPENCODE_AI_MODEL', 'opencode/beam-free'),
+      model: readText(env, 'OPENCODE_AI_MODEL', 'console-nvidia/nvidia/nemotron-3-ultra-550b-a55b'),
       agent: readText(env, 'OPENCODE_AI_AGENT', ''),
       auditDir: readText(env, 'OPENCODE_AI_AUDIT_DIR', ''),
       timeoutMs: readNumber(env, 'OPENCODE_AI_TIMEOUT_MS', 300000)
