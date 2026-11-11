@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import {
   checkQuotaConfiguration,
   checkServerlessConfiguration,
-  describeQuotaLimiter
+  describeQuotaLimiter,
+  runDoctorChecks
 } from '../../../scripts/ai-doctor-checks.mjs'
 
 test('quota diagnostics report configured slot windows and missing limits', () => {
@@ -154,4 +160,103 @@ test('serverless diagnostics warn when no key source is configured', () => {
 
   assert.equal(checks[0].level, 'warn')
   assert.match(checks[0].message, /no API key or apiKeyEnv configured/)
+})
+
+test('offline doctor runs configuration checks without probing anything', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'workspace-doctor-'))
+  try {
+    const probed = []
+    const modelClient = {
+      probe: async (model) => {
+        probed.push(model.id)
+        throw new Error('probe must not run in offline mode')
+      }
+    }
+
+    const { checks } = await runDoctorChecks({
+      env: {},
+      databasePath: join(directory, 'doctor.sqlite'),
+      modelClient,
+      offline: true
+    })
+
+    assert.equal(probed.length, 0)
+    const areas = checks.map((check) => check.area)
+    assert.ok(areas.includes('node'))
+    assert.ok(areas.includes('database'))
+    assert.ok(areas.includes('quota'))
+    const marker = checks.find((check) => check.area === 'probing')
+    assert.ok(marker, 'offline run must mark probing as skipped')
+    assert.equal(marker.level, 'info')
+    assert.match(marker.message, /skipped/)
+    for (const area of areas) {
+      assert.ok(
+        !/^(local-|colab|kaggle|serverless|opencode|ollama)/.test(area),
+        `offline run reported a probe result for ${area}`
+      )
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('default doctor still probes every registered model', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'workspace-doctor-'))
+  try {
+    const probed = []
+    const modelClient = {
+      probe: async (model) => {
+        probed.push(model.id)
+        return { ok: true }
+      }
+    }
+
+    const { checks } = await runDoctorChecks({
+      env: {},
+      databasePath: join(directory, 'doctor.sqlite'),
+      modelClient
+    })
+
+    assert.ok(probed.length > 0)
+    const reachable = checks.filter((check) => /is reachable/.test(check.message))
+    assert.equal(reachable.length, probed.length)
+    assert.ok(!checks.some((check) => check.area === 'probing'))
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('the doctor CLI skips probing in offline mode', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'workspace-doctor-cli-'))
+  try {
+    const doctorPath = fileURLToPath(new URL('../../../scripts/ai-doctor.mjs', import.meta.url))
+    const output = await new Promise((resolvePromise, reject) => {
+      execFile(
+        process.execPath,
+        [doctorPath, '--offline', '--json'],
+        {
+          cwd: process.cwd(),
+          env: { ...process.env, DATABASE_PATH: join(directory, 'doctor.sqlite') }
+        },
+        (error, stdout, stderr) => {
+          if (error) reject(new Error(`${error.message}: ${stderr}`))
+          else resolvePromise(stdout)
+        }
+      )
+    })
+
+    const parsed = JSON.parse(output)
+    assert.equal(parsed.probing, 'skipped')
+    assert.equal(parsed.summary.errors, 0)
+    assert.ok(parsed.checks.some((check) => check.area === 'probing'))
+    for (const check of parsed.checks) {
+      assert.ok(
+        !/^(local-|colab|kaggle|serverless|opencode|ollama)/.test(check.area),
+        `offline CLI reported a probe result for ${check.area}`
+      )
+      assert.ok(!/reachable|unavailable/.test(check.message))
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })

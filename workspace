@@ -563,7 +563,7 @@ PY
         ;;
       *)
         error "Unknown ai subcommand: $subcommand"
-        printf 'Usage: ./workspace ai doctor [--json] [--strict]\n' >&2
+        printf 'Usage: ./workspace ai doctor [--json] [--strict] [--offline]\n' >&2
         printf '       ./workspace ai improve\n' >&2
         printf '       ./workspace ai ask [--model ID] [--session ID] "prompt"\n' >&2
         exit 2

@@ -21,7 +21,7 @@ Useful commands:
 - `./workspace web`, `./workspace node`, `./workspace python` — start one service
 - `./workspace local-ai [all|0.5b|1.5b]` — start local models within memory limits
 - `./workspace colab [status|stop] [session]` — inspect or stop the reusable Colab session
-- `./workspace ai doctor [--json] [--strict]` — check model endpoints, CLIs, budgets, and the database without running inference
+- `./workspace ai doctor [--json] [--strict] [--offline]` — check model endpoints, CLIs, budgets, and the database without running inference; `--offline` skips every endpoint and CLI probe
 - `./workspace ai ask [--model ID] [--session ID] "prompt"` — ask a direct AI question through the running Node API (`POST /api/ai/complete`); with `--session`, the exchange is stored in that AI session
 - `./workspace install` — install npm dependencies and sync the uv-managed Python environment
 - `./workspace python-add <package>` — add a tracked Python dependency with uv
@@ -168,7 +168,7 @@ Allowed shapes are: interactive notebook execution with manual or cell-triggered
 
 ## Diagnostics and CI
 
-Run `./workspace ai doctor` before filing an AI issue. It checks Node and SQLite writability, probes each configured endpoint or CLI, reports Colab session state, validates quota profiles and serverless slot configuration (model slug, key environment variable, chat/health paths, and JSON mode), and warns about quota-spending or destructive options. It never starts a model, bootstraps a Colab session, or submits a Kaggle kernel. Add `--json` for machine-readable output; `--strict` exits nonzero when an error is found (for example when a remote CLI or endpoint is unavailable). The default advisory mode exits zero so it is safe to run while local models are stopped.
+Run `./workspace ai doctor` before filing an AI issue. It checks Node and SQLite writability, probes each configured endpoint or CLI, reports Colab session state, validates quota profiles and serverless slot configuration (model slug, key environment variable, chat/health paths, and JSON mode), and warns about quota-spending or destructive options. It never starts a model, bootstraps a Colab session, or submits a Kaggle kernel. Add `--json` for machine-readable output; `--strict` exits nonzero when an error is found (for example when a remote CLI or endpoint is unavailable). The default advisory mode exits zero so it is safe to run while local models are stopped. Pass `--offline` (or `--no-probe`) to skip every endpoint and CLI probe — useful in CI, preflight checks, or environments without network access. Offline mode still runs the registry, quota-profile, serverless-slot, selection, and safety checks, and reports probing as skipped (an `[info] probing` entry in text output, a `probing: "skipped"` field in JSON) rather than claiming reachability or failures.
 
 GitHub Actions runs lint, the full frontend/Node/Python test suite, and the production build on pushes to `master` and on pull requests (`.github/workflows/ci.yml`).
 
