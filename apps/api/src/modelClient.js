@@ -82,7 +82,14 @@ async function defaultRunCommand(command, args, {
         504
       )
     }
-    const detail = String(error.stderr || error.stdout || error.message || '').trim()
+    // Non-zero exit with stdout/stderr may contain parseable JSON events (e.g. opencode
+    // quota errors). Return them so the caller can extract the provider error.
+    const stdout = String(error.stdout || '').trim()
+    const stderr = String(error.stderr || '').trim()
+    if (stdout || stderr) {
+      return { stdout, stderr }
+    }
+    const detail = String(error.message || '').trim()
     const lastLine = detail.split('\n').filter(Boolean).at(-1)
     throw new ModelCallError(
       `${command} failed${lastLine ? `: ${lastLine}` : '.'}`,
