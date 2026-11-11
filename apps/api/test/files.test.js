@@ -72,3 +72,124 @@ test('user files can be scanned, created, updated, and deleted', async () => {
   const deleteResponse = await fetch(`${baseUrl}/api/files/${created.id}`, { method: 'DELETE' })
   assert.equal(deleteResponse.status, 204)
 })
+
+test('header syncs from the repository reach tracked fields', async () => {
+  const searchResponse = await fetch(`${baseUrl}/api/files?search=scan_folders`)
+  assert.equal(searchResponse.status, 200)
+  const [scanner] = (await searchResponse.json())
+    .filter((file) => file.path.endsWith('scan_folders.py'))
+  assert.ok(scanner, 'scripts/scan_folders.py is tracked')
+  assert.equal(scanner.objective, 'Scan and centrally track folders in SQLite.')
+  assert.equal(
+    scanner.requirements,
+    'Exclude vendor and transient paths; support scan, list, and check commands.'
+  )
+
+  const detailResponse = await fetch(`${baseUrl}/api/files/${scanner.id}`)
+  assert.equal(detailResponse.status, 200)
+  const detail = await detailResponse.json()
+  assert.ok(detail.activity.some((event) => event.action === 'created'))
+  const syncedObjective = detail.activity.find(
+    (event) => event.action === 'synced' && event.field === 'objective'
+  )
+  assert.ok(syncedObjective, 'the objective sync is recorded')
+  assert.equal(syncedObjective.oldValue, '')
+  assert.equal(syncedObjective.newValue, 'Scan and centrally track folders in SQLite.')
+})
+
+test('rescanning unchanged files writes nothing', async () => {
+  const scanResponse = await fetch(`${baseUrl}/api/files/scan`, { method: 'POST' })
+  assert.equal(scanResponse.status, 200)
+  const scanned = await scanResponse.json()
+  assert.equal(scanned.inserted, 0)
+  assert.equal(scanned.synced, 0)
+  assert.equal(scanned.refreshed, 0)
+  assert.equal(scanned.skipped, scanned.total)
+})
+
+test('manual edits survive rescans until the file changes', () => {
+  database.scanUserFiles([
+    { path: 'docs/guide.md', content: '# Objective: Original\n\nGuide body.\n' }
+  ])
+  const file = database.getUserFileByPath('docs/guide.md')
+  assert.equal(file.objective, 'Original')
+
+  database.updateUserFile(file.id, { objective: 'Manually curated' })
+  assert.equal(database.getUserFileByPath('docs/guide.md').objective, 'Manually curated')
+
+  const unchanged = database.scanUserFiles([
+    { path: 'docs/guide.md', content: '# Objective: Original\n\nGuide body.\n' }
+  ])
+  assert.equal(unchanged.skipped, 1)
+  assert.equal(database.getUserFileByPath('docs/guide.md').objective, 'Manually curated')
+
+  const changed = database.scanUserFiles([
+    { path: 'docs/guide.md', content: '# Objective: Revised\n\nGuide body.\n' }
+  ])
+  assert.equal(changed.synced, 1)
+  assert.equal(database.getUserFileByPath('docs/guide.md').objective, 'Revised')
+
+  const objectiveEvents = database.getUserFileDetail(file.id).activity
+    .filter((event) => event.field === 'objective')
+  assert.equal(objectiveEvents.length, 3)
+  assert.equal(objectiveEvents[0].action, 'synced')
+  assert.equal(objectiveEvents[0].oldValue, 'Manually curated')
+  assert.equal(objectiveEvents[0].newValue, 'Revised')
+})
+
+test('scans only write header fields that changed', () => {
+  database.scanUserFiles([
+    {
+      path: 'src/tool.mjs',
+      content: '#!/usr/bin/env node\n// Objective: JS tool\n// Decisions: Keep it small\nimport fs from "node:fs"\n'
+    }
+  ])
+  const file = database.getUserFileByPath('src/tool.mjs')
+  assert.equal(file.objective, 'JS tool')
+  assert.equal(file.decisions, 'Keep it small')
+
+  const codeEdit = database.scanUserFiles([
+    {
+      path: 'src/tool.mjs',
+      content: '#!/usr/bin/env node\n// Objective: JS tool\n// Decisions: Keep it small\nimport path from "node:path"\n'
+    }
+  ])
+  assert.equal(codeEdit.refreshed, 1)
+  assert.equal(
+    database.getUserFileDetail(file.id).activity
+      .filter((event) => event.action === 'synced').length,
+    2
+  )
+
+  const headerEdit = database.scanUserFiles([
+    {
+      path: 'src/tool.mjs',
+      content: '#!/usr/bin/env node\n// Objective: Bigger tool\n// Decisions: Keep it small\nimport path from "node:path"\n'
+    }
+  ])
+  assert.equal(headerEdit.synced, 1)
+  const latest = database.getUserFileDetail(file.id).activity[0]
+  assert.equal(latest.action, 'synced')
+  assert.equal(latest.field, 'objective')
+  assert.equal(latest.oldValue, 'JS tool')
+  assert.equal(latest.newValue, 'Bigger tool')
+
+  database.scanUserFiles([
+    {
+      path: 'src/fixture.test.js',
+      content: 'import assert from "node:assert"\nconst fixture = "# Objective: fixture value"\n'
+    }
+  ])
+  assert.equal(database.getUserFileByPath('src/fixture.test.js').objective, '')
+})
+
+test('manual file updates record field events', () => {
+  const file = database.createUserFile({ path: 'docs/manual.md', objective: 'Manual objective' })
+  database.updateUserFile(file.id, { decisions: 'Record every change' })
+  const activity = database.getUserFileDetail(file.id).activity
+  assert.equal(activity[0].action, 'updated')
+  assert.equal(activity[0].field, 'decisions')
+  assert.equal(activity[0].oldValue, '')
+  assert.equal(activity[0].newValue, 'Record every change')
+  assert.equal(activity[1].action, 'created')
+})

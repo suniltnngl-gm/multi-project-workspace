@@ -1,6 +1,5 @@
 import express from 'express'
 import { execFileSync } from 'node:child_process'
-import { join, relative } from 'node:path'
 import { createResourceMonitor } from './resourceMonitor.js'
 import { createAdaptiveCpuLimit } from './adaptiveCpuLimit.js'
 import { buildTaskPrompt } from './localAiPrompt.js'
@@ -10,6 +9,7 @@ import { createModelClient } from './modelClient.js'
 import { createTaskJobStore } from './taskJobStore.js'
 import { createModelMetrics } from './modelMetrics.js'
 import { createModelBudget } from './modelBudget.js'
+import { scanWorkspaceUserFiles, listWorkspaceFolders } from './workspaceScan.js'
 import { loadWorkspaceEnv } from '../../../scripts/env.mjs'
 
 loadWorkspaceEnv()
@@ -860,23 +860,6 @@ export function createApp(database, {
     return response.status(204).end()
   })
 
-  function isTrackedUserFile(filePath) {
-    if (!filePath || typeof filePath !== 'string') return false
-    const normalized = filePath.replace(/\\\\/g, '/')
-    const noisePrefixes = [
-      'node_modules/', 'apps/python/.venv/', 'apps/web/dist/', 'apps/api/data/',
-      '.git/'
-    ]
-    if (noisePrefixes.some((prefix) => normalized.startsWith(prefix))) return false
-    if (normalized.split('/').includes('__pycache__')) return false
-    const extension = normalized.slice(normalized.lastIndexOf('.')).toLowerCase()
-    const allowedExtensions = new Set([
-      '.js', '.mjs', '.py', '.css', '.html', '.md', '.yml', '.yaml'
-    ])
-    if (!allowedExtensions.has(extension)) return false
-    return true
-  }
-
   app.get('/api/files', (request, response) => {
     response.json(database.listUserFiles({ search: request.query.search || '' }))
   })
@@ -884,7 +867,7 @@ export function createApp(database, {
   app.get('/api/files/:id', (request, response) => {
     const id = parseId(request.params.id)
     if (id === null) return response.status(400).json({ error: 'File ID must be a positive integer.' })
-    const file = database.getUserFile(id)
+    const file = database.getUserFileDetail(id)
     if (!file) return response.status(404).json({ error: 'User file not found.' })
     return response.json(file)
   })
@@ -934,24 +917,13 @@ export function createApp(database, {
     return response.status(204).end()
   })
 
-  app.post('/api/files/scan', async (_request, response) => {
+  app.post('/api/files/scan', (_request, response) => {
     try {
-      const { readdirSync } = await import('node:fs')
       const root = execFileSync('git', ['rev-parse', '--show-toplevel'], {
         cwd: process.cwd(),
         encoding: 'utf8'
       }).trim()
-      const entries = readdirSync(root, { recursive: true, withFileTypes: true })
-      const paths = entries
-        .filter((entry) => entry.isFile())
-        .map((entry) => {
-          const parent = entry.parentPath || entry.path
-          return relative(root, join(parent, entry.name))
-        })
-        .map((filePath) => filePath.replace(/\\\\/g, '/'))
-        .filter(isTrackedUserFile)
-      const result = database.scanUserFiles(paths)
-      response.json({ ...result, paths })
+      response.json(scanWorkspaceUserFiles({ rootDir: root, database }))
     } catch (error) {
       response.status(500).json({ error: 'Could not scan user files.' })
     }
@@ -1007,23 +979,13 @@ export function createApp(database, {
     return response.status(204).end()
   })
 
-  app.post('/api/folders/scan', async (_request, response) => {
+  app.post('/api/folders/scan', (_request, response) => {
     try {
-      const { readdirSync } = await import('node:fs')
       const root = execFileSync('git', ['rev-parse', '--show-toplevel'], {
         cwd: process.cwd(),
         encoding: 'utf8'
       }).trim()
-      const entries = readdirSync(root, { recursive: true, withFileTypes: true })
-      const paths = [...new Set(
-        entries
-          .filter((entry) => entry.isDirectory())
-          .map((entry) => {
-            const parent = entry.parentPath || entry.path
-            return relative(root, join(parent, entry.name)).replace(/\\\\/g, '/')
-          })
-          .filter((folderPath) => folderPath && !folderPath.includes('node_modules') && !folderPath.includes('.git'))
-      )]
+      const paths = listWorkspaceFolders(root)
       const result = database.scanFolders(paths)
       response.json({ ...result, paths })
     } catch (error) {

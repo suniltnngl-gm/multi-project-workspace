@@ -1092,7 +1092,7 @@ loadModels()
 scanFilesButton.addEventListener('click', async () => {
   try {
     const result = await request('/api/files/scan', { method: 'POST' })
-    fileStatus.textContent = `Scanned ${result.paths.length} user files (${result.inserted} new).`
+    fileStatus.textContent = `Scanned ${result.paths.length} user files (${result.inserted} new, ${result.synced} synced).`
     fileStatus.classList.remove('is-error')
     await loadFiles()
   } catch (error) {

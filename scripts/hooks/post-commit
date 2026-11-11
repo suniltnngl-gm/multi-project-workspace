@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Objective: Sync user-file header tracking after each commit.
+# Requirements: Never block or fail the commit; stay quiet when nothing changed.
+# Decisions: Best-effort by design: scan failures are swallowed because self-check and maintain still enforce tracking.
+# Relevant Files: scripts/hooks/post-commit, scripts/scan-user-files.mjs, workspace
+# Important Context: User file. Installed by ./workspace install into the repository hooks directory.
+# Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+[ -n "$ROOT" ] || exit 0
+[ -x "$ROOT/workspace" ] || exit 0
+
+"$ROOT/workspace" files scan --quiet >/dev/null 2>&1 || true

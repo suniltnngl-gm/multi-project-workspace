@@ -39,7 +39,7 @@ test('folders can be scanned, created, updated, and deleted', async () => {
   assert.equal(scanned.updated, 0)
   for (const path of scanned.paths) {
     assert.ok(!path.includes('node_modules'), `unexpected vendor path: ${path}`)
-    assert.ok(!path.includes('.git'), `unexpected git path: ${path}`)
+    assert.ok(!/(^|\/)\.git(\/|$)/.test(path), `unexpected git path: ${path}`)
   }
 
   const rescanResponse = await fetch(`${baseUrl}/api/folders/scan`, { method: 'POST' })

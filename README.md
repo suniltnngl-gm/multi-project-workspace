@@ -23,7 +23,7 @@ Useful commands:
 - `./workspace colab [status|stop] [session]` — inspect or stop the reusable Colab session
 - `./workspace ai doctor [--json] [--strict] [--offline]` — check model endpoints, CLIs, budgets, and the database without running inference; `--offline` skips every endpoint and CLI probe
 - `./workspace ai ask [--model ID] [--session ID] "prompt"` — ask a direct AI question through the running Node API (`POST /api/ai/complete`); with `--session`, the exchange is stored in that AI session
-- `./workspace install` — install npm dependencies and sync the uv-managed Python environment
+- `./workspace install` — install npm dependencies, sync the uv-managed Python environment, and install the post-commit tracking hook
 - `./workspace python-add <package>` — add a tracked Python dependency with uv
 - `./workspace python-pip install <package>` — use uv's pip-compatible interface in the workspace environment
 - `./workspace test` / `./workspace lint` / `./workspace build` — run tests, lint the frontend, or build
@@ -72,13 +72,15 @@ Every draft is also recorded in `ai_jobs`, including synchronous local and serve
 The workspace tracks more than tasks:
 
 - Tasks: workflow, priority, project, type, acceptance criteria, planning fields, and work state.
-- User files: objective, requirements, decisions, relevant files, and important context.
+- User files: objective, requirements, decisions, relevant files, and important context, synced from each file's header comments.
 - Folders: folder-level objectives.
 - Git worktrees: repository root, worktree path, branch, HEAD, and remote URL.
 - Tools: availability and versions for core workflow tools.
 - Environments: OS, release, architecture, and runtime versions.
 
 Use `./workspace tracks`, `./workspace status`, and `<domain> scan|list|check` commands to inspect or refresh these domains. Tracking updates are scoped to touched surfaces, preserve history, and complement Git.
+
+User-file fields sync from the files themselves. A tracked file's leading comment block can carry `# Objective:`, `# Requirements:`, `# Decisions:`, `# Relevant Files:`, and `# Important Context:` lines (`//` comments in JavaScript). `./workspace files scan` and the board's **Scan user files** button parse that block and write the values into the file's tracked fields. The sync is scoped by a content hash: untouched files are skipped entirely, and a changed file only writes the fields whose header value changed. Header syncs record `synced` events and manual edits record `updated` events in the file's activity trail (`GET /api/files/:id` returns it), so history is preserved. Removing a header line stops syncing that field rather than erasing the last value, and `# Work State:` lines are informational only — work state lives on tasks, not files. `./workspace install` also places a post-commit hook in the repository that runs the same scan after each commit, so header edits sync without a manual step (an existing foreign post-commit hook is left untouched). Folder objectives have no header source and remain manual edits.
 
 ## Local task assistant
 

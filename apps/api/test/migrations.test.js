@@ -157,6 +157,13 @@ test('legacy tracking databases are migrated without losing data', () => {
   const folder = migrated.getFolderByPath('legacy-folder')
   assert.equal(folder.objective, 'Legacy folder objective')
 
+  // Legacy user-file rows gain a creation event without losing fields.
+  assert.equal(file.contentHash, null)
+  const legacyFileActivity = migrated.getUserFileDetail(file.id).activity
+  assert.equal(legacyFileActivity.length, 1)
+  assert.equal(legacyFileActivity[0].action, 'created')
+  assert.equal(legacyFileActivity[0].createdAt, '2026-01-05T00:00:00.000Z')
+
   // Tool rows survive and start with neutral outcome counters.
   const tools = migrated.listTools()
   assert.equal(tools.length, 1)
@@ -186,6 +193,7 @@ test('legacy tracking databases are migrated without losing data', () => {
   for (const kept of ['objective', 'requirements', 'decisions', 'relevant_files', 'important_context']) {
     assert.ok(userFileColumns.includes(kept), `user_files lost ${kept}`)
   }
+  assert.ok(userFileColumns.includes('content_hash'), 'user_files is missing content_hash')
 
   const folderColumns = tableColumns(inspection, 'folders')
   assert.ok(!folderColumns.includes('important_context'), 'folders still has important_context')
@@ -203,7 +211,7 @@ test('legacy tracking databases are migrated without losing data', () => {
   const tables = inspection.prepare(
     "SELECT name FROM sqlite_master WHERE type = 'table'"
   ).all().map((row) => row.name)
-  for (const created of ['git_worktrees', 'environments', 'prompt_templates', 'ai_quota']) {
+  for (const created of ['git_worktrees', 'environments', 'prompt_templates', 'ai_quota', 'user_file_events']) {
     assert.ok(tables.includes(created), `missing table ${created}`)
   }
 
@@ -237,6 +245,8 @@ test('reopening a migrated database is idempotent', () => {
   const second = createDatabase(databasePath)
   assert.equal(second.getTaskDetail(1).activity.length, 1)
   assert.equal(second.getTaskDetail(2).activity.length, 1)
+  const legacyFile = second.getUserFileByPath('docs/legacy.md')
+  assert.equal(second.getUserFileDetail(legacyFile.id).activity.length, 1)
   const tools = second.listTools()
   assert.equal(tools.length, 1)
   assert.equal(tools[0].successCount, 0)

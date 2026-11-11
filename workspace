@@ -88,6 +88,27 @@ run_with_env() {
   exec node "$ROOT_DIR/scripts/with-env.mjs" "$@"
 }
 
+install_git_hook() {
+  local source_hook="$ROOT_DIR/scripts/hooks/post-commit"
+  local target
+  target="$(git rev-parse --git-path hooks/post-commit 2>/dev/null)" || {
+    warn 'Could not locate the Git hooks directory; skipping the post-commit tracking hook.'
+    return 0
+  }
+  case "$target" in
+    /*) ;;
+    *) target="$ROOT_DIR/$target" ;;
+  esac
+  mkdir -p "$(dirname "$target")"
+  if [ -f "$target" ] && ! grep -q 'workspace files scan' "$target"; then
+    warn 'An existing post-commit hook was left untouched; see scripts/hooks/post-commit to integrate tracking sync manually.'
+    return 0
+  fi
+  cp "$source_hook" "$target"
+  chmod +x "$target"
+  info 'Installed the post-commit tracking sync hook.'
+}
+
 port_in_use() {
   local port="$1"
   (exec 3<>"/dev/tcp/127.0.0.1/${port}") >/dev/null 2>&1
@@ -156,7 +177,7 @@ print_help() {
   printf '  %-24s %s\n' 'restart' 'Stop, then start all services'
   printf '  %-24s %s\n' 'status' 'Show tool versions and service port state'
   printf '\n%sUser files%s\n' "$C_BOLD" "$C_RESET"
-  printf '  %-24s %s\n' 'files scan' 'Scan and register user files in SQLite'
+  printf '  %-24s %s\n' 'files scan' 'Scan user files and sync header fields'
   printf '  %-24s %s\n' 'files list' 'List centrally tracked user files'
   printf '  %-24s %s\n' 'files check' 'Verify every user file is tracked'
   printf '  %-24s %s\n' 'folders scan' 'Scan and register folders in SQLite'
@@ -244,6 +265,7 @@ case "$command_name" in
     require_uv
     npm install
     "$UV" python install "$(cat apps/python/.python-version)"
+    install_git_hook
     exec "$UV" sync --project apps/python
     ;;
   python-add)
@@ -408,16 +430,19 @@ case "$command_name" in
     subcommand="${2:-scan}"
     case "$subcommand" in
       scan)
-        require_uv
-        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_user_files.py" scan --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        require_npm
+        shift 2 || true
+        run_with_env node "$ROOT_DIR/scripts/scan-user-files.mjs" scan "$@"
         ;;
       list)
-        require_uv
-        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_user_files.py" list --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        require_npm
+        shift 2 || true
+        run_with_env node "$ROOT_DIR/scripts/scan-user-files.mjs" list "$@"
         ;;
       check)
-        require_uv
-        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_user_files.py" check --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        require_npm
+        shift 2 || true
+        run_with_env node "$ROOT_DIR/scripts/scan-user-files.mjs" check "$@"
         ;;
       *)
         error "Unknown files subcommand: $subcommand"
