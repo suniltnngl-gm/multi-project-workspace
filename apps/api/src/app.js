@@ -11,6 +11,7 @@ import { createModelMetrics } from './modelMetrics.js'
 import { createModelBudget } from './modelBudget.js'
 import { scanWorkspaceUserFiles, listWorkspaceFolders } from './workspaceScan.js'
 import { createLocalVerifier, VerificationError } from './localVerifier.js'
+import { createOpenCodeRosterCacheFromEnv } from './opencodeDiscovery.js'
 import { loadWorkspaceEnv } from '../../../scripts/env.mjs'
 
 loadWorkspaceEnv()
@@ -511,6 +512,7 @@ export function createApp(database, {
     profiles: modelQuotaProfiles(models)
   }),
   verifier,
+  opencodeRosterCache,
   turnCooldownMs = LOCAL_AI_TURN_COOLDOWN_MS
 } = {}) {
   const app = express()
@@ -773,6 +775,40 @@ export function createApp(database, {
       ...publicModelDefinition(model),
       ...(modelMetrics.snapshot(model.id) || {})
     })))
+  })
+
+  // The OpenCode roster is discovered from the local CLI on demand and cached;
+  // tests inject a cache so the real CLI never runs in the suite.
+  let resolvedOpenCodeRosterCache = null
+  const getOpenCodeRosterCache = () => {
+    if (opencodeRosterCache) return opencodeRosterCache
+    if (resolvedOpenCodeRosterCache === null) {
+      resolvedOpenCodeRosterCache = createOpenCodeRosterCacheFromEnv()
+    }
+    return resolvedOpenCodeRosterCache
+  }
+
+  app.get('/api/models/opencode', async (request, response) => {
+    const slot = models.find((model) => model.id === 'opencode')
+    if (!slot) {
+      return response.status(404).json({ error: 'The OpenCode backend is not registered.' })
+    }
+    const refresh = ['1', 'true', 'yes'].includes(String(request.query.refresh ?? '').toLowerCase())
+    let roster
+    try {
+      roster = await getOpenCodeRosterCache().get({ refresh })
+    } catch (error) {
+      return response.status(500).json({ error: 'Could not read the OpenCode model roster.' })
+    }
+    const model = slot.cli?.model ?? null
+    return response.json({
+      model,
+      inRoster: roster.ok ? roster.models.includes(model) : null,
+      availableModels: roster.models,
+      count: roster.models.length,
+      fetchedAt: roster.fetchedAt,
+      ...(roster.ok ? {} : { error: roster.error })
+    })
   })
 
   app.get('/api/local-ai/status', async (_request, response) => {
