@@ -95,10 +95,71 @@ export function formatBudget(budget) {
   return `budget ${used}/${limit} ${window} ${unit}`
 }
 
+/**
+ * Render one quota limiter with its unit, window, reset mode, used/limit, and
+ * cooldown or usage-support state. State annotations follow the label after a
+ * comma so each limiter stays one readable segment.
+ */
+export function formatLimiter(limiter) {
+  const unit = limiter.unit === 'compute_seconds' ? 'compute' : (limiter.unit ?? 'requests')
+  const reset = limiter.reset ?? 'fixed'
+  const window = limiter.window ?? (reset === 'pool' ? 'none' : 'day')
+  const used = limiter.used ?? 0
+  const limit = limiter.limit ?? 0
+  const label = reset === 'pool' || window === 'none'
+    ? `${used}/${limit} ${unit} pool`
+    : `${used}/${limit} ${unit} per ${window} ${reset === 'rolling' ? '(rolling)' : '(fixed)'}`
+  const annotations = []
+  if (limiter.ok === false) {
+    if (reset === 'pool') {
+      annotations.push('depleted')
+    } else if (Number.isFinite(limiter.resetsInSeconds) && limiter.resetsInSeconds > 0) {
+      annotations.push(`resets in ${formatDuration(limiter.resetsInSeconds * 1000)}`)
+    } else {
+      annotations.push('reset unknown')
+    }
+  }
+  if (limiter.usageSupported === false) annotations.push('usage unsupported')
+  return annotations.length > 0 ? `${label}, ${annotations.join(', ')}` : label
+}
+
+// A lone requests-per-day limiter with a fixed reset keeps the compact legacy
+// "budget X/Y today" label; every other profile renders all its limiters.
+function legacyDailyLabel(limiters) {
+  if (limiters.length !== 1) return null
+  const [limiter] = limiters
+  const unit = limiter.unit ?? 'requests'
+  const window = limiter.window ?? 'day'
+  const reset = limiter.reset ?? 'fixed'
+  return unit === 'requests' && window === 'day' && reset === 'fixed'
+    ? formatBudget(limiter)
+    : null
+}
+
+// The budget snapshot carries every configured limiter. Each limiter becomes
+// one " · "-joined segment on the roster's full-width meta line, so several
+// limiters stay readable by wrapping at spaces instead of truncating.
+function budgetSegments(budget) {
+  const limiters = Array.isArray(budget.limiters) ? budget.limiters : []
+  const segments = []
+  const legacy = legacyDailyLabel(limiters)
+  if (legacy) {
+    segments.push(legacy)
+  } else if (limiters.length === 0) {
+    segments.push(formatBudget(budget))
+  } else {
+    segments.push(...limiters.map((limiter) => formatLimiter(limiter)))
+  }
+  if (budget.cooldownSeconds > 0) {
+    segments.push(`cooldown ${formatDuration(budget.cooldownSeconds * 1000)}`)
+  }
+  return segments
+}
+
 export function formatModelMeta(model) {
   const parts = []
   if (model.budget) {
-    parts.push(formatBudget(model.budget))
+    parts.push(...budgetSegments(model.budget))
   }
   if (model.sessionState) parts.push(`session ${model.sessionState}`)
   if (model.requests) {

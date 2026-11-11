@@ -7,6 +7,7 @@ import {
   formatBusyMessage,
   formatDuration,
   formatJobProgress,
+  formatLimiter,
   formatModelMeta,
   formatRelativeTime,
   formatTaskActivity,
@@ -119,6 +120,78 @@ describe('formatBudget', () => {
   it('labels depleting pools without a window', () => {
     expect(formatBudget({ used: 10, limit: 10, window: 'none', unit: 'compute_seconds' }))
       .toBe('budget 10/10 compute pool')
+  })
+})
+
+describe('formatLimiter', () => {
+  it('labels rolling windows with their reset wait', () => {
+    expect(formatLimiter({
+      unit: 'requests', window: 'minute', reset: 'rolling',
+      limit: 3, used: 2, ok: false, resetsInSeconds: 45
+    })).toBe('2/3 requests per minute (rolling), resets in 45s')
+  })
+
+  it('labels fixed windows', () => {
+    expect(formatLimiter({
+      unit: 'tokens', window: 'hour', reset: 'fixed',
+      limit: 6000, used: 500, ok: true, resetsInSeconds: 0
+    })).toBe('500/6000 tokens per hour (fixed)')
+  })
+
+  it('labels session windows', () => {
+    expect(formatLimiter({
+      unit: 'requests', window: 'session', reset: 'fixed',
+      limit: 5, used: 3, ok: true
+    })).toBe('3/5 requests per session (fixed)')
+  })
+
+  it('labels a depleted pool without promising a reset', () => {
+    expect(formatLimiter({
+      unit: 'compute_seconds', window: 'none', reset: 'pool',
+      limit: 10, used: 10, ok: false, resetsInSeconds: null
+    })).toBe('10/10 compute pool, depleted')
+  })
+
+  it('flags limiters whose provider reports no usage', () => {
+    expect(formatLimiter({
+      unit: 'tokens', window: 'hour', reset: 'rolling',
+      limit: 6000, used: 500, ok: true, usageSupported: false
+    })).toBe('500/6000 tokens per hour (rolling), usage unsupported')
+  })
+
+  it('marks blocked limiters without a reset schedule as unknown', () => {
+    expect(formatLimiter({
+      unit: 'requests', window: 'hour', reset: 'rolling',
+      limit: 2, used: 2, ok: false, resetsInSeconds: null
+    })).toBe('2/2 requests per hour (rolling), reset unknown')
+  })
+})
+
+describe('formatModelMeta with limiter detail', () => {
+  it('keeps the compact label for a single legacy daily profile', () => {
+    expect(formatModelMeta({
+      budget: {
+        limiters: [{
+          unit: 'requests', window: 'day', reset: 'fixed',
+          limit: 10, used: 2, ok: true, resetsInSeconds: 0
+        }]
+      },
+      sessionState: 'absent'
+    })).toBe('budget 2/10 today · session absent')
+  })
+
+  it('renders every limiter with cooldown and usage support', () => {
+    expect(formatModelMeta({
+      budget: {
+        ok: false,
+        cooldownSeconds: 45,
+        limiters: [
+          { unit: 'requests', window: 'minute', reset: 'rolling', limit: 3, used: 2, ok: true, resetsInSeconds: 0 },
+          { unit: 'requests', window: 'day', reset: 'fixed', limit: 5, used: 1, ok: true, resetsInSeconds: 0 },
+          { unit: 'tokens', window: 'none', reset: 'pool', limit: 6000, used: 500, ok: true, resetsInSeconds: null, usageSupported: false }
+        ]
+      }
+    })).toBe('2/3 requests per minute (rolling) · 1/5 requests per day (fixed) · 500/6000 tokens pool, usage unsupported · cooldown 45s')
   })
 })
 

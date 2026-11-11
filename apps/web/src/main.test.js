@@ -130,7 +130,23 @@ const models = [
     autoSelect: false,
     notes: 'Calls a reusable Colab session through the colab CLI.',
     sessionState: 'absent',
-    budget: { used: 2, limit: 10 }
+    budget: {
+      ok: true,
+      limiters: [
+        {
+          policy: 'colab:requests:day:fixed',
+          unit: 'requests',
+          window: 'day',
+          reset: 'fixed',
+          limit: 10,
+          used: 2,
+          remaining: 8,
+          ok: true,
+          resetsInSeconds: 0,
+          bucket: 1768435200000
+        }
+      ]
+    }
   },
   {
     id: 'kaggle-3b',
@@ -140,7 +156,47 @@ const models = [
     callable: true,
     autoSelect: false,
     notes: 'Submits a private Kaggle notebook through the kaggle CLI.',
-    budget: { used: 1, limit: 5 }
+    budget: {
+      ok: false,
+      cooldownSeconds: 45,
+      limiters: [
+        {
+          policy: 'kaggle:requests:minute:rolling',
+          unit: 'requests',
+          window: 'minute',
+          reset: 'rolling',
+          limit: 3,
+          used: 2,
+          remaining: 1,
+          ok: true,
+          resetsInSeconds: 0
+        },
+        {
+          policy: 'kaggle:requests:day:fixed',
+          unit: 'requests',
+          window: 'day',
+          reset: 'fixed',
+          limit: 5,
+          used: 1,
+          remaining: 4,
+          ok: true,
+          resetsInSeconds: 0,
+          bucket: 1768435200000
+        },
+        {
+          policy: 'kaggle:tokens:none:pool',
+          unit: 'tokens',
+          window: 'none',
+          reset: 'pool',
+          limit: 6000,
+          used: 500,
+          remaining: 5500,
+          ok: true,
+          resetsInSeconds: null,
+          usageSupported: false
+        }
+      ]
+    }
   }
 ]
 
@@ -273,7 +329,7 @@ describe('development board', () => {
       .toEqual([
         '3 requests · 1 failed · last 2s',
         'budget 2/10 today · session absent',
-        'budget 1/5 today'
+        '2/3 requests per minute (rolling) · 1/5 requests per day (fixed) · 500/6000 tokens pool, usage unsupported · cooldown 45s'
       ])
   })
 
