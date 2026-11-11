@@ -1,7 +1,7 @@
 // Objective: Create the workspace database schema and upgrade legacy shapes in place.
-// Requirements: Stay idempotent so an interrupted upgrade can be retried; preserve row ids and event trails; register a primary repository before any association backfill.
-// Decisions: One cohesive sequence rather than per-domain migrations, because the association rebuilds must land after the repositories registry exists; foreign keys toggle outside transactions per the documented SQLite rebuild procedure; a legacy database opened without a root falls back to the process working directory so backfilled rows never dangle.
-// Relevant Files: apps/api/src/db/migrations.js, apps/api/src/database.js, apps/api/src/db/tasks.js
+// Requirements: Stay idempotent so an interrupted upgrade can be retried; preserve row ids and event trails; register a primary repository before any association backfill; link activity events to tool runs without rebuilding their tables.
+// Decisions: One cohesive sequence rather than per-domain migrations, because the association rebuilds must land after the repositories registry exists; foreign keys toggle outside transactions per the documented SQLite rebuild procedure; a legacy database opened without a root falls back to the process working directory so backfilled rows never dangle; run_id lands as a nullable ALTER because SQLite allows a nullable REFERENCES column and the trails survive untouched.
+// Relevant Files: apps/api/src/db/migrations.js, apps/api/src/database.js, apps/api/src/db/tasks.js, apps/api/src/db/toolRuns.js
 // Important Context: User file. Runs on every createDatabase call before any store builds its statements.
 // Work State: Completed: Extracted from database.js as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { basename, resolve } from 'node:path'
@@ -189,6 +189,17 @@ export function runMigrations(connection, { rootDir } = {}) {
       used REAL NOT NULL DEFAULT 0,
       PRIMARY KEY (model, policy, bucket)
     );
+
+    CREATE TABLE IF NOT EXISTS tool_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL CHECK (kind IN ('api', 'scan')),
+      label TEXT NOT NULL CHECK(length(trim(label)) BETWEEN 1 AND 500),
+      created_at TEXT NOT NULL,
+      finished_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_tool_runs_created
+      ON tool_runs(created_at DESC, id DESC);
   `)
 
   // Carry the legacy daily counters into the generalized quota table. The old
@@ -246,6 +257,20 @@ export function runMigrations(connection, { rootDir } = {}) {
   )
   if (!userFileColumns.has('content_hash')) {
     connection.exec('ALTER TABLE user_files ADD COLUMN content_hash TEXT')
+  }
+
+  // Provenance: link every activity event to the tool run that produced it.
+  // The column is nullable so the ALTER preserves ids and trails; events that
+  // predate run tracking keep run_id NULL.
+  for (const tableName of ['task_events', 'user_file_events']) {
+    const columns = new Set(
+      connection.prepare(`PRAGMA table_info(${tableName})`).all().map((column) => column.name)
+    )
+    if (!columns.has('run_id')) {
+      connection.exec(
+        `ALTER TABLE ${tableName} ADD COLUMN run_id INTEGER REFERENCES tool_runs(id)`
+      )
+    }
   }
 
   // Multi-repository registry. user_files and folders predate repository

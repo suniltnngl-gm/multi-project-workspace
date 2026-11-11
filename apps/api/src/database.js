@@ -1,7 +1,7 @@
 // Objective: Compose the workspace database from per-domain stores behind one public entry.
-// Requirements: Keep the createDatabase signature and returned surface identical, so routes, scripts, and tests never know about the split; run migrations before any store builds its statements.
-// Decisions: Each domain owns its statements, mappers, and methods in apps/api/src/db/; git worktrees take the repositories store so root resolution stays explicit; close stays here because it owns the connection.
-// Relevant Files: apps/api/src/database.js, apps/api/src/db/migrations.js, apps/api/src/db/tasks.js, apps/api/src/db/repositories.js
+// Requirements: Keep the createDatabase signature and returned surface identical, so routes, scripts, and tests never know about the split; run migrations before any store builds its statements; hand the toolRuns store to the event-emitting domains.
+// Decisions: Each domain owns its statements, mappers, and methods in apps/api/src/db/; git worktrees take the repositories store so root resolution stays explicit; tasks and user files take the toolRuns store the same way so event stamping never reaches method signatures; close stays here because it owns the connection.
+// Relevant Files: apps/api/src/database.js, apps/api/src/db/migrations.js, apps/api/src/db/tasks.js, apps/api/src/db/repositories.js, apps/api/src/db/toolRuns.js
 // Important Context: User file. The composition entry for scripts/, the API, and the tests.
 // Work State: Completed: Split into db/ domain modules as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { mkdirSync } from 'node:fs'
@@ -20,6 +20,7 @@ import { createToolsStore } from './db/tools.js'
 import { createEnvironmentsStore } from './db/environments.js'
 import { createAiSessionsStore } from './db/aiSessions.js'
 import { createPromptTemplatesStore } from './db/promptTemplates.js'
+import { createToolRunsStore } from './db/toolRuns.js'
 
 const defaultDatabasePath = fileURLToPath(new URL('../data/workspace.sqlite', import.meta.url))
 
@@ -36,11 +37,12 @@ export function createDatabase(
   runMigrations(connection, { rootDir })
 
   const repositories = createRepositoriesStore(connection)
+  const toolRuns = createToolRunsStore(connection)
   return {
-    ...createTasksStore(connection),
+    ...createTasksStore(connection, { toolRuns }),
     ...createAiJobsStore(connection),
     ...createAiQuotaStore(connection),
-    ...createUserFilesStore(connection),
+    ...createUserFilesStore(connection, { toolRuns }),
     ...createFoldersStore(connection),
     ...repositories,
     ...createGitWorktreesStore(connection, { repositories }),
@@ -48,6 +50,7 @@ export function createDatabase(
     ...createEnvironmentsStore(connection),
     ...createAiSessionsStore(connection),
     ...createPromptTemplatesStore(connection),
+    ...toolRuns,
     close() {
       connection.close()
     }

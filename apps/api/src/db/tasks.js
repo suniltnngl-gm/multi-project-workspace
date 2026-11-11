@@ -1,7 +1,7 @@
 // Objective: Own task rows, their activity trail, and task-linked AI run reads.
-// Requirements: Record field-level activity events; keep drafting and worktree provenance out of generic task edits; keep AI runs inspectable after task deletion.
-// Decisions: The task-centric ai_jobs reads and the unlink write live here because they key off task identity; toAiRun is imported from the jobs store; TASK_COLUMNS is exported for the migration sequence.
-// Relevant Files: apps/api/src/db/tasks.js, apps/api/src/db/aiJobs.js, apps/api/src/database.js
+// Requirements: Record field-level activity events; keep drafting and worktree provenance out of generic task edits; keep AI runs inspectable after task deletion; stamp every event with the tool run that produced it when one is active.
+// Decisions: The task-centric ai_jobs reads and the unlink write live here because they key off task identity; toAiRun is imported from the jobs store; TASK_COLUMNS is exported for the migration sequence; the store takes the toolRuns store the way gitWorktrees takes repositories, reading the innermost run inside each transaction so concurrent callers never cross-stamp.
+// Relevant Files: apps/api/src/db/tasks.js, apps/api/src/db/aiJobs.js, apps/api/src/db/toolRuns.js, apps/api/src/database.js
 // Important Context: User file. Composed into the createDatabase surface.
 // Work State: Completed: Extracted from database.js as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { toAiRun } from './aiJobs.js'
@@ -39,11 +39,16 @@ function toTaskEvent(row) {
     ...(row.field !== null ? { field: row.field } : {}),
     ...(row.old_value !== null ? { oldValue: row.old_value } : {}),
     ...(row.new_value !== null ? { newValue: row.new_value } : {}),
+    ...(row.run_id !== null ? { run: { id: row.run_id, kind: row.run_kind, label: row.run_label } } : {}),
     createdAt: row.created_at
   }
 }
 
-export function createTasksStore(connection) {
+export function createTasksStore(connection, { toolRuns } = {}) {
+  // Events stamp the innermost active run; callers without one (legacy
+  // scripts, tests) keep run_id NULL.
+  const currentRunId = () => toolRuns?.currentToolRunId() ?? null
+
   const taskFields = 'id, title, description, completed, project, status, priority, task_type, acceptance_criteria, objectives, requirements, decisions, relevant_files, important_context, work_completed, work_active, work_blocked, next_move, worktree_path, origin_job_id, created_at, updated_at'
   const taskOrder = "ORDER BY CASE status WHEN 'in_progress' THEN 0 WHEN 'todo' THEN 1 WHEN 'blocked' THEN 2 ELSE 3 END, CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, updated_at DESC"
   const getStatement = connection.prepare(
@@ -63,15 +68,18 @@ export function createTasksStore(connection) {
     'UPDATE tasks SET origin_job_id = ?, updated_at = ? WHERE id = ?'
   )
   const listTaskEventsStatement = connection.prepare(`
-    SELECT id, task_id, action, field, old_value, new_value, created_at
+    SELECT task_events.id, task_events.task_id, task_events.action, task_events.field,
+           task_events.old_value, task_events.new_value, task_events.created_at,
+           task_events.run_id, tool_runs.kind AS run_kind, tool_runs.label AS run_label
     FROM task_events
-    WHERE task_id = ?
-    ORDER BY created_at DESC, id DESC
+    LEFT JOIN tool_runs ON tool_runs.id = task_events.run_id
+    WHERE task_events.task_id = ?
+    ORDER BY task_events.created_at DESC, task_events.id DESC
     LIMIT ?
   `)
   const insertTaskEventStatement = connection.prepare(`
-    INSERT INTO task_events (task_id, action, field, old_value, new_value, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO task_events (task_id, action, field, old_value, new_value, created_at, run_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `)
   const projectsStatement = connection.prepare('SELECT DISTINCT project FROM tasks ORDER BY project COLLATE NOCASE')
   const listTaskAiRunsStatement = connection.prepare(`
@@ -139,7 +147,7 @@ export function createTasksStore(connection) {
       now
     )
     const id = Number(result.lastInsertRowid)
-    insertTaskEventStatement.run(id, 'created', null, null, null, now)
+    insertTaskEventStatement.run(id, 'created', null, null, null, now, currentRunId())
     return id
   })
 
@@ -209,7 +217,8 @@ export function createTasksStore(connection) {
         field,
         String(current[field]),
         String(next[field]),
-        updatedAt
+        updatedAt,
+        currentRunId()
       )
     }
     return readTask(id)
@@ -228,7 +237,8 @@ export function createTasksStore(connection) {
       'worktree_path',
       String(current.worktree_path ?? ''),
       String(path),
-      updatedAt
+      updatedAt,
+      currentRunId()
     )
     return readTask(id)
   })
@@ -246,7 +256,8 @@ export function createTasksStore(connection) {
       'origin_job_id',
       String(current.origin_job_id ?? ''),
       String(jobId),
-      updatedAt
+      updatedAt,
+      currentRunId()
     )
     return readTask(id)
   })

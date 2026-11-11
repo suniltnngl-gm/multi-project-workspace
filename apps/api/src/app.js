@@ -1,7 +1,7 @@
 // Objective: Compose the API application from per-domain route groups behind one public entry.
-// Requirements: Keep the createApp signature and behavior identical so index.js and the tests never know about the split; resolve the verifier and task worktrees lazily so the API works from any cwd inside the repository.
-// Decisions: The shared context (scheduler, job store, metrics, budget) is built here and handed to each group; the repository scope is built once and shared by repositories, files, and folders so scoping cannot drift; the JSON error handler stays with the app because it is cross-group.
-// Relevant Files: apps/api/src/app.js, apps/api/src/routes/tasks.js, apps/api/src/routes/aiDrafts.js, apps/api/src/routes/repositories.js
+// Requirements: Keep the createApp signature and behavior identical so index.js and the tests never know about the split; resolve the verifier and task worktrees lazily so the API works from any cwd inside the repository; turn every mutating request into a tool run.
+// Decisions: The shared context (scheduler, job store, metrics, budget) is built here and handed to each group; the repository scope is built once and shared by repositories, files, and folders so scoping cannot drift; the JSON error handler stays with the app because it is cross-group; the request-run middleware enters an AsyncLocalStorage context so events written by async handlers stamp their own request even under concurrency, and finishes the run on response finish or close.
+// Relevant Files: apps/api/src/app.js, apps/api/src/routes/tasks.js, apps/api/src/routes/aiDrafts.js, apps/api/src/routes/repositories.js, apps/api/src/routes/runs.js
 // Important Context: User file. The composition entry for the API server and the tests.
 // Work State: Completed: Split into routes/ group modules as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
 import express from 'express'
@@ -29,6 +29,7 @@ import { createAiSessionsRouter } from './routes/aiSessions.js'
 import { createPromptTemplatesRouter } from './routes/promptTemplates.js'
 import { createModelsRouter } from './routes/models.js'
 import { createAiDraftsRouter } from './routes/aiDrafts.js'
+import { createRunsRouter } from './routes/runs.js'
 
 loadWorkspaceEnv()
 
@@ -132,6 +133,21 @@ export function createApp(database, {
 
   app.use(express.json({ limit: '16kb' }))
 
+  // Every mutating request becomes a tool run, and its context propagates
+  // through the route handlers (including awaits), so the activity events
+  // it writes point at the request that produced them. Concurrent requests
+  // each carry their own run. The run finishes when the response settles.
+  app.use((request, response, next) => {
+    if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)) return next()
+    const path = request.originalUrl.split('?')[0]
+    const run = database.startToolRun({ kind: 'api', label: `${request.method} ${path}` })
+    database.enterToolRun(run)
+    const finish = () => database.finishToolRun(run.id)
+    response.on('finish', finish)
+    response.on('close', finish)
+    next()
+  })
+
   app.get('/health', (_request, response) => {
     response.json({ status: 'ok', service: 'api', database: 'sqlite' })
   })
@@ -148,6 +164,7 @@ export function createApp(database, {
   app.use(createEnvironmentsRouter({ database }))
   app.use(createAiSessionsRouter({ database }))
   app.use(createPromptTemplatesRouter({ database }))
+  app.use(createRunsRouter({ database }))
 
   app.use((error, _request, response, _next) => {
     if (error instanceof SyntaxError && 'body' in error) {

@@ -1,12 +1,15 @@
 // Objective: Own centrally tracked user files, their header sync, and their activity trail.
-// Requirements: Sync only fields whose header value changed; skip unchanged content by hash; never erase a field whose header line is missing; preserve event history across syncs and manual edits.
-// Decisions: Header parsing and content hashing live here because only this domain reads file bodies; scans are scoped per repository.
-// Relevant Files: apps/api/src/db/userFiles.js, apps/api/src/workspaceScan.js, apps/api/src/database.js
+// Requirements: Sync only fields whose header value changed; skip unchanged content by hash; never erase a field whose header line is missing; preserve event history across syncs and manual edits; stamp every event with the tool run that produced it.
+// Decisions: Header parsing and content hashing live here because only this domain reads file bodies; scans are scoped per repository; the whole scan pass runs as one scan tool run so its events point at the scanner rather than whatever request triggered it, with the run body kept factory-level so the public surface stays one thin entry.
+// Relevant Files: apps/api/src/db/userFiles.js, apps/api/src/db/toolRuns.js, apps/api/src/workspaceScan.js, apps/api/src/database.js
 // Important Context: User file. Composed into the createDatabase surface.
 // Work State: Completed: Extracted from database.js as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { createHash } from 'node:crypto'
 
-export function createUserFilesStore(connection) {
+export function createUserFilesStore(connection, { toolRuns } = {}) {
+  // Events stamp the innermost active run; callers without one (legacy
+  // scripts, tests) keep run_id NULL.
+  const currentRunId = () => toolRuns?.currentToolRunId() ?? null
   const USER_FILE_ACTIVITY_FIELDS = [
     'path', 'objective', 'requirements', 'decisions', 'relevant_files', 'important_context'
   ]
@@ -59,6 +62,7 @@ export function createUserFilesStore(connection) {
       ...(row.field !== null ? { field: row.field } : {}),
       ...(row.old_value !== null ? { oldValue: row.old_value } : {}),
       ...(row.new_value !== null ? { newValue: row.new_value } : {}),
+      ...(row.run_id !== null ? { run: { id: row.run_id, kind: row.run_kind, label: row.run_label } } : {}),
       createdAt: row.created_at
     }
   }
@@ -103,15 +107,19 @@ export function createUserFilesStore(connection) {
     )
     const deleteUserFileStatement = connection.prepare('DELETE FROM user_files WHERE id = ?')
     const listUserFileEventsStatement = connection.prepare(`
-      SELECT id, user_file_id, action, field, old_value, new_value, created_at
+      SELECT user_file_events.id, user_file_events.user_file_id, user_file_events.action,
+             user_file_events.field, user_file_events.old_value, user_file_events.new_value,
+             user_file_events.created_at, user_file_events.run_id,
+             tool_runs.kind AS run_kind, tool_runs.label AS run_label
       FROM user_file_events
-      WHERE user_file_id = ?
-      ORDER BY created_at DESC, id DESC
+      LEFT JOIN tool_runs ON tool_runs.id = user_file_events.run_id
+      WHERE user_file_events.user_file_id = ?
+      ORDER BY user_file_events.created_at DESC, user_file_events.id DESC
       LIMIT ?
     `)
     const insertUserFileEventStatement = connection.prepare(`
-      INSERT INTO user_file_events (user_file_id, action, field, old_value, new_value, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO user_file_events (user_file_id, action, field, old_value, new_value, created_at, run_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `)
 
     function toUserFile(row) {
@@ -131,6 +139,78 @@ export function createUserFilesStore(connection) {
         updatedAt: row.updated_at
       }
     }
+  /**
+   * Sync tracked files with their header comments for one repository. The
+   * scanUserFiles method wraps this in a scan tool run; the body is
+   * factory-level so the public surface stays one thin entry.
+   */
+  function scanUserFilesWithinRun(files, repositoryId) {
+    const now = new Date().toISOString()
+    const existing = new Map(
+      listUserFilesForRepositoryStatement.all(repositoryId).map((row) => [row.path, row])
+    )
+    let inserted = 0
+    let synced = 0
+    let refreshed = 0
+    let skipped = 0
+    for (const { path, content } of files) {
+      const hash = hashUserFileContent(content)
+      const current = existing.get(path)
+      if (!current) {
+        const headers = parseUserFileHeaders(content)
+        const result = insertUserFileStatement.run(
+          repositoryId,
+          path,
+          headers.objective ?? '',
+          headers.requirements ?? '',
+          headers.decisions ?? '',
+          headers.relevant_files ?? '',
+          headers.important_context ?? '',
+          hash,
+          now,
+          now
+        )
+        const id = Number(result.lastInsertRowid)
+        insertUserFileEventStatement.run(id, 'created', null, null, null, now, currentRunId())
+        for (const [field] of USER_FILE_HEADER_FIELDS) {
+          const value = headers[field] ?? ''
+          if (value) insertUserFileEventStatement.run(id, 'synced', field, '', value, now, currentRunId())
+        }
+        inserted += 1
+        continue
+      }
+
+      if (current.content_hash === hash) {
+        skipped += 1
+        continue
+      }
+
+      const headers = parseUserFileHeaders(content)
+      const next = {}
+      const changedFields = []
+      for (const [field] of USER_FILE_HEADER_FIELDS) {
+        next[field] = headers[field] !== undefined ? headers[field] : current[field]
+        if (next[field] !== current[field]) changedFields.push(field)
+      }
+      updateUserFileHashStatement.run(hash, current.id)
+      if (changedFields.length === 0) {
+        refreshed += 1
+        continue
+      }
+      updateUserFileStatement.run(
+        current.path, next.objective, next.requirements, next.decisions,
+        next.relevant_files, next.important_context, now, current.id
+      )
+      for (const field of changedFields) {
+        insertUserFileEventStatement.run(
+          current.id, 'synced', field, current[field], next[field], now, currentRunId()
+        )
+      }
+      synced += 1
+    }
+    return { inserted, synced, refreshed, skipped, total: files.length }
+  }
+
   return {
     listUserFiles({ search = '', repositoryId } = {}) {
       const conditions = []
@@ -177,7 +257,7 @@ export function createUserFilesStore(connection) {
         null, now, now
       )
       const id = Number(result.lastInsertRowid)
-      insertUserFileEventStatement.run(id, 'created', null, null, null, now)
+      insertUserFileEventStatement.run(id, 'created', null, null, null, now, currentRunId())
       return toUserFile(getUserFileStatement.get(id))
     },
     updateUserFile(id, changes) {
@@ -201,7 +281,7 @@ export function createUserFilesStore(connection) {
         next.important_context, now, id
       )
       for (const field of changedFields) {
-        insertUserFileEventStatement.run(id, 'updated', field, current[field], next[field], now)
+        insertUserFileEventStatement.run(id, 'updated', field, current[field], next[field], now, currentRunId())
       }
       return toUserFile(getUserFileStatement.get(id))
     },
@@ -217,77 +297,18 @@ export function createUserFilesStore(connection) {
      * Sync tracked files with their header comments.
      *
      * Each entry carries { path, content }. A content hash scopes the work:
-     * files whose content is unchanged are skipped entirely, and a changed
+     * files whose content are unchanged are skipped entirely, and a changed
      * file only writes the fields whose header value differs. A missing
      * header line stops syncing that field instead of erasing the last
      * value. Header syncs record "synced" events; manual updates record
      * "updated" events, so history is preserved either way.
+     *
+     * The whole pass runs as one scan tool run, so every event it writes
+     * points at the scanner rather than whatever request triggered it.
      */
     scanUserFiles(files, { repositoryId = 1 } = {}) {
-      const now = new Date().toISOString()
-      const existing = new Map(
-        listUserFilesForRepositoryStatement.all(repositoryId).map((row) => [row.path, row])
-      )
-      let inserted = 0
-      let synced = 0
-      let refreshed = 0
-      let skipped = 0
-      for (const { path, content } of files) {
-        const hash = hashUserFileContent(content)
-        const current = existing.get(path)
-        if (!current) {
-          const headers = parseUserFileHeaders(content)
-          const result = insertUserFileStatement.run(
-            repositoryId,
-            path,
-            headers.objective ?? '',
-            headers.requirements ?? '',
-            headers.decisions ?? '',
-            headers.relevant_files ?? '',
-            headers.important_context ?? '',
-            hash,
-            now,
-            now
-          )
-          const id = Number(result.lastInsertRowid)
-          insertUserFileEventStatement.run(id, 'created', null, null, null, now)
-          for (const [field] of USER_FILE_HEADER_FIELDS) {
-            const value = headers[field] ?? ''
-            if (value) insertUserFileEventStatement.run(id, 'synced', field, '', value, now)
-          }
-          inserted += 1
-          continue
-        }
-
-        if (current.content_hash === hash) {
-          skipped += 1
-          continue
-        }
-
-        const headers = parseUserFileHeaders(content)
-        const next = {}
-        const changedFields = []
-        for (const [field] of USER_FILE_HEADER_FIELDS) {
-          next[field] = headers[field] !== undefined ? headers[field] : current[field]
-          if (next[field] !== current[field]) changedFields.push(field)
-        }
-        updateUserFileHashStatement.run(hash, current.id)
-        if (changedFields.length === 0) {
-          refreshed += 1
-          continue
-        }
-        updateUserFileStatement.run(
-          current.path, next.objective, next.requirements, next.decisions,
-          next.relevant_files, next.important_context, now, current.id
-        )
-        for (const field of changedFields) {
-          insertUserFileEventStatement.run(
-            current.id, 'synced', field, current[field], next[field], now
-          )
-        }
-        synced += 1
-      }
-      return { inserted, synced, refreshed, skipped, total: files.length }
+      const runScan = () => scanUserFilesWithinRun(files, repositoryId)
+      return toolRuns ? toolRuns.withToolRun({ kind: 'scan', label: 'user-files' }, runScan) : runScan()
     },
   }
 }
