@@ -144,12 +144,49 @@ const models = [
   }
 ]
 
+const userFiles = [
+  {
+    id: 1,
+    path: 'README.md',
+    objective: 'Workspace guide',
+    requirements: '',
+    decisions: '',
+    relevant_files: '',
+    important_context: '',
+    createdAt: '2026-11-09T10:00:00.000Z',
+    updatedAt: '2026-11-09T10:00:00.000Z'
+  },
+  {
+    id: 2,
+    path: 'workspace',
+    objective: '',
+    requirements: '',
+    decisions: '',
+    relevant_files: '',
+    important_context: '',
+    createdAt: '2026-11-09T11:00:00.000Z',
+    updatedAt: '2026-11-09T11:00:00.000Z'
+  }
+]
+
+const folders = [
+  {
+    id: 1,
+    path: 'apps',
+    objective: 'Applications',
+    createdAt: '2026-11-09T09:00:00.000Z',
+    updatedAt: '2026-11-09T09:00:00.000Z'
+  }
+]
+
 beforeAll(async () => {
   vi.stubGlobal('fetch', vi.fn(async (path) => {
     if (path === '/api/tasks' || path.startsWith('/api/tasks?')) return jsonResponse(tasks)
     if (path === '/api/tasks/1') return jsonResponse(taskDetail)
     if (path === '/api/projects') return jsonResponse(['workspace', 'web', 'api'])
     if (path === '/api/models') return jsonResponse(models)
+    if (path === '/api/files') return jsonResponse(userFiles)
+    if (path === '/api/folders') return jsonResponse(folders)
     if (path === '/satellite/summary') {
       return jsonResponse({ total: 2, open: 1, completed: 1 })
     }
@@ -392,5 +429,31 @@ describe('development board', () => {
       expect(item.querySelector('.task-ai-runs summary').textContent).toBe('AI runs (2)')
     })
     expect(item.querySelector('.ai-run-message').textContent).toContain('kaggle-3b')
+  })
+})
+
+describe('user files and folders sections', () => {
+  it('renders tracked user files with objectives', async () => {
+    await vi.waitFor(() => {
+      expect(document.querySelectorAll('.file-item')).toHaveLength(2)
+    })
+
+    expect(document.querySelector('#file-count').textContent).toBe('2 tracked')
+    expect([...document.querySelectorAll('.file-item .file-path')].map((node) => node.textContent))
+      .toEqual(['README.md', 'workspace'])
+    expect([...document.querySelectorAll('.file-item .file-objective')].map((node) => node.textContent))
+      .toEqual(['Workspace guide'])
+    expect(document.querySelectorAll('.file-item button[data-action="edit-file"]')).toHaveLength(2)
+  })
+
+  it('renders tracked folders with objectives', async () => {
+    await vi.waitFor(() => {
+      expect(document.querySelectorAll('.folder-item')).toHaveLength(1)
+    })
+
+    expect(document.querySelector('#folder-count').textContent).toBe('1 tracked')
+    expect(document.querySelector('.folder-item .folder-path').textContent).toBe('apps')
+    expect(document.querySelector('.folder-item .folder-objective').textContent).toBe('Applications')
+    expect(document.querySelectorAll('.folder-item button[data-action="edit-folder"]')).toHaveLength(1)
   })
 })
