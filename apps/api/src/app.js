@@ -348,8 +348,18 @@ function validateTaskInput(body, { partial = false } = {}) {
     'title', 'description', 'completed', 'project', 'status', 'priority',
     'task_type', 'acceptance_criteria', ...PLANNING_TEXT_FIELDS
   ])
+  // Drafting provenance is recorded at creation only and is never editable
+  // afterwards, mirroring the worktree link.
+  if (!partial) allowedFields.add('source_job_id')
   if (Object.keys(body).some((key) => !allowedFields.has(key))) {
     return 'Request includes an unsupported task field.'
+  }
+
+  if (
+    body.source_job_id !== undefined &&
+    (!isValidText(body.source_job_id, 100) || !body.source_job_id.trim())
+  ) {
+    return 'Source job must be a non-empty job ID of at most 100 characters.'
   }
 
   if (!partial || Object.hasOwn(body, 'title')) {
@@ -864,7 +874,11 @@ export function createApp(database, {
     }
 
     const job = await jobStore.wait(started.job.id)
-    if (job.state === 'done') return response.json(job.result)
+    if (job.state === 'done') {
+      // The job id travels with the draft so clients can hand it back as
+      // source_job_id and record the drafting provenance on the created task.
+      return response.json({ ...job.result, jobId: started.job.id })
+    }
     if (job.state === 'cancelled') {
       return response.status(499).json({ error: job.error || 'The draft was cancelled.' })
     }
@@ -919,6 +933,22 @@ export function createApp(database, {
     const validationError = validateTaskInput(request.body)
     if (validationError) return response.status(400).json({ error: validationError })
 
+    // Drafting provenance: the AI job that produced this task can be recorded
+    // at creation. It is validated before the insert so a bad reference
+    // creates no orphan task.
+    const sourceJobId = request.body.source_job_id !== undefined
+      ? request.body.source_job_id.trim()
+      : undefined
+    if (sourceJobId !== undefined) {
+      const sourceJob = database.getJob(sourceJobId)
+      if (!sourceJob) {
+        return response.status(404).json({ error: 'AI job not found.' })
+      }
+      if (sourceJob.taskId !== undefined && sourceJob.taskId !== null) {
+        return response.status(409).json({ error: 'This AI job is already linked to a task.' })
+      }
+    }
+
     const task = database.createTask({
       title: request.body.title.trim(),
       description: (request.body.description ?? '').trim(),
@@ -937,7 +967,10 @@ export function createApp(database, {
       work_blocked: (request.body.work_blocked ?? '').trim(),
       next_move: (request.body.next_move ?? '').trim()
     })
-    return response.status(201).json(task)
+    if (sourceJobId === undefined) return response.status(201).json(task)
+    const drafted = database.setTaskOrigin(task.id, sourceJobId)
+    jobStore.linkTask(sourceJobId, task.id)
+    return response.status(201).json(drafted)
   })
 
   app.patch('/api/tasks/:id', (request, response) => {
@@ -1584,27 +1617,74 @@ export function createApp(database, {
       }
     ]
 
-    const selected = await scheduler.select(requestedModel)
+    const selected = await selectDraftModel({ model: requestedModel })
     if (selected.error) {
       return response.status(selected.error.status).json(selected.error.body)
     }
+    const { model, selection } = selected
+    modelBudget.record(model.id)
 
-    let content
+    // The improvement run is a job like any other model call, so it records
+    // model provenance, honors budget and cooldown, and can be inspected or
+    // cancelled through the job endpoints.
+    const runner = async ({ signal, onPhase }) => {
+      let inferenceStarted = false
+      let startedAt
+      try {
+        inferenceStarted = true
+        startedAt = Date.now()
+        modelMetrics.recordStart(model.id)
+        try {
+          const content = await modelClient.complete(model, {
+            messages,
+            maxTokens: 500,
+            task: { title: 'Improve workspace', project: 'workspace', task_type: 'chore' },
+            signal,
+            onPhase,
+            onUsage: (usage) => modelBudget.recordUsage?.(model.id, usage)
+          })
+          modelMetrics.recordSuccess(model.id, { durationMs: Date.now() - startedAt })
+          return content
+        } catch (error) {
+          applyCooldown(modelBudget, model, error)
+          modelMetrics.recordError(model.id, error, {
+            durationMs: startedAt === undefined ? undefined : Date.now() - startedAt
+          })
+          throw error
+        }
+      } finally {
+        selection.release({ inferenceStarted })
+      }
+    }
+
+    let job
     try {
-      content = await modelClient.complete(selected.model, {
-        messages,
-        maxTokens: 500,
-        task: { title: 'Improve workspace', project: 'workspace', task_type: 'chore' }
+      job = jobStore.submit({
+        model: model.id,
+        backend: model.backend,
+        title: 'Improve workspace',
+        runner
       })
     } catch (error) {
-      return response.status(error.status ?? 502).json({ error: error.message || 'AI improvement failed.' })
-    } finally {
-      selected.selection.release({ inferenceStarted: Boolean(content) })
+      selection.release({ inferenceStarted: false })
+      throw error
     }
+
+    const finished = await jobStore.wait(job.id)
+    if (finished.state === 'cancelled') {
+      return response.status(499).json({ error: finished.error || 'The improvement run was cancelled.' })
+    }
+    if (finished.state !== 'done') {
+      return response.status(finished.status ?? 503).json({
+        error: finished.error || 'The model is unavailable.',
+        ...(finished.retryAfter !== undefined ? { retryAfter: finished.retryAfter } : {})
+      })
+    }
+    const content = finished.result
 
     let suggestions = []
     try {
-      const parsed = JSON.parse(content.trim().replace(/^```(?:json)?\\s*|\\s*```$/g, ''))
+      const parsed = JSON.parse(content.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''))
       if (Array.isArray(parsed)) suggestions = parsed
     } catch {
       suggestions = [{ title: 'Review AI improvement output', description: content, priority: 'medium', rationale: 'Model output was not JSON.' }]
@@ -1614,17 +1694,20 @@ export function createApp(database, {
     if (createTasks) {
       for (const suggestion of suggestions) {
         if (typeof suggestion?.title !== 'string' || !suggestion.title.trim()) continue
-        created.push(database.createTask({
+        const task = database.createTask({
           title: suggestion.title.trim().slice(0, 200),
           description: typeof suggestion.description === 'string' ? suggestion.description.slice(0, 2000) : '',
           priority: ['low', 'medium', 'high', 'urgent'].includes(suggestion.priority) ? suggestion.priority : 'medium',
           task_type: 'chore',
           project: 'workspace'
-        }))
+        })
+        // Created tasks carry the run as their drafting origin; the run
+        // itself stays task-unlinked because one run can draft several tasks.
+        created.push(database.setTaskOrigin(task.id, job.id))
       }
     }
 
-    response.json({ suggestions, created, summary })
+    response.json({ suggestions, created, summary, jobId: job.id })
   })
 
   app.use((error, _request, response, _next) => {

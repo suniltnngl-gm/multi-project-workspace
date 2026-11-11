@@ -142,7 +142,8 @@ test('legacy tracking databases are migrated without losing data', () => {
   assert.equal(migrated.getTask(2).completed, false)
   for (const field of [
     'objectives', 'requirements', 'decisions', 'relevant_files', 'important_context',
-    'work_completed', 'work_active', 'work_blocked', 'next_move', 'worktree_path'
+    'work_completed', 'work_active', 'work_blocked', 'next_move', 'worktree_path',
+    'origin_job_id'
   ]) {
     assert.equal(migrated.getTask(2)[field], '')
   }

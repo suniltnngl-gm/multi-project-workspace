@@ -207,6 +207,17 @@ export function createTaskJobStore({
     }
   }
 
+  // Links a job to the task created from it, mirroring unlinkTask so the
+  // in-memory view and the persisted row never drift apart. Jobs that are
+  // missing or already linked are left untouched.
+  function linkTask(jobId, taskId) {
+    const job = jobs.get(jobId)
+    if (!job || job.taskId !== undefined) return false
+    job.taskId = taskId
+    persist(job)
+    return true
+  }
+
   function get(id) {
     const job = jobs.get(id)
     return job ? publicJob(job) : undefined
@@ -216,5 +227,5 @@ export function createTaskJobStore({
     return [...jobs.values()].map(publicJob)
   }
 
-  return { submit, get, list, cancel, wait, unlinkTask }
+  return { submit, get, list, cancel, wait, unlinkTask, linkTask }
 }

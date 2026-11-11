@@ -42,9 +42,9 @@ Set `DATABASE_PATH` to use a different SQLite file. Set `PORT` for the Node API 
 ## Task API
 
 - `GET /api/tasks` — list tasks; supports `project`, `status`, `priority`, `task_type`, and `search` filters
-- `GET /api/tasks/:id` — return one task with its newest-first activity timeline and linked AI runs; `activity_limit` defaults to 50 and is capped at 200, `ai_limit` defaults to 20 and is capped at 100
+- `GET /api/tasks/:id` — return one task with its newest-first activity timeline and linked AI runs (matched by the job's task link or the task's drafting origin); `activity_limit` defaults to 50 and is capped at 200, `ai_limit` defaults to 20 and is capped at 100
 - `GET /api/projects` — list project names used by tasks
-- `POST /api/tasks` — create tasks with title, project, type (`feature`, `bug`, `chore`, `test`, `docs`), priority (`low`, `medium`, `high`, `urgent`), status (`todo`, `in_progress`, `blocked`, `done`), description, acceptance criteria, objectives, requirements, decisions, relevant files, important context, and work state (`work_completed`, `work_active`, `work_blocked`, `next_move`)
+- `POST /api/tasks` — create tasks with title, project, type (`feature`, `bug`, `chore`, `test`, `docs`), priority (`low`, `medium`, `high`, `urgent`), status (`todo`, `in_progress`, `blocked`, `done`), description, acceptance criteria, objectives, requirements, decisions, relevant files, important context, and work state (`work_completed`, `work_active`, `work_blocked`, `next_move`); `source_job_id` optionally records the AI job that drafted the task (404 for an unknown job, 409 when the job is already linked to another task), stamping the new task's `origin_job_id` and linking the job to it
 - `PATCH /api/tasks/:id` — update any of those task fields; `completed` remains supported for older clients and maps to `done`/`todo`
 - `DELETE /api/tasks/:id` — delete a task
 - `POST /api/tasks/:id/worktree` — create an isolated Git worktree for a task (optional `branch` and `name` in the body), link it on the task, and register it in the git-worktrees domain; a task with a live worktree linked returns `409`, and a link whose worktree was removed by hand self-heals on the next create
@@ -56,12 +56,12 @@ Set `DATABASE_PATH` to use a different SQLite file. Set `PORT` for the Node API 
 - `POST /api/verify` — run every allowlisted check, or a subset via `{ "checks": ["lint", "api-tests"] }`; each check runs in a bounded subprocess and returns structured pass/fail/timeout results with captured output
 - `GET /api/ai/sessions`, `POST /api/ai/sessions`, `GET /api/ai/sessions/:id`, `POST /api/ai/sessions/:id/messages`, `POST /api/ai/sessions/:id/compact`, `DELETE /api/ai/sessions/:id` — manage AI chat sessions, messages, and compacted summaries
 - `GET /api/prompt-templates`, `POST /api/prompt-templates`, `GET /api/prompt-templates/:id`, `PATCH /api/prompt-templates/:id`, `DELETE /api/prompt-templates/:id` — manage reusable prompt templates; templates render `{{variable}}` placeholders from a request's `variables` object
-- `POST /api/ai/improve` — generate AI improvement suggestions from workspace tracking summary; optional `create_tasks` creates task entries
+- `POST /api/ai/improve` — generate AI improvement suggestions from workspace tracking summary; the run is recorded as an AI job (model, backend, budget, cooldown, and job endpoints behave like every other model call) and the response includes its `jobId`; optional `create_tasks` creates task entries stamped with that job as their drafting origin
 - `POST /api/ai/complete` — direct AI chat: `prompt`/`messages` plus optional `system`, `model`, `max_tokens`, `variables`, `prompt_template_id`, `session_id`, and `task_id`; returns `{ content, model, backend, jobId }`; sessions persist the exchange and jobs keep provenance
 - `GET /api/folders`, `POST /api/folders/scan`, `POST /api/folders`, `PATCH /api/folders/:id`, `DELETE /api/folders/:id` — manage folder-level objectives
 - `GET /api/models` — list the model registry, including in-process request/failure metrics and any configured quota budget
 - `GET /api/local-ai/status` — report each model's live state, session state, resource limits, and metrics
-- `POST /api/local-ai/refine-task` — draft a task with an auto-selected or explicitly named model; pass `task_id` to link the run to an existing task
+- `POST /api/local-ai/refine-task` — draft a task with an auto-selected or explicitly named model; the response includes the drafting run's `jobId`, which can be passed back as `source_job_id` when creating the task to record its provenance; pass `task_id` to link the run to an existing task
 - `POST /api/local-ai/jobs` — start a background draft job; requires `model` in the body and accepts the same optional `task_id`
 - `GET /api/local-ai/jobs` / `GET /api/local-ai/jobs/:id` — list or poll draft jobs (`queued`, `running`, `done`, `cancelled`, or `error`) with model, backend, phase, elapsed time, error, and retry delay
 - `DELETE /api/local-ai/jobs/:id` — request cancellation of a queued or running job (`202` when accepted, `409` when it already finished)

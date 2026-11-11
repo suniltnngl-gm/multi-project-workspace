@@ -20,7 +20,8 @@ const TASK_COLUMNS = {
   work_active: "TEXT NOT NULL DEFAULT ''",
   work_blocked: "TEXT NOT NULL DEFAULT ''",
   next_move: "TEXT NOT NULL DEFAULT ''",
-  worktree_path: "TEXT NOT NULL DEFAULT ''"
+  worktree_path: "TEXT NOT NULL DEFAULT ''",
+  origin_job_id: "TEXT NOT NULL DEFAULT ''"
 }
 
 function toTask(row) {
@@ -374,7 +375,7 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     );
   `)
 
-  const taskFields = 'id, title, description, completed, project, status, priority, task_type, acceptance_criteria, objectives, requirements, decisions, relevant_files, important_context, work_completed, work_active, work_blocked, next_move, worktree_path, created_at, updated_at'
+  const taskFields = 'id, title, description, completed, project, status, priority, task_type, acceptance_criteria, objectives, requirements, decisions, relevant_files, important_context, work_completed, work_active, work_blocked, next_move, worktree_path, origin_job_id, created_at, updated_at'
   const taskOrder = "ORDER BY CASE status WHEN 'in_progress' THEN 0 WHEN 'todo' THEN 1 WHEN 'blocked' THEN 2 ELSE 3 END, CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, updated_at DESC"
   const getStatement = connection.prepare(
     `SELECT ${taskFields} FROM tasks WHERE id = ?`
@@ -388,6 +389,9 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
   const deleteStatement = connection.prepare('DELETE FROM tasks WHERE id = ?')
   const updateTaskWorktreeStatement = connection.prepare(
     'UPDATE tasks SET worktree_path = ?, updated_at = ? WHERE id = ?'
+  )
+  const updateTaskOriginStatement = connection.prepare(
+    'UPDATE tasks SET origin_job_id = ?, updated_at = ? WHERE id = ?'
   )
   const listTaskEventsStatement = connection.prepare(`
     SELECT id, task_id, action, field, old_value, new_value, created_at
@@ -408,7 +412,7 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     SELECT id, task_id, model, backend, state, phase, title, created_at,
            started_at, finished_at, error, status, retry_after
     FROM ai_jobs
-    WHERE task_id = ?
+    WHERE task_id = ? OR id = ?
     ORDER BY created_at DESC, rowid DESC
     LIMIT ?
   `)
@@ -479,12 +483,14 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     return listTaskEventsStatement.all(taskId, limit).map(toTaskEvent)
   }
 
-  function readTaskAiRuns(taskId, aiLimit = 20) {
+  // AI runs are matched by the job's task link or by the task's drafting
+  // origin, so a task created from a draft shows the run that produced it.
+  function readTaskAiRuns(task, aiLimit = 20) {
     const requestedLimit = Number(aiLimit)
     const limit = Number.isFinite(requestedLimit) && requestedLimit >= 1
       ? Math.min(100, Math.trunc(requestedLimit))
       : 20
-    return listTaskAiRunsStatement.all(taskId, limit).map(toAiRun)
+    return listTaskAiRunsStatement.all(task.id, task.origin_job_id ?? '', limit).map(toAiRun)
   }
 
   const USER_FILE_ACTIVITY_FIELDS = [
@@ -669,6 +675,24 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     return readTask(id)
   })
 
+  // Drafting provenance is owned by the creation flows, never by generic
+  // task edits, so it is recorded as an explicit drafted event.
+  const applyTaskOriginUpdate = connection.transaction((id, jobId) => {
+    const current = readTask(id)
+    if (!current) return null
+    const updatedAt = new Date().toISOString()
+    updateTaskOriginStatement.run(jobId, updatedAt, id)
+    insertTaskEventStatement.run(
+      id,
+      'drafted',
+      'origin_job_id',
+      String(current.origin_job_id ?? ''),
+      String(jobId),
+      updatedAt
+    )
+    return readTask(id)
+  })
+
     const listFoldersStatement = connection.prepare(
       'SELECT * FROM folders ORDER BY path COLLATE NOCASE'
     )
@@ -800,7 +824,7 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       return {
         ...task,
         activity: readTaskActivity(id, activityLimit),
-        aiRuns: readTaskAiRuns(id, aiLimit)
+        aiRuns: readTaskAiRuns(task, aiLimit)
       }
     },
     listTaskActivity(id, { limit = 50 } = {}) {
@@ -808,8 +832,9 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       return readTaskActivity(id, limit)
     },
     listTaskAiRuns(id, { limit = 20 } = {}) {
-      if (!readTask(id)) return null
-      return readTaskAiRuns(id, limit)
+      const task = readTask(id)
+      if (!task) return null
+      return readTaskAiRuns(task, limit)
     },
     listProjects() {
       return projectsStatement.all().map(({ project }) => project)
@@ -861,11 +886,17 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     unlinkTaskWorktree(id) {
       return applyTaskWorktreeUpdate(id, '', 'worktree_unlinked')
     },
+    setTaskOrigin(id, jobId) {
+      return applyTaskOriginUpdate(id, jobId)
+    },
     deleteTask(id) {
       return deleteTaskRecord(id)
     },
     listJobs() {
       return listJobsStatement.all().map(toJob)
+    },
+    getJob(id) {
+      return toJob(getJobStatement.get(id))
     },
     saveJob(job) {
       saveJobStatement.run({

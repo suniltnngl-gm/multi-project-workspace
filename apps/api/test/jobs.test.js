@@ -402,7 +402,12 @@ test('drafts link to tasks and expose newest-first AI runs', async () => {
         })
       })
       assert.equal(syncResponse.status, 200)
-      assert.deepEqual(await syncResponse.json(), DRAFT)
+      const syncDraft = await syncResponse.json()
+      assert.deepEqual(
+        { description: syncDraft.description, acceptance_criteria: syncDraft.acceptance_criteria },
+        DRAFT
+      )
+      assert.ok(syncDraft.jobId.startsWith('job-'))
 
       const batchResponse = await postJob(url, { task_id: task.id })
       assert.equal(batchResponse.status, 202)
@@ -465,7 +470,12 @@ test('unlinked drafts remain unsaved and do not appear in task history', async (
       body: JSON.stringify({ title: 'New task draft', model: 'local-0.5b' })
     })
     assert.equal(response.status, 200)
-    assert.deepEqual(await response.json(), DRAFT)
+    const draft = await response.json()
+    assert.deepEqual(
+      { description: draft.description, acceptance_criteria: draft.acceptance_criteria },
+      DRAFT
+    )
+    assert.ok(draft.jobId.startsWith('job-'))
     assert.deepEqual(database.listTasks(), [])
 
     const [job] = database.listJobs()

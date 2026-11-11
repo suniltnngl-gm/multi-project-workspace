@@ -466,7 +466,12 @@ test('scheduler prefers the highest-priority ready local model', async () => {
   }, async (url) => {
     const response = await refine(url)
     assert.equal(response.status, 200)
-    assert.deepEqual(await response.json(), DRAFT)
+    const draft = await response.json()
+    assert.deepEqual(
+      { description: draft.description, acceptance_criteria: draft.acceptance_criteria },
+      DRAFT
+    )
+    assert.ok(draft.jobId.startsWith('job-'))
     assert.deepEqual(completions, ['http://large.test/v1/chat/completions'])
   })
 })
@@ -531,7 +536,12 @@ test('scheduler calls live external models when local models are unavailable', a
   }, async (url) => {
     const response = await refine(url, { model: 'kaggle' })
     assert.equal(response.status, 200)
-    assert.deepEqual(await response.json(), DRAFT)
+    const draft = await response.json()
+    assert.deepEqual(
+      { description: draft.description, acceptance_criteria: draft.acceptance_criteria },
+      DRAFT
+    )
+    assert.ok(draft.jobId.startsWith('job-'))
     assert.deepEqual(completions, ['http://kaggle.test/v1/chat/completions'])
   })
 })

@@ -506,10 +506,10 @@ test('local task assistant waits for low load and returns an unsaved draft', asy
       })
     })
     assert.equal(response.status, 200)
-    assert.deepEqual(await response.json(), {
-      description: 'Add a validated task drafting endpoint.',
-      acceptance_criteria: '1. Valid input returns a draft.\n2. The task is not saved.'
-    })
+    const draft = await response.json()
+    assert.equal(draft.description, 'Add a validated task drafting endpoint.')
+    assert.equal(draft.acceptance_criteria, '1. Valid input returns a draft.\n2. The task is not saved.')
+    assert.ok(draft.jobId.startsWith('job-'))
     assert.equal(prompts.length, 1)
     assert.equal(prompts[0].messages[1].role, 'user')
     assert.equal(prompts[0].max_tokens, 180)
@@ -564,10 +564,10 @@ test('local task assistant formats structured acceptance-criteria arrays', async
       body: JSON.stringify({ title: 'Validate task creation' })
     })
     assert.equal(response.status, 200)
-    assert.deepEqual(await response.json(), {
-      description: 'Validate task creation.',
-      acceptance_criteria: '1. title: Invalid title; description: Submit an empty title.; expected result: The request returns 400.'
-    })
+    const draft = await response.json()
+    assert.equal(draft.description, 'Validate task creation.')
+    assert.equal(draft.acceptance_criteria, '1. title: Invalid title; description: Submit an empty title.; expected result: The request returns 400.')
+    assert.ok(draft.jobId.startsWith('job-'))
     assert.deepEqual(database.listTasks(), [])
   } finally {
     await new Promise((resolve) => assistantServer.close(resolve))
