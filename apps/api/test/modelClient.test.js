@@ -43,6 +43,22 @@ function kaggleModel(overrides = {}) {
   }
 }
 
+function opencodeModel(overrides = {}) {
+  return {
+    id: 'opencode',
+    label: 'OpenCode headless',
+    backend: 'opencode-cli',
+    remote: true,
+    timeoutMs: 300000,
+    cli: {
+      command: 'opencode',
+      model: 'big-pickle',
+      agent: 'general'
+    },
+    ...overrides
+  }
+}
+
 const REQUEST = {
   messages: [{ role: 'user', content: 'Draft a task' }],
   maxTokens: 120,
@@ -340,6 +356,57 @@ test('Kaggle rejects requests without task fields and invalid outputs', async ()
   await assert.rejects(
     () => invalidClient.complete(kaggleModel(), REQUEST),
     (error) => error instanceof ModelCallError && /invalid task response/.test(error.message)
+  )
+})
+
+test('OpenCode joins the prompt with newlines and parses text events', async () => {
+  const calls = []
+  const runCommand = async (command, args, options) => {
+    calls.push({ command, args, options })
+    return {
+      stdout: [
+        JSON.stringify({ type: 'status', part: { text: 'ignored' } }),
+        'not a json log line',
+        JSON.stringify({ type: 'text', part: { text: 'First chunk' } }),
+        JSON.stringify({ type: 'text', part: { text: ' second chunk' } })
+      ].join('\r\n'),
+      stderr: ''
+    }
+  }
+  const client = createModelClient({ runCommand, scriptsDir: SCRIPTS })
+  const request = {
+    messages: [
+      { role: 'system', content: 'Be brief.' },
+      { role: 'user', content: 'Draft a task' }
+    ],
+    maxTokens: 120
+  }
+  const content = await client.complete(opencodeModel(), request)
+  assert.equal(content, 'First chunk second chunk')
+
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].command, 'opencode')
+  assert.equal(calls[0].args[0], 'run')
+  assert.equal(calls[0].args[calls[0].args.indexOf('--model') + 1], 'big-pickle')
+  assert.equal(calls[0].args[calls[0].args.indexOf('--agent') + 1], 'general')
+  assert.equal(calls[0].options.timeoutMs, 300000)
+
+  // The prompt joins messages with real newlines, and the parser splits the
+  // CLI's newline-separated events - both regressions of escaped backslashes.
+  const prompt = calls[0].args[1]
+  assert.equal(prompt, 'system: Be brief.\n\nuser: Draft a task')
+})
+
+test('OpenCode reports empty CLI output as a model error', async () => {
+  const client = createModelClient({
+    runCommand: async () => ({ stdout: '\n\n', stderr: '' }),
+    scriptsDir: SCRIPTS
+  })
+  await assert.rejects(
+    () => client.complete(opencodeModel(), REQUEST),
+    (error) => error instanceof ModelCallError &&
+      error.status === 502 &&
+      /no model output/.test(error.message)
   )
 })
 

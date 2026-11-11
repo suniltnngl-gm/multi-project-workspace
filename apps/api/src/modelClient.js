@@ -521,7 +521,7 @@ export function createModelClient({
     reportPhase(request, 'generating')
     const prompt = request.messages
       .map((message) => `${message.role}: ${message.content}`)
-      .join('\\n\\n')
+      .join('\n\n')
     const args = ['run', prompt, '--format', 'json']
     if (model.cli?.model) args.push('--model', model.cli.model)
     if (model.cli?.agent) args.push('--agent', model.cli.agent)
@@ -541,7 +541,7 @@ export function createModelClient({
     }
 
     let content = ''
-    for (const line of stdout.split(/\\r?\\n/)) {
+    for (const line of stdout.split(/\r?\n/)) {
       const trimmed = line.trim()
       if (!trimmed) continue
       try {
