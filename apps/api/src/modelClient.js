@@ -103,6 +103,37 @@ function parseRetryAfter(value, now = Date.now()) {
   return undefined
 }
 
+// Providers describe retry delays inconsistently: numeric fields, compact
+// "retryDelay":"69235s" JSON, and human "retry in 19h13m55s" prose. Read only
+// what the error itself reports - never a vendor table - and fail soft.
+function retrySecondsFromText(text) {
+  if (typeof text !== 'string' || !text) return null
+  const compact = text.match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/i)
+  if (compact) {
+    const seconds = Number(compact[1])
+    if (Number.isFinite(seconds) && seconds > 0) return seconds
+  }
+  const human = text.match(
+    /retry\s+(?:in|after)\s+(\d+(?:\.\d+)?)h(?:(\d+(?:\.\d+)?)m)?(?:(\d+(?:\.\d+)?)s)?/i
+  )
+  if (human) {
+    const total = (Number(human[1]) || 0) * 3600 +
+      (Number(human[2]) || 0) * 60 +
+      (Number(human[3]) || 0)
+    if (total > 0) return total
+  }
+  return null
+}
+
+function parseCliRetryDelaySeconds(error) {
+  if (!error || typeof error !== 'object') return undefined
+  const direct = Number(error.retryAfter ?? error.retry_after)
+  if (Number.isFinite(direct) && direct > 0) return direct
+  const message = typeof error.message === 'string' ? error.message : ''
+  const body = typeof error.response?.body === 'string' ? error.response.body : ''
+  return retrySecondsFromText(message) ?? retrySecondsFromText(body) ?? undefined
+}
+
 function parseContent(result) {
   const content = result?.choices?.[0]?.message?.content
   if (typeof content !== 'string' || !content.trim()) {
@@ -541,6 +572,7 @@ export function createModelClient({
     }
 
     let content = ''
+    let errorEvent = null
     for (const line of stdout.split(/\r?\n/)) {
       const trimmed = line.trim()
       if (!trimmed) continue
@@ -548,13 +580,23 @@ export function createModelClient({
         const event = JSON.parse(trimmed)
         if (event.type === 'text' && event.part && typeof event.part.text === 'string') {
           content += event.part.text
+        } else if (event.type === 'error' && !errorEvent) {
+          errorEvent = event.error ?? {}
         }
       } catch {
         // Ignore non-JSON log lines.
       }
     }
     if (!content) {
-      throw new ModelCallError('The OpenCode CLI returned no model output.', 502)
+      // A run that produced no text but reported an error fails with the
+      // provider's own status and retry delay when the event carries them, so
+      // a live 429 reaches cooldown instead of surfacing as a parse artifact.
+      const status = Number(errorEvent?.status)
+      throw new ModelCallError(
+        String(errorEvent?.message || 'The OpenCode CLI returned no model output.'),
+        Number.isFinite(status) && status >= 400 ? status : 502,
+        { retryAfter: parseCliRetryDelaySeconds(errorEvent) }
+      )
     }
 
     return content

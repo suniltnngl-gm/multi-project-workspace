@@ -410,6 +410,84 @@ test('OpenCode reports empty CLI output as a model error', async () => {
   )
 })
 
+test('OpenCode surfaces CLI error events with status and retry delay', async () => {
+  const client = createModelClient({
+    runCommand: async () => ({
+      stdout: [
+        JSON.stringify({ type: 'step_start', part: { id: 'prt_1' } }),
+        JSON.stringify({
+          type: 'error',
+          error: {
+            type: 'provider.quota',
+            message: 'You exceeded your current quota. Please retry in 19h13m55s.',
+            status: 429,
+            response: { body: '{"details":[{"retryInfo":{"retryDelay":"69235s"}}]}' }
+          }
+        })
+      ].join('\n'),
+      stderr: ''
+    }),
+    scriptsDir: SCRIPTS
+  })
+  await assert.rejects(
+    () => client.complete(opencodeModel(), REQUEST),
+    (error) => error instanceof ModelCallError &&
+      error.status === 429 &&
+      error.retryAfter === 69235 &&
+      /exceeded your current quota/.test(error.message)
+  )
+})
+
+test('OpenCode error events honor numeric retry fields and default the status', async () => {
+  const rated = createModelClient({
+    runCommand: async () => ({
+      stdout: JSON.stringify({
+        type: 'error',
+        error: { message: 'Rate limited.', status: 429, retryAfter: 42 }
+      }),
+      stderr: ''
+    }),
+    scriptsDir: SCRIPTS
+  })
+  await assert.rejects(
+    () => rated.complete(opencodeModel(), REQUEST),
+    (error) => error instanceof ModelCallError && error.status === 429 && error.retryAfter === 42
+  )
+
+  const statusless = createModelClient({
+    runCommand: async () => ({
+      stdout: JSON.stringify({ type: 'error', error: { message: 'Something failed.' } }),
+      stderr: ''
+    }),
+    scriptsDir: SCRIPTS
+  })
+  await assert.rejects(
+    () => statusless.complete(opencodeModel(), REQUEST),
+    (error) => error instanceof ModelCallError &&
+      error.status === 502 &&
+      error.retryAfter === undefined &&
+      /Something failed/.test(error.message)
+  )
+})
+
+test('OpenCode text output wins over an accompanying error event', async () => {
+  const client = createModelClient({
+    runCommand: async () => ({
+      stdout: [
+        JSON.stringify({
+          type: 'error',
+          error: { message: 'A transient warning.', status: 429, retryAfter: 30 }
+        }),
+        JSON.stringify({ type: 'text', part: { text: 'Recovered output' } })
+      ].join('\n'),
+      stderr: ''
+    }),
+    scriptsDir: SCRIPTS
+  })
+  const content = await client.complete(opencodeModel(), REQUEST)
+  assert.equal(content, 'Recovered output')
+})
+
 test('CLI probes are cached per command', async () => {
   const calls = []
   const client = createModelClient({
