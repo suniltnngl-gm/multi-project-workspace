@@ -217,6 +217,7 @@ print_help() {
   printf '  %-24s %s\n' 'ai doctor [...]' 'Check local and remote model configuration'
   printf '  %-24s %s\n' 'ai improve [SUBCMD] ...' 'Run the AI improvement flow on draft proposals'
   printf '  %-24s %s\n' 'ai ask [--model ID] ...' 'Ask the running API a direct AI question'
+  printf '  %-24s %s\n' 'ai model [rotate|status]' 'Rotate OPENCODE_AI_MODEL daily or show current'
   printf '  %-24s %s\n' 'doctor' 'Alias for ai doctor'
   printf '\n%sDependencies%s\n' "$C_BOLD" "$C_RESET"
   printf '  %-24s %s\n' 'install' 'Install npm dependencies and sync the Python project'
@@ -991,11 +992,46 @@ else:
     print(json.dumps(data))
 PY
         ;;
+      model)
+        model_sub="${3:-status}"
+        case "$model_sub" in
+          rotate)
+            if ! command -v node >/dev/null 2>&1; then
+              error 'node is required for ai model rotate.'
+              exit 1
+            fi
+            run_with_env node "$ROOT_DIR/scripts/rotate-model.mjs"
+            ;;
+          status)
+            env_path="$ROOT_DIR/.env"
+            current_model="<not set>"
+            if [[ -f "$env_path" ]]; then
+              current_model="$(grep '^OPENCODE_AI_MODEL=' "$env_path" | cut -d= -f2- || echo '<not set>')"
+            fi
+            info "Current OPENCODE_AI_MODEL: $current_model"
+            info "Available providers/models via OpenCode console:"
+            run_with_env node "$ROOT_DIR/scripts/opencode-console.mjs" list
+            ;;
+          list)
+            if ! command -v node >/dev/null 2>&1; then
+              error 'node is required for ai model list.'
+              exit 1
+            fi
+            run_with_env node "$ROOT_DIR/scripts/opencode-console.mjs" list
+            ;;
+          *)
+            error "Unknown ai model subcommand: $model_sub"
+            printf 'Usage: ./workspace ai model [rotate|status|list]\n' >&2
+            exit 2
+            ;;
+        esac
+        ;;
       *)
         error "Unknown ai subcommand: $subcommand"
         printf 'Usage: ./workspace ai doctor [--json] [--strict] [--offline]\n' >&2
         printf '       ./workspace ai improve [run|list|approve <id>|reject <id>|rollback <id>]\n' >&2
         printf '       ./workspace ai ask [--model ID] [--session ID] "prompt"\n' >&2
+        printf '       ./workspace ai model [rotate|status|list]\n' >&2
         exit 2
         ;;
     esac
