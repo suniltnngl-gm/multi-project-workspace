@@ -19,7 +19,8 @@ const TASK_COLUMNS = {
   work_completed: "TEXT NOT NULL DEFAULT ''",
   work_active: "TEXT NOT NULL DEFAULT ''",
   work_blocked: "TEXT NOT NULL DEFAULT ''",
-  next_move: "TEXT NOT NULL DEFAULT ''"
+  next_move: "TEXT NOT NULL DEFAULT ''",
+  worktree_path: "TEXT NOT NULL DEFAULT ''"
 }
 
 function toTask(row) {
@@ -373,7 +374,7 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     );
   `)
 
-  const taskFields = 'id, title, description, completed, project, status, priority, task_type, acceptance_criteria, objectives, requirements, decisions, relevant_files, important_context, work_completed, work_active, work_blocked, next_move, created_at, updated_at'
+  const taskFields = 'id, title, description, completed, project, status, priority, task_type, acceptance_criteria, objectives, requirements, decisions, relevant_files, important_context, work_completed, work_active, work_blocked, next_move, worktree_path, created_at, updated_at'
   const taskOrder = "ORDER BY CASE status WHEN 'in_progress' THEN 0 WHEN 'todo' THEN 1 WHEN 'blocked' THEN 2 ELSE 3 END, CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, updated_at DESC"
   const getStatement = connection.prepare(
     `SELECT ${taskFields} FROM tasks WHERE id = ?`
@@ -385,6 +386,9 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     'UPDATE tasks SET title = ?, description = ?, project = ?, status = ?, priority = ?, task_type = ?, acceptance_criteria = ?, objectives = ?, requirements = ?, decisions = ?, relevant_files = ?, important_context = ?, work_completed = ?, work_active = ?, work_blocked = ?, next_move = ?, completed = ?, updated_at = ? WHERE id = ?'
   )
   const deleteStatement = connection.prepare('DELETE FROM tasks WHERE id = ?')
+  const updateTaskWorktreeStatement = connection.prepare(
+    'UPDATE tasks SET worktree_path = ?, updated_at = ? WHERE id = ?'
+  )
   const listTaskEventsStatement = connection.prepare(`
     SELECT id, task_id, action, field, old_value, new_value, created_at
     FROM task_events
@@ -647,6 +651,24 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     return readTask(id)
   })
 
+  // The worktree link is owned by the lifecycle endpoints, never by generic
+  // task edits, so its history is recorded as explicit link/unlink events.
+  const applyTaskWorktreeUpdate = connection.transaction((id, path, action) => {
+    const current = readTask(id)
+    if (!current) return null
+    const updatedAt = new Date().toISOString()
+    updateTaskWorktreeStatement.run(path, updatedAt, id)
+    insertTaskEventStatement.run(
+      id,
+      action,
+      'worktree_path',
+      String(current.worktree_path ?? ''),
+      String(path),
+      updatedAt
+    )
+    return readTask(id)
+  })
+
     const listFoldersStatement = connection.prepare(
       'SELECT * FROM folders ORDER BY path COLLATE NOCASE'
     )
@@ -672,6 +694,9 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
          head_commit = excluded.head_commit,
          remote_url = excluded.remote_url,
          updated_at = excluded.updated_at`
+    )
+    const deleteGitWorktreeStatement = connection.prepare(
+      'DELETE FROM git_worktrees WHERE worktree_path = ?'
     )
     const listToolsStatement = connection.prepare('SELECT * FROM tools ORDER BY name')
     const upsertToolStatement = connection.prepare(
@@ -829,6 +854,12 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     },
     updateTask(id, changes) {
       return applyTaskUpdate(id, changes)
+    },
+    linkTaskWorktree(id, path) {
+      return applyTaskWorktreeUpdate(id, path, 'worktree_linked')
+    },
+    unlinkTaskWorktree(id) {
+      return applyTaskWorktreeUpdate(id, '', 'worktree_unlinked')
     },
     deleteTask(id) {
       return deleteTaskRecord(id)
@@ -1106,6 +1137,9 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
         )
       }
       return { total: entries.length }
+    },
+    deleteGitWorktree(worktreePath) {
+      return deleteGitWorktreeStatement.run(worktreePath).changes > 0
     },
     listTools() {
       return listToolsStatement.all().map((row) => ({

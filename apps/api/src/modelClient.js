@@ -60,6 +60,7 @@ function isEntitlementError(error) {
 async function defaultRunCommand(command, args, {
   timeoutMs = 600000,
   env = process.env,
+  cwd,
   signal
 } = {}) {
   try {
@@ -67,6 +68,7 @@ async function defaultRunCommand(command, args, {
       timeout: timeoutMs,
       maxBuffer: 10 * 1024 * 1024,
       env,
+      ...(cwd ? { cwd } : {}),
       signal
     })
     return { stdout, stderr }
@@ -529,6 +531,9 @@ export function createModelClient({
     try {
       ({ stdout } = await runCommand(model.cli.command, args, {
         timeoutMs,
+        // A task-linked run executes inside the task's worktree so generated
+        // changes never touch the main checkout.
+        ...(request.worktreePath ? { cwd: request.worktreePath } : {}),
         signal: request.signal
       }))
     } catch (error) {

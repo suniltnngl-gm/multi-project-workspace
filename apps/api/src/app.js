@@ -1,5 +1,6 @@
 import express from 'express'
 import { execFileSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { createResourceMonitor } from './resourceMonitor.js'
 import { createAdaptiveCpuLimit } from './adaptiveCpuLimit.js'
 import { buildTaskPrompt } from './localAiPrompt.js'
@@ -12,6 +13,7 @@ import { createModelBudget } from './modelBudget.js'
 import { scanWorkspaceUserFiles, listWorkspaceFolders } from './workspaceScan.js'
 import { createLocalVerifier, VerificationError } from './localVerifier.js'
 import { createOpenCodeRosterCacheFromEnv } from './opencodeDiscovery.js'
+import { createTaskWorktrees, parseWorktreePorcelain } from './taskWorktrees.js'
 import { loadWorkspaceEnv } from '../../../scripts/env.mjs'
 
 loadWorkspaceEnv()
@@ -513,6 +515,7 @@ export function createApp(database, {
   }),
   verifier,
   opencodeRosterCache,
+  taskWorktrees,
   turnCooldownMs = LOCAL_AI_TURN_COOLDOWN_MS
 } = {}) {
   const app = express()
@@ -545,6 +548,21 @@ export function createApp(database, {
       resolvedVerifier = createLocalVerifier({ rootDir: root })
     }
     return resolvedVerifier
+  }
+
+  // Task worktrees resolve the repository root on first use as well; tests
+  // inject a manager bound to a temporary repository instead.
+  let resolvedTaskWorktrees = null
+  const getTaskWorktrees = () => {
+    if (taskWorktrees) return taskWorktrees
+    if (resolvedTaskWorktrees === null) {
+      const root = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+        cwd: process.cwd(),
+        encoding: 'utf8'
+      }).trim()
+      resolvedTaskWorktrees = createTaskWorktrees({ repoRoot: root })
+    }
+    return resolvedTaskWorktrees
   }
   app.use(express.json({ limit: '16kb' }))
 
@@ -1103,22 +1121,7 @@ export function createApp(database, {
       const output = execFileSync('git', ['-C', root, 'worktree', 'list', '--porcelain'], {
         encoding: 'utf8'
       })
-      const entries = []
-      let current = {}
-      for (const line of output.split(/\r?\n/)) {
-        if (line.startsWith('worktree ')) {
-          if (current.worktreePath) entries.push(current)
-          current = { repositoryRoot: root, worktreePath: line.slice(9).trim() }
-        } else if (line.startsWith('HEAD ')) {
-          current.headCommit = line.slice(5).trim()
-        } else if (line.startsWith('branch ')) {
-          current.branch = line.slice(7).trim().replace(/^refs\/heads\//, '')
-        } else if (line === '') {
-          if (current.worktreePath) entries.push(current)
-          current = {}
-        }
-      }
-      if (current.worktreePath) entries.push(current)
+      const entries = parseWorktreePorcelain(output, root)
       for (const entry of entries) {
         entry.remoteUrl = remoteUrl
       }
@@ -1127,6 +1130,128 @@ export function createApp(database, {
     } catch (error) {
       response.status(500).json({ error: 'Could not scan Git worktrees.' })
     }
+  })
+
+  async function refreshGitWorktreeRows(worktrees) {
+    const remoteUrl = (() => {
+      try {
+        return execFileSync(
+          'git',
+          ['-C', worktrees.repoRoot, 'remote', 'get-url', 'origin'],
+          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+        ).trim()
+      } catch {
+        return ''
+      }
+    })()
+    const entries = (await worktrees.listEntries()).map((entry) => ({ ...entry, remoteUrl }))
+    database.scanGitWorktrees(entries)
+    return entries
+  }
+
+  app.post('/api/tasks/:id/worktree', async (request, response) => {
+    const id = parseId(request.params.id)
+    if (id === null) return response.status(400).json({ error: 'Task ID must be a positive integer.' })
+    const task = database.getTask(id)
+    if (!task) {
+      return response.status(404).json({ error: 'Task not found.' })
+    }
+    let worktrees
+    try {
+      worktrees = getTaskWorktrees()
+    } catch (error) {
+      return response.status(500).json({ error: 'Could not resolve the repository for task worktrees.' })
+    }
+
+    const body = request.body && typeof request.body === 'object' && !Array.isArray(request.body)
+      ? request.body
+      : {}
+    const branch = typeof body.branch === 'string' && body.branch.trim()
+      ? body.branch.trim()
+      : undefined
+    const name = typeof body.name === 'string' && body.name.trim()
+      ? body.name.trim()
+      : undefined
+
+    // A stale link (worktree removed by hand) self-heals: prune the
+    // registration and relink instead of wedging the task.
+    if (task.worktree_path) {
+      if (existsSync(task.worktree_path)) {
+        return response.status(409).json({
+          error: 'This task already has a worktree linked.',
+          worktreePath: task.worktree_path
+        })
+      }
+      try {
+        await worktrees.prune()
+      } catch {
+        // Pruning is best-effort; the link is stale either way.
+      }
+      database.deleteGitWorktree(task.worktree_path)
+      database.unlinkTaskWorktree(id)
+    }
+
+    const location = worktrees.resolveWorktree({ taskId: id, title: task.title, name, branch })
+    if (existsSync(location.path)) {
+      return response.status(409).json({
+        error: 'A worktree already exists at the task location; remove it first.',
+        worktreePath: location.path
+      })
+    }
+    try {
+      await worktrees.create({ taskId: id, title: task.title, name, branch })
+    } catch (error) {
+      return response.status(500).json({ error: `Could not create the task worktree: ${error.message}` })
+    }
+    const linked = database.linkTaskWorktree(id, location.path)
+    await refreshGitWorktreeRows(worktrees)
+    response.status(201).json({
+      task: linked,
+      worktreePath: location.path,
+      branch: location.branch
+    })
+  })
+
+  app.delete('/api/tasks/:id/worktree', async (request, response) => {
+    const id = parseId(request.params.id)
+    if (id === null) return response.status(400).json({ error: 'Task ID must be a positive integer.' })
+    const task = database.getTask(id)
+    if (!task) {
+      return response.status(404).json({ error: 'Task not found.' })
+    }
+    if (!task.worktree_path) {
+      return response.status(404).json({ error: 'This task has no worktree linked.' })
+    }
+    let worktrees
+    try {
+      worktrees = getTaskWorktrees()
+    } catch (error) {
+      return response.status(500).json({ error: 'Could not resolve the repository for task worktrees.' })
+    }
+    const force = ['1', 'true', 'yes'].includes(String(request.query.force ?? '').toLowerCase())
+    const path = task.worktree_path
+
+    if (existsSync(path)) {
+      try {
+        await worktrees.remove({ path, force })
+      } catch (error) {
+        return response.status(409).json({
+          error: force
+            ? `Could not remove the task worktree: ${error.message}`
+            : 'The worktree has uncommitted changes; pass ?force=1 to remove it anyway.',
+          worktreePath: path
+        })
+      }
+    } else {
+      try {
+        await worktrees.prune()
+      } catch {
+        // Pruning is best-effort.
+      }
+    }
+    database.deleteGitWorktree(path)
+    const unlinked = database.unlinkTaskWorktree(id)
+    response.json({ task: unlinked, removedPath: path })
   })
 
   app.get('/api/tools', (_request, response) => {
@@ -1325,6 +1450,15 @@ export function createApp(database, {
     if (validationError) return response.status(400).json({ error: validationError })
 
     if (taskNotFound(body)) return response.status(404).json({ error: 'Task not found.' })
+    // A task-linked run executes inside the task's worktree when one is live,
+    // so AI-generated changes stay out of the main checkout.
+    let worktreePath
+    if (body.task_id !== undefined) {
+      const linkedTask = database.getTask(body.task_id)
+      if (linkedTask?.worktree_path && existsSync(linkedTask.worktree_path)) {
+        worktreePath = linkedTask.worktree_path
+      }
+    }
     const session = body.session_id !== undefined ? database.getAiSession(body.session_id) : null
     if (body.session_id !== undefined && !session) {
       return response.status(404).json({ error: 'AI session not found.' })
@@ -1363,6 +1497,7 @@ export function createApp(database, {
             messages,
             maxTokens,
             task: { title: jobTitle, project: 'workspace', task_type: 'chore' },
+            ...(worktreePath ? { worktreePath } : {}),
             signal,
             onPhase,
             onUsage: (usage) => modelBudget.recordUsage?.(model.id, usage)

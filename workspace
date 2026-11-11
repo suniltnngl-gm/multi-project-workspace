@@ -202,6 +202,10 @@ print_help() {
   printf '  %-24s %s\n' 'backup' 'Back up the SQLite database'
   printf '  %-24s %s\n' 'env-encrypt [src] [dst]' 'Encrypt a .env file into .env.enc'
   printf '  %-24s %s\n' 'status' 'Show tools, ports, and tracking counts'
+  printf '\n%sTasks%s\n' "$C_BOLD" "$C_RESET"
+  printf '  %-24s %s\n' 'task worktree <id>' 'Show the worktree linked to a task'
+  printf '  %-24s %s\n' 'task worktree create <id>' 'Create and link an isolated task worktree'
+  printf '  %-24s %s\n' 'task worktree remove <id>' 'Remove the linked worktree and unlink the task'
   printf '\n%sAI and remote%s\n' "$C_BOLD" "$C_RESET"
   printf '  %-24s %s\n' 'local-ai [all|0.5b|1.5b]' 'Start local models within memory limits'
   printf '  %-24s %s\n' 'colab [status|stop] [session]' 'Inspect or stop the reusable Colab session'
@@ -356,6 +360,209 @@ case "$command_name" in
       *)
         error "Unknown git-context subcommand: $subcommand"
         printf 'Usage: ./workspace git-context [scan|list|check]\n' >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  task)
+    subcommand="${2:-}"
+    case "$subcommand" in
+      worktree)
+        action="${3:-show}"
+        # A bare numeric argument means "show": ./workspace task worktree <id>
+        if [[ "$action" =~ ^[1-9][0-9]*$ ]]; then
+          action="show"
+        fi
+        case "$action" in
+          show)
+            task_show_id=""
+            if [[ "${3:-}" =~ ^[1-9][0-9]*$ ]]; then
+              task_show_id="$3"
+            elif [[ "${4:-}" =~ ^[1-9][0-9]*$ ]]; then
+              task_show_id="$4"
+            fi
+            if [[ -z "$task_show_id" ]]; then
+              error 'Usage: ./workspace task worktree <id>'
+              exit 2
+            fi
+            if ! command -v curl >/dev/null 2>&1; then
+              error 'curl is required for task worktree.'
+              exit 1
+            fi
+            if ! port_in_use "$API_PORT"; then
+              error "The Node API is not running on port $API_PORT. Start it with ./workspace dev or ./workspace node."
+              exit 1
+            fi
+            task_result="$(curl -sS -w '\n%{http_code}' "http://127.0.0.1:${API_PORT}/api/tasks/${task_show_id}")"
+            task_body="${task_result%$'\n'*}"
+            task_code="${task_result##*$'\n'}"
+            if [[ "$task_code" != "2"* ]]; then
+              error "Could not read task #${task_show_id} (HTTP $task_code)."
+              exit 1
+            fi
+            python3 - "$task_body" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+path = data.get("worktree_path") or ""
+print(path if path else "No worktree linked.")
+PY
+            ;;
+          create)
+            task_branch=""
+            task_name=""
+            task_id=""
+            shift 3 || true
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --branch)
+                  [[ $# -ge 2 ]] || { error 'Usage: ./workspace task worktree create <id> [--branch NAME] [--name NAME]'; exit 2; }
+                  task_branch="$2"
+                  shift 2
+                  ;;
+                --name)
+                  [[ $# -ge 2 ]] || { error 'Usage: ./workspace task worktree create <id> [--branch NAME] [--name NAME]'; exit 2; }
+                  task_name="$2"
+                  shift 2
+                  ;;
+                *)
+                  if [[ -z "$task_id" && "$1" =~ ^[1-9][0-9]*$ ]]; then
+                    task_id="$1"
+                    shift
+                  else
+                    error "Unknown task worktree option: $1"
+                    exit 2
+                  fi
+                  ;;
+              esac
+            done
+            if [[ -z "$task_id" ]]; then
+              error 'Usage: ./workspace task worktree create <id> [--branch NAME] [--name NAME]'
+              exit 2
+            fi
+            if ! command -v curl >/dev/null 2>&1; then
+              error 'curl is required for task worktree.'
+              exit 1
+            fi
+            if ! port_in_use "$API_PORT"; then
+              error "The Node API is not running on port $API_PORT. Start it with ./workspace dev or ./workspace node."
+              exit 1
+            fi
+            task_payload="$(python3 - "$task_branch" "$task_name" <<'PY'
+import json
+import sys
+
+branch, name = sys.argv[1], sys.argv[2]
+payload = {}
+if branch:
+    payload["branch"] = branch
+if name:
+    payload["name"] = name
+print(json.dumps(payload))
+PY
+)"
+            task_result="$(curl -sS -w '\n%{http_code}' -X POST "http://127.0.0.1:${API_PORT}/api/tasks/${task_id}/worktree" \
+              -H 'Content-Type: application/json' \
+              -d "$task_payload")"
+            task_body="${task_result%$'\n'*}"
+            task_code="${task_result##*$'\n'}"
+            if [[ "$task_code" != "2"* ]]; then
+              python3 - "$task_body" "$task_code" <<'PY'
+import json
+import sys
+
+body, code = sys.argv[1], sys.argv[2]
+try:
+    data = json.loads(body) or {}
+except json.JSONDecodeError:
+    data = {}
+message = data.get("error") or f"The worktree request failed (HTTP {code})."
+print(message, file=sys.stderr)
+sys.exit(1)
+PY
+            fi
+            python3 - "$task_body" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+print(f"Linked {data['worktreePath']} (branch {data['branch']}).")
+PY
+            ;;
+          remove)
+            task_force=""
+            task_id=""
+            shift 3 || true
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --force)
+                  task_force="1"
+                  shift
+                  ;;
+                *)
+                  if [[ -z "$task_id" && "$1" =~ ^[1-9][0-9]*$ ]]; then
+                    task_id="$1"
+                    shift
+                  else
+                    error "Unknown task worktree option: $1"
+                    exit 2
+                  fi
+                  ;;
+              esac
+            done
+            if [[ -z "$task_id" ]]; then
+              error 'Usage: ./workspace task worktree remove <id> [--force]'
+              exit 2
+            fi
+            if ! command -v curl >/dev/null 2>&1; then
+              error 'curl is required for task worktree.'
+              exit 1
+            fi
+            if ! port_in_use "$API_PORT"; then
+              error "The Node API is not running on port $API_PORT. Start it with ./workspace dev or ./workspace node."
+              exit 1
+            fi
+            task_result="$(curl -sS -w '\n%{http_code}' -X DELETE "http://127.0.0.1:${API_PORT}/api/tasks/${task_id}/worktree${task_force:+?force=1}")"
+            task_body="${task_result%$'\n'*}"
+            task_code="${task_result##*$'\n'}"
+            if [[ "$task_code" != "2"* ]]; then
+              python3 - "$task_body" "$task_code" <<'PY'
+import json
+import sys
+
+body, code = sys.argv[1], sys.argv[2]
+try:
+    data = json.loads(body) or {}
+except json.JSONDecodeError:
+    data = {}
+message = data.get("error") or f"The worktree request failed (HTTP {code})."
+print(message, file=sys.stderr)
+sys.exit(1)
+PY
+            fi
+            python3 - "$task_body" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+print(f"Removed {data['removedPath']}.")
+PY
+            ;;
+          *)
+            error "Unknown task worktree action: $action"
+            printf 'Usage: ./workspace task worktree <id>\n' >&2
+            printf '       ./workspace task worktree create <id> [--branch NAME] [--name NAME]\n' >&2
+            printf '       ./workspace task worktree remove <id> [--force]\n' >&2
+            exit 2
+            ;;
+        esac
+        ;;
+      *)
+        error "Unknown task subcommand: $subcommand"
+        printf 'Usage: ./workspace task worktree <id>\n' >&2
+        printf '       ./workspace task worktree create <id> [--branch NAME] [--name NAME]\n' >&2
+        printf '       ./workspace task worktree remove <id> [--force]\n' >&2
         exit 2
         ;;
     esac
