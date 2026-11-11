@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { basename, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Database from 'better-sqlite3'
 
@@ -39,6 +39,20 @@ function toTaskEvent(row) {
     ...(row.old_value !== null ? { oldValue: row.old_value } : {}),
     ...(row.new_value !== null ? { newValue: row.new_value } : {}),
     createdAt: row.created_at
+  }
+}
+
+function toRepository(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    name: row.name,
+    rootPath: row.root_path,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    ...(row.file_count !== undefined ? { fileCount: row.file_count } : {}),
+    ...(row.folder_count !== undefined ? { folderCount: row.folder_count } : {}),
+    ...(row.worktree_count !== undefined ? { worktreeCount: row.worktree_count } : {})
   }
 }
 
@@ -86,7 +100,10 @@ function toAiRun(row) {
   }
 }
 
-export function createDatabase(databasePath = process.env.DATABASE_PATH || defaultDatabasePath) {
+export function createDatabase(
+  databasePath = process.env.DATABASE_PATH || defaultDatabasePath,
+  { rootDir } = {}
+) {
   const resolvedPath = resolve(databasePath)
   mkdirSync(dirname(resolvedPath), { recursive: true })
 
@@ -94,8 +111,18 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
   connection.pragma('journal_mode = WAL')
   connection.pragma('foreign_keys = ON')
   connection.exec(`
+    CREATE TABLE IF NOT EXISTS repositories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE CHECK(length(trim(name)) BETWEEN 1 AND 100),
+      root_path TEXT NOT NULL UNIQUE CHECK(length(trim(root_path)) BETWEEN 1 AND 500),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `)
+  connection.exec(`
     CREATE TABLE IF NOT EXISTS git_worktrees (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      repository_id INTEGER NOT NULL DEFAULT 1 REFERENCES repositories(id),
       repository_root TEXT NOT NULL,
       worktree_path TEXT NOT NULL UNIQUE,
       branch TEXT NOT NULL DEFAULT '',
@@ -159,16 +186,19 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
   connection.exec(`
     CREATE TABLE IF NOT EXISTS folders (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      path TEXT NOT NULL UNIQUE CHECK(length(trim(path)) BETWEEN 1 AND 500),
+      repository_id INTEGER NOT NULL DEFAULT 1 REFERENCES repositories(id),
+      path TEXT NOT NULL CHECK(length(trim(path)) BETWEEN 1 AND 500),
       objective TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      UNIQUE(repository_id, path)
     );
   `)
   connection.exec(`
     CREATE TABLE IF NOT EXISTS user_files (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      path TEXT NOT NULL UNIQUE CHECK(length(trim(path)) BETWEEN 1 AND 500),
+      repository_id INTEGER NOT NULL DEFAULT 1 REFERENCES repositories(id),
+      path TEXT NOT NULL CHECK(length(trim(path)) BETWEEN 1 AND 500),
       objective TEXT NOT NULL DEFAULT '',
       requirements TEXT NOT NULL DEFAULT '',
       decisions TEXT NOT NULL DEFAULT '',
@@ -176,7 +206,8 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       important_context TEXT NOT NULL DEFAULT '',
       content_hash TEXT,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      UNIQUE(repository_id, path)
     );
 
     CREATE TABLE IF NOT EXISTS user_file_events (
@@ -317,6 +348,173 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
   )
   if (!userFileColumns.has('content_hash')) {
     connection.exec('ALTER TABLE user_files ADD COLUMN content_hash TEXT')
+  }
+
+  // Multi-repository registry. user_files and folders predate repository
+  // scoping and key their path globally; the multi-repository shape keys
+  // (repository_id, path). The rebuild preserves ids so the
+  // user_file_events trail survives. Foreign keys are disabled around it so
+  // dropping the old table cannot cascade into the event rows, per the
+  // documented SQLite migration procedure.
+  const folderColumns = new Set(
+    connection.prepare('PRAGMA table_info(folders)').all().map((column) => column.name)
+  )
+  const worktreeColumns = new Set(
+    connection.prepare('PRAGMA table_info(git_worktrees)').all().map((column) => column.name)
+  )
+  const repositoryBackfillNeeded =
+    !userFileColumns.has('repository_id') ||
+    !folderColumns.has('repository_id') ||
+    !worktreeColumns.has('repository_id')
+
+  // The primary repository is registered before any association column is
+  // backfilled, so rows that predate scoping point at a real repository row
+  // (id 1). Callers pass their workspace root via rootDir; when a legacy
+  // database needs a backfill target and no root was given, the process
+  // working directory stands in so backfilled rows never dangle.
+  const hasAnyRepository =
+    connection.prepare('SELECT 1 FROM repositories LIMIT 1').get() !== undefined
+  if (!hasAnyRepository && (rootDir !== undefined || repositoryBackfillNeeded)) {
+    const primaryRoot = resolve(String(rootDir !== undefined ? rootDir : process.cwd()))
+    const now = new Date().toISOString()
+    const baseName = basename(primaryRoot) || 'repository'
+    let name = baseName
+    let suffix = 2
+    while (connection.prepare('SELECT 1 FROM repositories WHERE name = ?').get(name)) {
+      name = `${baseName}-${suffix}`
+      suffix += 1
+    }
+    connection.prepare(
+      'INSERT INTO repositories (id, name, root_path, created_at, updated_at) VALUES (1, ?, ?, ?, ?)'
+    ).run(name, primaryRoot, now, now)
+  } else if (rootDir !== undefined) {
+    const primaryRoot = resolve(String(rootDir))
+    const registered = connection.prepare(
+      'SELECT id FROM repositories WHERE root_path = ?'
+    ).get(primaryRoot)
+    if (!registered) {
+      const now = new Date().toISOString()
+      const baseName = basename(primaryRoot) || 'repository'
+      let name = baseName
+      let suffix = 2
+      while (connection.prepare('SELECT 1 FROM repositories WHERE name = ?').get(name)) {
+        name = `${baseName}-${suffix}`
+        suffix += 1
+      }
+      connection.prepare(
+        'INSERT INTO repositories (name, root_path, created_at, updated_at) VALUES (?, ?, ?, ?)'
+      ).run(name, primaryRoot, now, now)
+    }
+  }
+
+  if (!userFileColumns.has('repository_id')) {
+    connection.pragma('foreign_keys = OFF')
+    try {
+      connection.transaction(() => {
+        connection.exec(`
+          CREATE TABLE user_files_scoped (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repository_id INTEGER NOT NULL DEFAULT 1 REFERENCES repositories(id),
+            path TEXT NOT NULL CHECK(length(trim(path)) BETWEEN 1 AND 500),
+            objective TEXT NOT NULL DEFAULT '',
+            requirements TEXT NOT NULL DEFAULT '',
+            decisions TEXT NOT NULL DEFAULT '',
+            relevant_files TEXT NOT NULL DEFAULT '',
+            important_context TEXT NOT NULL DEFAULT '',
+            content_hash TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(repository_id, path)
+          );
+        `)
+        connection.exec(`
+          INSERT INTO user_files_scoped (
+            id, repository_id, path, objective, requirements, decisions,
+            relevant_files, important_context, content_hash, created_at, updated_at
+          )
+          SELECT id, 1, path, objective, requirements, decisions,
+                 relevant_files, important_context, content_hash, created_at, updated_at
+          FROM user_files
+        `)
+        connection.exec('DROP TABLE user_files')
+        connection.exec('ALTER TABLE user_files_scoped RENAME TO user_files')
+      })()
+    } finally {
+      connection.pragma('foreign_keys = ON')
+    }
+  }
+
+  if (!folderColumns.has('repository_id')) {
+    connection.pragma('foreign_keys = OFF')
+    try {
+      connection.transaction(() => {
+        connection.exec(`
+          CREATE TABLE folders_scoped (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repository_id INTEGER NOT NULL DEFAULT 1 REFERENCES repositories(id),
+            path TEXT NOT NULL CHECK(length(trim(path)) BETWEEN 1 AND 500),
+            objective TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(repository_id, path)
+          );
+        `)
+        connection.exec(`
+          INSERT INTO folders_scoped (id, repository_id, path, objective, created_at, updated_at)
+          SELECT id, 1, path, objective, created_at, updated_at
+          FROM folders
+        `)
+        connection.exec('DROP TABLE folders')
+        connection.exec('ALTER TABLE folders_scoped RENAME TO folders')
+      })()
+    } finally {
+      connection.pragma('foreign_keys = ON')
+    }
+  }
+
+  // Worktrees keep their globally unique absolute path; they gain the
+  // repository link through a rebuild (ALTER cannot add a REFERENCES column
+  // with a non-NULL default), backfilling the link by matching the recorded
+  // repository root against registered repositories. Nothing references
+  // git_worktrees, so the rebuild only preserves its own rows and ids.
+  if (!worktreeColumns.has('repository_id')) {
+    connection.pragma('foreign_keys = OFF')
+    try {
+      connection.transaction(() => {
+        connection.exec(`
+          CREATE TABLE git_worktrees_scoped (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repository_id INTEGER NOT NULL DEFAULT 1 REFERENCES repositories(id),
+            repository_root TEXT NOT NULL,
+            worktree_path TEXT NOT NULL UNIQUE,
+            branch TEXT NOT NULL DEFAULT '',
+            head_commit TEXT NOT NULL DEFAULT '',
+            remote_url TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+        `)
+        connection.exec(`
+          INSERT INTO git_worktrees_scoped (
+            id, repository_id, repository_root, worktree_path, branch,
+            head_commit, remote_url, created_at, updated_at
+          )
+          SELECT id,
+                 COALESCE(
+                   (SELECT repositories.id FROM repositories
+                    WHERE repositories.root_path = git_worktrees.repository_root),
+                   1
+                 ),
+                 repository_root, worktree_path, branch, head_commit, remote_url,
+                 created_at, updated_at
+          FROM git_worktrees
+        `)
+        connection.exec('DROP TABLE git_worktrees')
+        connection.exec('ALTER TABLE git_worktrees_scoped RENAME TO git_worktrees')
+      })()
+    } finally {
+      connection.pragma('foreign_keys = ON')
+    }
   }
 
   const existingColumns = new Set(
@@ -693,26 +891,41 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     return readTask(id)
   })
 
-    const listFoldersStatement = connection.prepare(
-      'SELECT * FROM folders ORDER BY path COLLATE NOCASE'
+    const listFoldersStatement = connection.prepare(`
+      SELECT folders.*, repositories.name AS repository_name
+      FROM folders
+      LEFT JOIN repositories ON repositories.id = folders.repository_id
+      ORDER BY folders.repository_id, folders.path COLLATE NOCASE
+    `)
+    const getFolderStatement = connection.prepare(`
+      SELECT folders.*, repositories.name AS repository_name
+      FROM folders
+      LEFT JOIN repositories ON repositories.id = folders.repository_id
+      WHERE folders.id = ?
+    `)
+    const getFolderByPathStatement = connection.prepare(
+      'SELECT * FROM folders WHERE repository_id = ? AND path = ?'
     )
-    const getFolderStatement = connection.prepare('SELECT * FROM folders WHERE id = ?')
-    const getFolderByPathStatement = connection.prepare('SELECT * FROM folders WHERE path = ?')
     const insertFolderStatement = connection.prepare(
-      'INSERT INTO folders (path, objective, created_at, updated_at) VALUES (?, ?, ?, ?)'
+      'INSERT INTO folders (repository_id, path, objective, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
     )
     const updateFolderStatement = connection.prepare(
       'UPDATE folders SET path = ?, objective = ?, updated_at = ? WHERE id = ?'
     )
     const deleteFolderStatement = connection.prepare('DELETE FROM folders WHERE id = ?')
 
-    const listGitWorktreesStatement = connection.prepare(
-      'SELECT * FROM git_worktrees ORDER BY repository_root, worktree_path'
-    )
+    const listGitWorktreesStatement = connection.prepare(`
+      SELECT git_worktrees.*, repositories.name AS repository_name
+      FROM git_worktrees
+      LEFT JOIN repositories ON repositories.id = git_worktrees.repository_id
+      ORDER BY git_worktrees.repository_root, git_worktrees.worktree_path
+    `)
     const upsertGitWorktreeStatement = connection.prepare(
-      `INSERT INTO git_worktrees (repository_root, worktree_path, branch, head_commit, remote_url, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO git_worktrees (
+         repository_id, repository_root, worktree_path, branch, head_commit, remote_url, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(worktree_path) DO UPDATE SET
+         repository_id = excluded.repository_id,
          repository_root = excluded.repository_root,
          branch = excluded.branch,
          head_commit = excluded.head_commit,
@@ -721,6 +934,24 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     )
     const deleteGitWorktreeStatement = connection.prepare(
       'DELETE FROM git_worktrees WHERE worktree_path = ?'
+    )
+    const listRepositoriesStatement = connection.prepare(`
+      SELECT repositories.*,
+             (SELECT COUNT(*) FROM user_files WHERE user_files.repository_id = repositories.id) AS file_count,
+             (SELECT COUNT(*) FROM folders WHERE folders.repository_id = repositories.id) AS folder_count,
+             (SELECT COUNT(*) FROM git_worktrees WHERE git_worktrees.repository_id = repositories.id) AS worktree_count
+      FROM repositories
+      ORDER BY repositories.id
+    `)
+    const getRepositoryStatement = connection.prepare('SELECT * FROM repositories WHERE id = ?')
+    const getRepositoryByRootStatement = connection.prepare(
+      'SELECT * FROM repositories WHERE root_path = ?'
+    )
+    const getRepositoryByNameStatement = connection.prepare(
+      'SELECT * FROM repositories WHERE name = ?'
+    )
+    const insertRepositoryStatement = connection.prepare(
+      'INSERT INTO repositories (name, root_path, created_at, updated_at) VALUES (?, ?, ?, ?)'
     )
     const listToolsStatement = connection.prepare('SELECT * FROM tools ORDER BY name')
     const upsertToolStatement = connection.prepare(
@@ -745,13 +976,32 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
          checked_at = excluded.checked_at`
     )
 
-    const listUserFilesStatement = connection.prepare(
-      'SELECT * FROM user_files ORDER BY path COLLATE NOCASE'
-    )
-    const getUserFileStatement = connection.prepare('SELECT * FROM user_files WHERE id = ?')
-    const getUserFileByPathStatement = connection.prepare('SELECT * FROM user_files WHERE path = ?')
+    const listUserFilesStatement = connection.prepare(`
+      SELECT user_files.*, repositories.name AS repository_name
+      FROM user_files
+      LEFT JOIN repositories ON repositories.id = user_files.repository_id
+      ORDER BY user_files.repository_id, user_files.path COLLATE NOCASE
+    `)
+    const getUserFileStatement = connection.prepare(`
+      SELECT user_files.*, repositories.name AS repository_name
+      FROM user_files
+      LEFT JOIN repositories ON repositories.id = user_files.repository_id
+      WHERE user_files.id = ?
+    `)
+    const getUserFileByPathStatement = connection.prepare(`
+      SELECT user_files.*, repositories.name AS repository_name
+      FROM user_files
+      LEFT JOIN repositories ON repositories.id = user_files.repository_id
+      WHERE user_files.repository_id = ? AND user_files.path = ?
+    `)
     const insertUserFileStatement = connection.prepare(
-      'INSERT INTO user_files (path, objective, requirements, decisions, relevant_files, important_context, content_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      'INSERT INTO user_files (repository_id, path, objective, requirements, decisions, relevant_files, important_context, content_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    )
+    const listUserFilesForRepositoryStatement = connection.prepare(
+      'SELECT * FROM user_files WHERE repository_id = ?'
+    )
+    const listFoldersForRepositoryStatement = connection.prepare(
+      'SELECT path FROM folders WHERE repository_id = ?'
     )
     const updateUserFileStatement = connection.prepare(
       'UPDATE user_files SET path = ?, objective = ?, requirements = ?, decisions = ?, relevant_files = ?, important_context = ?, updated_at = ? WHERE id = ?'
@@ -772,10 +1022,25 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       VALUES (?, ?, ?, ?, ?, ?)
     `)
 
+    function toFolder(row) {
+      if (!row) return null
+      return {
+        id: row.id,
+        repositoryId: row.repository_id,
+        ...(row.repository_name !== undefined ? { repository: row.repository_name } : {}),
+        path: row.path,
+        objective: row.objective,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+      }
+    }
+
     function toUserFile(row) {
       if (!row) return null
       return {
         id: row.id,
+        repositoryId: row.repository_id,
+        ...(row.repository_name !== undefined ? { repository: row.repository_name } : {}),
         path: row.path,
         objective: row.objective,
         requirements: row.requirements,
@@ -937,20 +1202,35 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     pruneQuotaBefore(cutoff) {
       return pruneQuotaStatement.run(cutoff).changes
     },
-    listUserFiles({ search = '' } = {}) {
+    listUserFiles({ search = '', repositoryId } = {}) {
+      const conditions = []
+      const values = []
+      if (repositoryId !== undefined) {
+        conditions.push('user_files.repository_id = ?')
+        values.push(repositoryId)
+      }
       if (search) {
         const like = `%${String(search).replace(/[\\%_]/g, '\\$&')}%`
-        return connection.prepare(
-          'SELECT * FROM user_files WHERE path LIKE ? ESCAPE \'\\\' OR objective LIKE ? ESCAPE \'\\\' OR requirements LIKE ? ESCAPE \'\\\' OR decisions LIKE ? ESCAPE \'\\\' OR relevant_files LIKE ? ESCAPE \'\\\' OR important_context LIKE ? ESCAPE \'\\\' ORDER BY path COLLATE NOCASE'
-        ).all(...Array(6).fill(like)).map(toUserFile)
+        conditions.push(
+          '(user_files.path LIKE ? ESCAPE \'\\\' OR user_files.objective LIKE ? ESCAPE \'\\\' OR user_files.requirements LIKE ? ESCAPE \'\\\' OR user_files.decisions LIKE ? ESCAPE \'\\\' OR user_files.relevant_files LIKE ? ESCAPE \'\\\' OR user_files.important_context LIKE ? ESCAPE \'\\\')'
+        )
+        values.push(...Array(6).fill(like))
       }
-      return listUserFilesStatement.all().map(toUserFile)
+      if (conditions.length === 0) return listUserFilesStatement.all().map(toUserFile)
+      const rows = connection.prepare(`
+        SELECT user_files.*, repositories.name AS repository_name
+        FROM user_files
+        LEFT JOIN repositories ON repositories.id = user_files.repository_id
+        WHERE ${conditions.join(' AND ')}
+        ORDER BY user_files.repository_id, user_files.path COLLATE NOCASE
+      `).all(...values)
+      return rows.map(toUserFile)
     },
     getUserFile(id) {
       return toUserFile(getUserFileStatement.get(id))
     },
-    getUserFileByPath(path) {
-      return toUserFile(getUserFileByPathStatement.get(path))
+    getUserFileByPath(path, repositoryId = 1) {
+      return toUserFile(getUserFileByPathStatement.get(repositoryId, path))
     },
     createUserFile({
       path,
@@ -958,11 +1238,12 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       requirements = '',
       decisions = '',
       relevant_files = '',
-      important_context = ''
+      important_context = '',
+      repositoryId = 1
     }) {
       const now = new Date().toISOString()
       const result = insertUserFileStatement.run(
-        path, objective, requirements, decisions, relevant_files, important_context,
+        repositoryId, path, objective, requirements, decisions, relevant_files, important_context,
         null, now, now
       )
       const id = Number(result.lastInsertRowid)
@@ -1012,9 +1293,11 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
      * value. Header syncs record "synced" events; manual updates record
      * "updated" events, so history is preserved either way.
      */
-    scanUserFiles(files) {
+    scanUserFiles(files, { repositoryId = 1 } = {}) {
       const now = new Date().toISOString()
-      const existing = new Map(listUserFilesStatement.all().map((row) => [row.path, row]))
+      const existing = new Map(
+        listUserFilesForRepositoryStatement.all(repositoryId).map((row) => [row.path, row])
+      )
       let inserted = 0
       let synced = 0
       let refreshed = 0
@@ -1025,6 +1308,7 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
         if (!current) {
           const headers = parseUserFileHeaders(content)
           const result = insertUserFileStatement.run(
+            repositoryId,
             path,
             headers.objective ?? '',
             headers.requirements ?? '',
@@ -1076,40 +1360,17 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
       return { inserted, synced, refreshed, skipped, total: files.length }
     },
     listFolders() {
-      return listFoldersStatement.all().map((row) => ({
-        id: row.id,
-        path: row.path,
-        objective: row.objective,
-        importantContext: row.important_context,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at
-      }))
+      return listFoldersStatement.all().map(toFolder)
     },
     getFolder(id) {
-      const row = getFolderStatement.get(id)
-      if (!row) return null
-      return {
-        id: row.id,
-        path: row.path,
-        objective: row.objective,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at
-      }
+      return toFolder(getFolderStatement.get(id))
     },
-    getFolderByPath(path) {
-      const row = getFolderByPathStatement.get(path)
-      if (!row) return null
-      return {
-        id: row.id,
-        path: row.path,
-        objective: row.objective,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at
-      }
+    getFolderByPath(path, repositoryId = 1) {
+      return toFolder(getFolderByPathStatement.get(repositoryId, path))
     },
-    createFolder({ path, objective = '' }) {
+    createFolder({ path, objective = '', repositoryId = 1 }) {
       const now = new Date().toISOString()
-      const result = insertFolderStatement.run(path, objective, now, now)
+      const result = insertFolderStatement.run(repositoryId, path, objective, now, now)
       return this.getFolder(Number(result.lastInsertRowid))
     },
     updateFolder(id, changes) {
@@ -1126,16 +1387,18 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     deleteFolder(id) {
       return deleteFolderStatement.run(id).changes > 0
     },
-    scanFolders(paths) {
+    scanFolders(paths, { repositoryId = 1 } = {}) {
       const now = new Date().toISOString()
-      const existing = new Set(listFoldersStatement.all().map((row) => row.path))
+      const existing = new Set(
+        listFoldersForRepositoryStatement.all(repositoryId).map((row) => row.path)
+      )
       let inserted = 0
       let updated = 0
       for (const path of paths) {
         if (existing.has(path)) {
           updated += 1
         } else {
-          insertFolderStatement.run(path, '', now, now)
+          insertFolderStatement.run(repositoryId, path, '', now, now)
           inserted += 1
           existing.add(path)
         }
@@ -1145,6 +1408,8 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     listGitWorktrees() {
       return listGitWorktreesStatement.all().map((row) => ({
         id: row.id,
+        repositoryId: row.repository_id,
+        ...(row.repository_name !== undefined ? { repository: row.repository_name } : {}),
         repositoryRoot: row.repository_root,
         worktreePath: row.worktree_path,
         branch: row.branch,
@@ -1156,8 +1421,18 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     },
     scanGitWorktrees(entries) {
       const now = new Date().toISOString()
+      // Each entry's repository root resolves to its registered repository,
+      // registering unknown roots on first sight so worktree rows are always
+      // associated with a real repository.
+      const repositoryIds = new Map()
       for (const entry of entries) {
+        let repositoryId = repositoryIds.get(entry.repositoryRoot)
+        if (repositoryId === undefined) {
+          repositoryId = this.ensureRepository(entry.repositoryRoot).repository.id
+          repositoryIds.set(entry.repositoryRoot, repositoryId)
+        }
         upsertGitWorktreeStatement.run(
+          repositoryId,
           entry.repositoryRoot,
           entry.worktreePath,
           entry.branch || '',
@@ -1171,6 +1446,41 @@ export function createDatabase(databasePath = process.env.DATABASE_PATH || defau
     },
     deleteGitWorktree(worktreePath) {
       return deleteGitWorktreeStatement.run(worktreePath).changes > 0
+    },
+    listRepositories() {
+      return listRepositoriesStatement.all().map(toRepository)
+    },
+    getRepository(id) {
+      return toRepository(getRepositoryStatement.get(id))
+    },
+    getRepositoryByRoot(rootPath) {
+      return toRepository(getRepositoryByRootStatement.get(resolve(String(rootPath))))
+    },
+    getRepositoryByName(name) {
+      return toRepository(getRepositoryByNameStatement.get(String(name)))
+    },
+    /**
+     * Resolve a repository root to its registered row, registering it on
+     * first sight. The name defaults to the root's basename and takes a
+     * numeric suffix when another repository already uses that name. An
+     * explicit name that is already taken still throws, so callers validate
+     * user-provided names before reaching here.
+     */
+    ensureRepository(rootPath, { name } = {}) {
+      const root = resolve(String(rootPath))
+      const existing = toRepository(getRepositoryByRootStatement.get(root))
+      if (existing) return { repository: existing, created: false }
+      const baseName = String(name ?? basename(root) ?? 'repository').trim() || 'repository'
+      let finalName = baseName
+      let suffix = 2
+      while (getRepositoryByNameStatement.get(finalName)) {
+        if (name !== undefined) break
+        finalName = `${baseName}-${suffix}`
+        suffix += 1
+      }
+      const now = new Date().toISOString()
+      insertRepositoryStatement.run(finalName, root, now, now)
+      return { repository: toRepository(getRepositoryByRootStatement.get(root)), created: true }
     },
     listTools() {
       return listToolsStatement.all().map((row) => ({

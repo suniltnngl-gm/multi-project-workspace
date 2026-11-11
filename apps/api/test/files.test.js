@@ -74,18 +74,18 @@ test('user files can be scanned, created, updated, and deleted', async () => {
 })
 
 test('header syncs from the repository reach tracked fields', async () => {
-  const searchResponse = await fetch(`${baseUrl}/api/files?search=scan_folders`)
+  const searchResponse = await fetch(`${baseUrl}/api/files?search=tracking_status`)
   assert.equal(searchResponse.status, 200)
-  const [scanner] = (await searchResponse.json())
-    .filter((file) => file.path.endsWith('scan_folders.py'))
-  assert.ok(scanner, 'scripts/scan_folders.py is tracked')
-  assert.equal(scanner.objective, 'Scan and centrally track folders in SQLite.')
+  const [reporter] = (await searchResponse.json())
+    .filter((file) => file.path.endsWith('tracking_status.py'))
+  assert.ok(reporter, 'scripts/tracking_status.py is tracked')
+  assert.equal(reporter.objective, 'Report centralized tracking counts for the workspace.')
   assert.equal(
-    scanner.requirements,
-    'Exclude vendor and transient paths; support scan, list, and check commands.'
+    reporter.requirements,
+    'Read tracking tables without modifying them.'
   )
 
-  const detailResponse = await fetch(`${baseUrl}/api/files/${scanner.id}`)
+  const detailResponse = await fetch(`${baseUrl}/api/files/${reporter.id}`)
   assert.equal(detailResponse.status, 200)
   const detail = await detailResponse.json()
   assert.ok(detail.activity.some((event) => event.action === 'created'))
@@ -94,7 +94,7 @@ test('header syncs from the repository reach tracked fields', async () => {
   )
   assert.ok(syncedObjective, 'the objective sync is recorded')
   assert.equal(syncedObjective.oldValue, '')
-  assert.equal(syncedObjective.newValue, 'Scan and centrally track folders in SQLite.')
+  assert.equal(syncedObjective.newValue, 'Report centralized tracking counts for the workspace.')
 })
 
 test('rescanning unchanged files writes nothing', async () => {

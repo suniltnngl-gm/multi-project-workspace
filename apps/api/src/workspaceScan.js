@@ -1,11 +1,11 @@
 // Objective: Walk the repository for tracked user files and folders, syncing header fields.
 // Requirements: Share one scan implementation between the API endpoints and scripts/scan-user-files.mjs.
-// Decisions: Prune vendor and transient directories while walking so node_modules is never read; mirror the Python scanner rules the check commands validated.
+// Decisions: Prune vendor and transient directories while walking so node_modules is never read; mirror the Python scanner rules the check commands validated; resolve each root through the repository registry so scans are scoped per repository.
 // Relevant Files: apps/api/src/workspaceScan.js, apps/api/src/database.js, scripts/scan-user-files.mjs
 // Important Context: User file. Used by the API scan endpoints and the CLI scanner so they never drift.
 // Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { readFileSync, readdirSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { join, relative, resolve } from 'node:path'
 
 const NOISE_DIRECTORIES = new Set([
   'node_modules', '.venv', 'dist', '.git', '__pycache__', '.pytest_cache', 'data'
@@ -46,9 +46,8 @@ export function listWorkspaceUserFiles(rootDir) {
   return [...new Set(results)].sort()
 }
 
-// Folder paths use the same pruned walk as the user files above, matching
-// the rules scripts/scan_folders.py applies, so the API endpoint and the
-// CLI scanner track the same set of folders.
+// Folder paths use the same pruned walk as the user files above, so the API
+// endpoint and the CLI scanner track the same set of folders.
 export function listWorkspaceFolders(rootDir) {
   const results = []
   const walk = (directory) => {
@@ -67,14 +66,41 @@ export function listWorkspaceFolders(rootDir) {
 /**
  * Read every tracked file and sync its header fields through the database
  * layer, so the CLI scanner and the API endpoint behave identically. The
- * database scopes writes by content hash; see scanUserFiles there.
+ * database scopes writes by content hash; see scanUserFiles there. The root
+ * resolves through the repository registry, so rows land in the repository
+ * they belong to and unknown roots are registered on first sight.
  */
-export function scanWorkspaceUserFiles({ rootDir, database }) {
-  const paths = listWorkspaceUserFiles(rootDir)
+export function scanWorkspaceUserFiles({ rootDir, database, repositoryId } = {}) {
+  const root = resolve(rootDir)
+  const repository = repositoryId !== undefined
+    ? database.getRepository(repositoryId)
+    : database.ensureRepository(root).repository
+  if (!repository) {
+    throw new Error(`Unknown repository id: ${repositoryId}.`)
+  }
+  const paths = listWorkspaceUserFiles(root)
   const files = paths.map((path) => ({
     path,
-    content: readFileSync(join(rootDir, path), 'utf8')
+    content: readFileSync(join(root, path), 'utf8')
   }))
-  const result = database.scanUserFiles(files)
-  return { ...result, paths }
+  const result = database.scanUserFiles(files, { repositoryId: repository.id })
+  return { ...result, paths, repositoryId: repository.id }
+}
+
+/**
+ * Register the folders of one repository root, mirroring the user-file scan
+ * above: the root resolves through the registry and rows are scoped per
+ * repository.
+ */
+export function scanWorkspaceFolders({ rootDir, database, repositoryId } = {}) {
+  const root = resolve(rootDir)
+  const repository = repositoryId !== undefined
+    ? database.getRepository(repositoryId)
+    : database.ensureRepository(root).repository
+  if (!repository) {
+    throw new Error(`Unknown repository id: ${repositoryId}.`)
+  }
+  const paths = listWorkspaceFolders(root)
+  const result = database.scanFolders(paths, { repositoryId: repository.id })
+  return { ...result, paths, repositoryId: repository.id }
 }

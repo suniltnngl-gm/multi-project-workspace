@@ -177,7 +177,9 @@ print_help() {
   printf '  %-24s %s\n' 'restart' 'Stop, then start all services'
   printf '  %-24s %s\n' 'status' 'Show tool versions and service port state'
   printf '\n%sUser files%s\n' "$C_BOLD" "$C_RESET"
-  printf '  %-24s %s\n' 'files scan' 'Scan user files and sync header fields'
+  printf '  %-24s %s\n' 'repos list' 'List registered repository roots'
+  printf '  %-24s %s\n' 'repos add <path>' 'Register a repository root for tracking'
+  printf '  %-24s %s\n' 'files scan' 'Scan user files of every repository and sync headers'
   printf '  %-24s %s\n' 'files list' 'List centrally tracked user files'
   printf '  %-24s %s\n' 'files check' 'Verify every user file is tracked'
   printf '  %-24s %s\n' 'folders scan' 'Scan and register folders in SQLite'
@@ -346,20 +348,23 @@ case "$command_name" in
     subcommand="${2:-scan}"
     case "$subcommand" in
       scan)
-        require_uv
-        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_git_context.py" scan --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        require_npm
+        shift 2 || true
+        run_with_env node "$ROOT_DIR/scripts/scan-git-context.mjs" scan "$@"
         ;;
       list)
-        require_uv
-        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_git_context.py" list --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        require_npm
+        shift 2 || true
+        run_with_env node "$ROOT_DIR/scripts/scan-git-context.mjs" list "$@"
         ;;
       check)
-        require_uv
-        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_git_context.py" check --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        require_npm
+        shift 2 || true
+        run_with_env node "$ROOT_DIR/scripts/scan-git-context.mjs" check "$@"
         ;;
       *)
         error "Unknown git-context subcommand: $subcommand"
-        printf 'Usage: ./workspace git-context [scan|list|check]\n' >&2
+        printf 'Usage: ./workspace git-context [scan|list|check] [--repo NAME]\n' >&2
         exit 2
         ;;
     esac
@@ -615,20 +620,43 @@ PY
     subcommand="${2:-scan}"
     case "$subcommand" in
       scan)
-        require_uv
-        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_folders.py" scan --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        require_npm
+        shift 2 || true
+        run_with_env node "$ROOT_DIR/scripts/scan-folders.mjs" scan "$@"
         ;;
       list)
-        require_uv
-        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_folders.py" list --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        require_npm
+        shift 2 || true
+        run_with_env node "$ROOT_DIR/scripts/scan-folders.mjs" list "$@"
         ;;
       check)
-        require_uv
-        exec "$UV" run --project apps/python python "$ROOT_DIR/scripts/scan_folders.py" check --database "${DATABASE_PATH:-$ROOT_DIR/apps/api/data/workspace.sqlite}"
+        require_npm
+        shift 2 || true
+        run_with_env node "$ROOT_DIR/scripts/scan-folders.mjs" check "$@"
         ;;
       *)
         error "Unknown folders subcommand: $subcommand"
-        printf 'Usage: ./workspace folders [scan|list|check]\n' >&2
+        printf 'Usage: ./workspace folders [scan|list|check] [--repo NAME]\n' >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  repos)
+    subcommand="${2:-list}"
+    case "$subcommand" in
+      list)
+        require_npm
+        shift 2 || true
+        run_with_env node "$ROOT_DIR/scripts/repos.mjs" list
+        ;;
+      add)
+        require_npm
+        shift 2 || true
+        run_with_env node "$ROOT_DIR/scripts/repos.mjs" add "$@"
+        ;;
+      *)
+        error "Unknown repos subcommand: $subcommand"
+        printf 'Usage: ./workspace repos [list|add <path> [--name NAME]]\n' >&2
         exit 2
         ;;
     esac
@@ -653,14 +681,14 @@ PY
         ;;
       *)
         error "Unknown files subcommand: $subcommand"
-        printf 'Usage: ./workspace files [scan|list|check]\n' >&2
+        printf 'Usage: ./workspace files [scan|list|check] [--repo NAME]\n' >&2
         exit 2
         ;;
     esac
     ;;
   tracks)
     info 'Tracking domains:'
-    printf '  tasks, user_files, folders, git_worktrees, tools, environments\n'
+    printf '  tasks, repositories, user_files, folders, git_worktrees, tools, environments\n'
     info 'Use ./workspace <domain> scan|list|check for each domain.'
     ;;
   self-check)

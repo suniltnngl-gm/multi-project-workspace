@@ -1,6 +1,7 @@
 import express from 'express'
 import { execFileSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
+import { resolve, sep } from 'node:path'
 import { createResourceMonitor } from './resourceMonitor.js'
 import { createAdaptiveCpuLimit } from './adaptiveCpuLimit.js'
 import { buildTaskPrompt } from './localAiPrompt.js'
@@ -10,7 +11,7 @@ import { createModelClient } from './modelClient.js'
 import { createTaskJobStore } from './taskJobStore.js'
 import { createModelMetrics } from './modelMetrics.js'
 import { createModelBudget } from './modelBudget.js'
-import { scanWorkspaceUserFiles, listWorkspaceFolders } from './workspaceScan.js'
+import { scanWorkspaceUserFiles, scanWorkspaceFolders } from './workspaceScan.js'
 import { createLocalVerifier, VerificationError } from './localVerifier.js'
 import { createOpenCodeRosterCacheFromEnv } from './opencodeDiscovery.js'
 import { createTaskWorktrees, parseWorktreePorcelain } from './taskWorktrees.js'
@@ -421,8 +422,19 @@ function validateUserFileInput(body, { partial = false } = {}) {
   }
 
   const allowedFields = new Set(['path', ...USER_FILE_TEXT_FIELDS])
+  // The repository scope is chosen at creation and never edited afterwards.
+  if (!partial) allowedFields.add('repository')
   if (Object.keys(body).some((key) => !allowedFields.has(key))) {
     return 'Request includes an unsupported user-file field.'
+  }
+
+  if (!partial && Object.hasOwn(body, 'repository')) {
+    if (typeof body.repository !== 'string' || !body.repository.trim()) {
+      return 'Repository must be a non-empty repository name.'
+    }
+    if (body.repository.trim().length > 100) {
+      return 'Repository must be at most 100 characters.'
+    }
   }
 
   if (!partial || Object.hasOwn(body, 'path')) {
@@ -457,8 +469,19 @@ function validateFolderInput(body, { partial = false } = {}) {
   }
 
   const allowedFields = new Set(['path', 'objective'])
+  // The repository scope is chosen at creation and never edited afterwards.
+  if (!partial) allowedFields.add('repository')
   if (Object.keys(body).some((key) => !allowedFields.has(key))) {
     return 'Request includes an unsupported folder field.'
+  }
+
+  if (!partial && Object.hasOwn(body, 'repository')) {
+    if (typeof body.repository !== 'string' || !body.repository.trim()) {
+      return 'Repository must be a non-empty repository name.'
+    }
+    if (body.repository.trim().length > 100) {
+      return 'Repository must be at most 100 characters.'
+    }
   }
 
   if (!partial || Object.hasOwn(body, 'path')) {
@@ -999,8 +1022,117 @@ export function createApp(database, {
     return response.status(204).end()
   })
 
+  // Repository registry: tracked rows are scoped per repository root. The
+  // API's own repository is registered lazily as the primary row whenever a
+  // default-scoped write needs one.
+  function resolveWorkspaceRoot() {
+    return execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim()
+  }
+
+  function resolvePrimaryRepository() {
+    // Repository id 1 is the primary — the API's own repository in a normal
+    // deployment, since index.js registers it at startup. A fresh database
+    // with no registered repository falls back to registering the API's
+    // workspace root on demand.
+    const primary = database.getRepository(1)
+    if (primary) return primary
+    try {
+      return database.ensureRepository(resolveWorkspaceRoot()).repository
+    } catch {
+      return null
+    }
+  }
+
+  // Nested or containing roots would double-track every shared file, so a
+  // root may only be registered when it is disjoint from all known roots.
+  function repositoryOverlap(root, repositories) {
+    const withSeparator = (path) => (path.endsWith(sep) ? path : path + sep)
+    return repositories.some((repository) => {
+      const other = repository.rootPath
+      return root === other ||
+        root.startsWith(withSeparator(other)) ||
+        other.startsWith(withSeparator(root))
+    })
+  }
+
+  function registerScannableRoot(candidate) {
+    const root = resolve(String(candidate))
+    const existing = database.getRepositoryByRoot(root)
+    if (existing) return { repository: existing }
+    if (!existsSync(root) || !statSync(root).isDirectory()) {
+      return {
+        error: { status: 400, body: { error: 'Repository root must be an existing directory.' } }
+      }
+    }
+    if (repositoryOverlap(root, database.listRepositories())) {
+      return {
+        error: { status: 409, body: { error: 'Repository root overlaps an existing repository.' } }
+      }
+    }
+    return { repository: database.ensureRepository(root).repository }
+  }
+
+  app.get('/api/repositories', (_request, response) => {
+    response.json(database.listRepositories())
+  })
+
+  app.get('/api/repositories/:id', (request, response) => {
+    const id = parseId(request.params.id)
+    if (id === null) {
+      return response.status(400).json({ error: 'Repository ID must be a positive integer.' })
+    }
+    const repository = database.getRepository(id)
+    if (!repository) return response.status(404).json({ error: 'Repository not found.' })
+    return response.json(repository)
+  })
+
+  app.post('/api/repositories', (request, response) => {
+    const body = request.body
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return response.status(400).json({ error: 'Request body must be a JSON object.' })
+    }
+    if (typeof body.root_path !== 'string' || !body.root_path.trim()) {
+      return response.status(400).json({ error: 'Repository root must be a non-empty path.' })
+    }
+    if (body.root_path.trim().length > 500) {
+      return response.status(400).json({ error: 'Repository root must be at most 500 characters.' })
+    }
+    if (
+      body.name !== undefined &&
+      (typeof body.name !== 'string' || !body.name.trim() || body.name.trim().length > 100)
+    ) {
+      return response.status(400).json({ error: 'Repository name must be a non-empty value of at most 100 characters.' })
+    }
+    const root = resolve(body.root_path.trim())
+    if (!existsSync(root) || !statSync(root).isDirectory()) {
+      return response.status(400).json({ error: 'Repository root must be an existing directory.' })
+    }
+    if (database.getRepositoryByRoot(root)) {
+      return response.status(409).json({ error: 'This repository root is already registered.' })
+    }
+    if (repositoryOverlap(root, database.listRepositories())) {
+      return response.status(409).json({ error: 'Repository root overlaps an existing repository.' })
+    }
+    const name = body.name !== undefined ? body.name.trim() : undefined
+    if (name !== undefined && database.getRepositoryByName(name)) {
+      return response.status(409).json({ error: 'A repository already uses this name.' })
+    }
+    const { repository } = database.ensureRepository(root, name !== undefined ? { name } : {})
+    return response.status(201).json(repository)
+  })
+
   app.get('/api/files', (request, response) => {
-    response.json(database.listUserFiles({ search: request.query.search || '' }))
+    let repositoryId
+    if (request.query.repository) {
+      const repository = database.getRepositoryByName(String(request.query.repository))
+      if (!repository) return response.status(404).json({ error: 'Repository not found.' })
+      repositoryId = repository.id
+    }
+    response.json(database.listUserFiles({ search: request.query.search || '', repositoryId }))
   })
 
   app.get('/api/files/:id', (request, response) => {
@@ -1015,12 +1147,22 @@ export function createApp(database, {
     const validationError = validateUserFileInput(request.body)
     if (validationError) return response.status(400).json({ error: validationError })
 
-    if (database.getUserFileByPath(request.body.path.trim())) {
+    let repository
+    if (request.body.repository !== undefined) {
+      repository = database.getRepositoryByName(request.body.repository.trim())
+      if (!repository) return response.status(404).json({ error: 'Repository not found.' })
+    } else {
+      repository = resolvePrimaryRepository()
+    }
+    const repositoryId = repository ? repository.id : 1
+
+    if (database.getUserFileByPath(request.body.path.trim(), repositoryId)) {
       return response.status(409).json({ error: 'A tracked user file already uses this path.' })
     }
 
     const file = database.createUserFile({
       path: request.body.path.trim(),
+      repositoryId,
       ...Object.fromEntries(
         USER_FILE_TEXT_FIELDS.map((field) => [
           field,
@@ -1056,20 +1198,34 @@ export function createApp(database, {
     return response.status(204).end()
   })
 
-  app.post('/api/files/scan', (_request, response) => {
+  app.post('/api/files/scan', (request, response) => {
+    const candidate = typeof request.body?.root === 'string' && request.body.root.trim()
+      ? request.body.root.trim()
+      : resolveWorkspaceRoot()
+    const registered = registerScannableRoot(candidate)
+    if (registered.error) {
+      return response.status(registered.error.status).json(registered.error.body)
+    }
     try {
-      const root = execFileSync('git', ['rev-parse', '--show-toplevel'], {
-        cwd: process.cwd(),
-        encoding: 'utf8'
-      }).trim()
-      response.json(scanWorkspaceUserFiles({ rootDir: root, database }))
+      response.json(scanWorkspaceUserFiles({
+        rootDir: registered.repository.rootPath,
+        database,
+        repositoryId: registered.repository.id
+      }))
     } catch (error) {
       response.status(500).json({ error: 'Could not scan user files.' })
     }
   })
 
-  app.get('/api/folders', (_request, response) => {
-    response.json(database.listFolders())
+  app.get('/api/folders', (request, response) => {
+    let repositoryId
+    if (request.query.repository) {
+      const repository = database.getRepositoryByName(String(request.query.repository))
+      if (!repository) return response.status(404).json({ error: 'Repository not found.' })
+      repositoryId = repository.id
+    }
+    const folders = database.listFolders()
+    response.json(repositoryId === undefined ? folders : folders.filter((folder) => folder.repositoryId === repositoryId))
   })
 
   app.get('/api/folders/:id', (request, response) => {
@@ -1084,13 +1240,23 @@ export function createApp(database, {
     const validationError = validateFolderInput(request.body)
     if (validationError) return response.status(400).json({ error: validationError })
 
-    if (database.getFolderByPath(request.body.path.trim())) {
+    let repository
+    if (request.body.repository !== undefined) {
+      repository = database.getRepositoryByName(request.body.repository.trim())
+      if (!repository) return response.status(404).json({ error: 'Repository not found.' })
+    } else {
+      repository = resolvePrimaryRepository()
+    }
+    const repositoryId = repository ? repository.id : 1
+
+    if (database.getFolderByPath(request.body.path.trim(), repositoryId)) {
       return response.status(409).json({ error: 'A tracked folder already uses this path.' })
     }
 
     const folder = database.createFolder({
       path: request.body.path.trim(),
-      objective: (request.body.objective ?? '').trim()
+      objective: (request.body.objective ?? '').trim(),
+      repositoryId
     })
     return response.status(201).json(folder)
   })
@@ -1118,15 +1284,20 @@ export function createApp(database, {
     return response.status(204).end()
   })
 
-  app.post('/api/folders/scan', (_request, response) => {
+  app.post('/api/folders/scan', (request, response) => {
+    const candidate = typeof request.body?.root === 'string' && request.body.root.trim()
+      ? request.body.root.trim()
+      : resolveWorkspaceRoot()
+    const registered = registerScannableRoot(candidate)
+    if (registered.error) {
+      return response.status(registered.error.status).json(registered.error.body)
+    }
     try {
-      const root = execFileSync('git', ['rev-parse', '--show-toplevel'], {
-        cwd: process.cwd(),
-        encoding: 'utf8'
-      }).trim()
-      const paths = listWorkspaceFolders(root)
-      const result = database.scanFolders(paths)
-      response.json({ ...result, paths })
+      response.json(scanWorkspaceFolders({
+        rootDir: registered.repository.rootPath,
+        database,
+        repositoryId: registered.repository.id
+      }))
     } catch (error) {
       response.status(500).json({ error: 'Could not scan folders.' })
     }

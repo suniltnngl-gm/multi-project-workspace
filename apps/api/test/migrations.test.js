@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { after, before, test } from 'node:test'
 import Database from 'better-sqlite3'
 import { createDatabase } from '../src/database.js'
@@ -18,9 +18,10 @@ after(async () => {
 
 // Recreates the shape of a pre-tracking database: tasks and task_events before
 // the structured planning columns, user files with the retired work_* columns,
-// folders with important_context, tools without outcome counters, ai_jobs
-// before retry_after/backend/task_id, and the legacy ai_budget daily counters.
-function createLegacyDatabase(databasePath) {
+// folders with important_context, git worktrees before the repository link,
+// tools without outcome counters, ai_jobs before retry_after/backend/task_id,
+// and the legacy ai_budget daily counters.
+function createLegacyDatabase(databasePath, legacyRoot = '/legacy/workspace-root') {
   const connection = new Database(databasePath)
   connection.exec(`
     CREATE TABLE tasks (
@@ -82,6 +83,16 @@ function createLegacyDatabase(databasePath) {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE git_worktrees (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      repository_root TEXT NOT NULL,
+      worktree_path TEXT NOT NULL UNIQUE,
+      branch TEXT NOT NULL DEFAULT '',
+      head_commit TEXT NOT NULL DEFAULT '',
+      remote_url TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
     CREATE TABLE tools (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE,
@@ -119,6 +130,9 @@ function createLegacyDatabase(databasePath) {
   connection.prepare(
     'INSERT INTO folders (path, objective, important_context, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
   ).run('legacy-folder', 'Legacy folder objective', 'Legacy folder context', '2026-01-06T00:00:00.000Z', '2026-01-06T00:00:00.000Z')
+  connection.prepare(
+    'INSERT INTO git_worktrees (repository_root, worktree_path, branch, head_commit, remote_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run(legacyRoot, '/legacy/worktree', 'legacy-branch', 'legacy-commit', 'https://example.com/legacy.git', '2026-01-08T00:00:00.000Z', '2026-01-08T00:00:00.000Z')
   connection.prepare(
     'INSERT INTO tools (name, command, version, available, checked_at) VALUES (?, ?, ?, ?, ?)'
   ).run('git', 'git', 'git version 2.39.0', 1, '2026-01-07T00:00:00.000Z')
@@ -158,6 +172,16 @@ test('legacy tracking databases are migrated without losing data', () => {
   const folder = migrated.getFolderByPath('legacy-folder')
   assert.equal(folder.objective, 'Legacy folder objective')
 
+  // The legacy rows associate with a fallback primary repository, so writes
+  // keep working after the migration.
+  assert.ok(migrated.getRepository(1), 'a fallback primary repository exists')
+  assert.equal(migrated.createUserFile({ path: 'docs/after-upgrade.md' }).repositoryId, 1)
+  const legacyWorktrees = migrated.listGitWorktrees()
+  assert.equal(legacyWorktrees.length, 1)
+  assert.equal(legacyWorktrees[0].repositoryId, 1)
+  assert.equal(legacyWorktrees[0].worktreePath, '/legacy/worktree')
+  assert.equal(legacyWorktrees[0].branch, 'legacy-branch')
+
   // Legacy user-file rows gain a creation event without losing fields.
   assert.equal(file.contentHash, null)
   const legacyFileActivity = migrated.getUserFileDetail(file.id).activity
@@ -195,10 +219,15 @@ test('legacy tracking databases are migrated without losing data', () => {
     assert.ok(userFileColumns.includes(kept), `user_files lost ${kept}`)
   }
   assert.ok(userFileColumns.includes('content_hash'), 'user_files is missing content_hash')
+  assert.ok(userFileColumns.includes('repository_id'), 'user_files is missing repository_id')
 
   const folderColumns = tableColumns(inspection, 'folders')
   assert.ok(!folderColumns.includes('important_context'), 'folders still has important_context')
   assert.ok(folderColumns.includes('objective'))
+  assert.ok(folderColumns.includes('repository_id'), 'folders is missing repository_id')
+
+  const worktreeColumns = tableColumns(inspection, 'git_worktrees')
+  assert.ok(worktreeColumns.includes('repository_id'), 'git_worktrees is missing repository_id')
 
   const toolColumns = tableColumns(inspection, 'tools')
   assert.ok(toolColumns.includes('success_count'))
@@ -234,6 +263,54 @@ test('legacy tracking databases are migrated without losing data', () => {
   assert.equal(job.phase, 'finished')
   assert.equal(job.model, 'legacy-model')
   inspection.close()
+})
+
+test('a legacy database opened with rootDir backfills onto the registered primary', () => {
+  const databasePath = join(directory, 'legacy-rootdir.sqlite')
+  createLegacyDatabase(databasePath, directory)
+
+  const migrated = createDatabase(databasePath, { rootDir: directory })
+
+  // The caller's root registers as the primary repository before the
+  // association backfill, so pre-scoping rows point at it.
+  const primary = migrated.getRepository(1)
+  assert.ok(primary, 'repository id 1 exists')
+  assert.equal(primary.rootPath, directory)
+  assert.equal(primary.name, basename(directory))
+
+  const file = migrated.getUserFileByPath('docs/legacy.md')
+  assert.equal(file.id, 1, 'the rebuild preserves row ids')
+  assert.equal(file.repositoryId, 1)
+  assert.equal(file.repository, basename(directory))
+  assert.equal(file.objective, 'Legacy objective')
+
+  const folder = migrated.getFolderByPath('legacy-folder')
+  assert.equal(folder.id, 1)
+  assert.equal(folder.repositoryId, 1)
+
+  // The worktree row backfills by matching its recorded repository root.
+  const worktrees = migrated.listGitWorktrees()
+  assert.equal(worktrees.length, 1)
+  assert.equal(worktrees[0].repositoryId, 1)
+  assert.equal(worktrees[0].repository, basename(directory))
+
+  // The user_file_events trail survives the table rebuild.
+  const activity = migrated.getUserFileDetail(1).activity
+  assert.equal(activity.length, 1)
+  assert.equal(activity[0].action, 'created')
+  assert.equal(activity[0].createdAt, '2026-01-05T00:00:00.000Z')
+
+  // Writes keep working because the association target exists.
+  assert.equal(migrated.createUserFile({ path: 'docs/after-rootdir.md' }).repositoryId, 1)
+  migrated.close()
+
+  // Reopening with the same rootDir does not register it twice.
+  const reopened = createDatabase(databasePath, { rootDir: directory })
+  assert.equal(reopened.listRepositories().length, 1)
+  assert.equal(reopened.getUserFileByPath('docs/legacy.md').id, 1)
+  assert.equal(reopened.getFolderByPath('legacy-folder').id, 1)
+  assert.equal(reopened.listGitWorktrees().length, 1)
+  reopened.close()
 })
 
 test('reopening a migrated database is idempotent', () => {

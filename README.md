@@ -49,16 +49,19 @@ Set `DATABASE_PATH` to use a different SQLite file. Set `PORT` for the Node API 
 - `DELETE /api/tasks/:id` — delete a task
 - `POST /api/tasks/:id/worktree` — create an isolated Git worktree for a task (optional `branch` and `name` in the body), link it on the task, and register it in the git-worktrees domain; a task with a live worktree linked returns `409`, and a link whose worktree was removed by hand self-heals on the next create
 - `DELETE /api/tasks/:id/worktree` — remove the linked worktree and unlink the task; `?force=1` removes one with uncommitted changes
-- `GET /api/files` — list centrally tracked user files; supports `search`
-- `POST /api/files/scan` — scan tracked Git files and register user files, excluding vendor/transient paths
-- `POST /api/files`, `PATCH /api/files/:id`, `DELETE /api/files/:id` — manage user-file metadata
+- `GET /api/repositories` — list registered repository roots with their file, folder, and worktree counts
+- `GET /api/repositories/:id` — one registered repository
+- `POST /api/repositories` — register a repository root (`root_path`, optional `name`); the root must be an existing directory, and names, duplicate roots, and roots nested inside or containing a registered root are rejected with `409` so scans never double-track a path
+- `GET /api/files` — list centrally tracked user files; supports `search` and a `repository` name filter
+- `POST /api/files/scan` — scan tracked Git files and register user files, excluding vendor/transient paths; accepts an optional `root` in the body to scan another registered (or new) repository root, defaulting to the API's own repository
+- `POST /api/files`, `PATCH /api/files/:id`, `DELETE /api/files/:id` — manage user-file metadata; creation accepts an optional `repository` name for the scoping check and insert (create-only, like `source_job_id` on tasks)
 - `GET /api/verify` — list the allowlisted local checks with their commands and timeouts
 - `POST /api/verify` — run every allowlisted check, or a subset via `{ "checks": ["lint", "api-tests"] }`; each check runs in a bounded subprocess and returns structured pass/fail/timeout results with captured output
 - `GET /api/ai/sessions`, `POST /api/ai/sessions`, `GET /api/ai/sessions/:id`, `POST /api/ai/sessions/:id/messages`, `POST /api/ai/sessions/:id/compact`, `DELETE /api/ai/sessions/:id` — manage AI chat sessions, messages, and compacted summaries
 - `GET /api/prompt-templates`, `POST /api/prompt-templates`, `GET /api/prompt-templates/:id`, `PATCH /api/prompt-templates/:id`, `DELETE /api/prompt-templates/:id` — manage reusable prompt templates; templates render `{{variable}}` placeholders from a request's `variables` object
 - `POST /api/ai/improve` — generate AI improvement suggestions from workspace tracking summary; the run is recorded as an AI job (model, backend, budget, cooldown, and job endpoints behave like every other model call) and the response includes its `jobId`; optional `create_tasks` creates task entries stamped with that job as their drafting origin
 - `POST /api/ai/complete` — direct AI chat: `prompt`/`messages` plus optional `system`, `model`, `max_tokens`, `variables`, `prompt_template_id`, `session_id`, and `task_id`; returns `{ content, model, backend, jobId }`; sessions persist the exchange and jobs keep provenance
-- `GET /api/folders`, `POST /api/folders/scan`, `POST /api/folders`, `PATCH /api/folders/:id`, `DELETE /api/folders/:id` — manage folder-level objectives
+- `GET /api/folders`, `POST /api/folders/scan` (optional `root` in the body), `POST /api/folders`, `PATCH /api/folders/:id`, `DELETE /api/folders/:id` — manage folder-level objectives; `GET` and creation accept the same `repository` scoping as user files
 - `GET /api/models` — list the model registry, including in-process request/failure metrics and any configured quota budget
 - `GET /api/local-ai/status` — report each model's live state, session state, resource limits, and metrics
 - `POST /api/local-ai/refine-task` — draft a task with an auto-selected or explicitly named model; the response includes the drafting run's `jobId`, which can be passed back as `source_job_id` when creating the task to record its provenance; pass `task_id` to link the run to an existing task
@@ -78,13 +81,16 @@ Every draft is also recorded in `ai_jobs`, including synchronous local and serve
 The workspace tracks more than tasks:
 
 - Tasks: workflow, priority, project, type, acceptance criteria, planning fields, and work state.
+- Repositories: registered workspace roots that scope every other tracking domain.
 - User files: objective, requirements, decisions, relevant files, and important context, synced from each file's header comments.
 - Folders: folder-level objectives.
-- Git worktrees: repository root, worktree path, branch, HEAD, and remote URL.
+- Git worktrees: repository, worktree path, branch, HEAD, and remote URL.
 - Tools: availability and versions for core workflow tools.
 - Environments: OS, release, architecture, and runtime versions.
 
 Use `./workspace tracks`, `./workspace status`, and `<domain> scan|list|check` commands to inspect or refresh these domains. Tracking updates are scoped to touched surfaces, preserve history, and complement Git.
+
+File, folder, and worktree tracking is scoped per repository root. The workspace's own repository registers itself as the primary root (id `1`, named after the root directory), and additional roots are registered with `./workspace repos add <path> [--name NAME]` or `POST /api/repositories`; `./workspace repos list` shows every root with its counts. A root that is nested inside or contains a registered root is rejected, so the same file is never tracked twice. The `files`, `folders`, and `git-context` scan commands default to every registered root that still exists on disk (a missing root is skipped with a warning), and `--repo NAME` scopes one; their list and check commands accept the same flag, and list output prints `name/path` so rows from different roots are distinguishable. Two roots may track the same relative path as separate rows. Removing a root from disk leaves its rows for manual cleanup; repository deregistration is not part of this surface yet.
 
 User-file fields sync from the files themselves. A tracked file's leading comment block can carry `# Objective:`, `# Requirements:`, `# Decisions:`, `# Relevant Files:`, and `# Important Context:` lines (`//` comments in JavaScript). `./workspace files scan` and the board's **Scan user files** button parse that block and write the values into the file's tracked fields. The sync is scoped by a content hash: untouched files are skipped entirely, and a changed file only writes the fields whose header value changed. Header syncs record `synced` events and manual edits record `updated` events in the file's activity trail (`GET /api/files/:id` returns it), so history is preserved. Removing a header line stops syncing that field rather than erasing the last value, and `# Work State:` lines are informational only — work state lives on tasks, not files. `./workspace install` also places a post-commit hook in the repository that runs the same scan after each commit, so header edits sync without a manual step (an existing foreign post-commit hook is left untouched). Folder objectives have no header source and remain manual edits.
 
