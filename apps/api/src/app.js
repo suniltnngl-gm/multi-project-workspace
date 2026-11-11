@@ -1,7 +1,7 @@
 // Objective: Compose the API application from per-domain route groups behind one public entry.
-// Requirements: Keep the createApp signature and behavior identical so index.js and the tests never know about the split; resolve the verifier and task worktrees lazily so the API works from any cwd inside the repository; turn every mutating request into a tool run.
-// Decisions: The shared context (scheduler, job store, metrics, budget) is built here and handed to each group; the repository scope is built once and shared by repositories, files, and folders so scoping cannot drift; the JSON error handler stays with the app because it is cross-group; the request-run middleware enters an AsyncLocalStorage context so events written by async handlers stamp their own request even under concurrency, and finishes the run on response finish or close.
-// Relevant Files: apps/api/src/app.js, apps/api/src/routes/tasks.js, apps/api/src/routes/aiDrafts.js, apps/api/src/routes/repositories.js, apps/api/src/routes/runs.js
+// Requirements: Keep the createApp signature and behavior identical so index.js and the tests never know about the split; resolve the verifier, task worktrees, and MCP discovery lazily so the API works from any cwd inside the repository; turn every mutating request into a tool run.
+// Decisions: The shared context (scheduler, job store, metrics, budget) is built here and handed to each group; the repository scope is built once and shared by repositories, files, and folders so scoping cannot drift; the JSON error handler stays with the app because it is cross-group; the request-run middleware enters an AsyncLocalStorage context so events written by async handlers stamp their own request even under concurrency, and finishes the run on response finish or close; MCP discovery resolves the repository root once and passes it as the CLI cwd because the catalog is scoped to the working directory.
+// Relevant Files: apps/api/src/app.js, apps/api/src/routes/tasks.js, apps/api/src/routes/aiDrafts.js, apps/api/src/routes/repositories.js, apps/api/src/routes/runs.js, apps/api/src/routes/mcp.js
 // Important Context: User file. The composition entry for the API server and the tests.
 // Work State: Completed: Split into routes/ group modules as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
 import express from 'express'
@@ -16,6 +16,7 @@ import { createModelMetrics } from './modelMetrics.js'
 import { createModelBudget } from './modelBudget.js'
 import { createLocalVerifier } from './localVerifier.js'
 import { createTaskWorktrees } from './taskWorktrees.js'
+import { discoverMcpCatalog } from './mcpDiscovery.js'
 import { loadWorkspaceEnv } from '../../../scripts/env.mjs'
 import { createVerifyRouter } from './routes/verify.js'
 import { createTasksRouter } from './routes/tasks.js'
@@ -30,6 +31,7 @@ import { createPromptTemplatesRouter } from './routes/promptTemplates.js'
 import { createModelsRouter } from './routes/models.js'
 import { createAiDraftsRouter } from './routes/aiDrafts.js'
 import { createRunsRouter } from './routes/runs.js'
+import { createMcpRouter } from './routes/mcp.js'
 
 loadWorkspaceEnv()
 
@@ -80,6 +82,7 @@ export function createApp(database, {
   verifier,
   opencodeRosterCache,
   taskWorktrees,
+  mcpDiscovery,
   turnCooldownMs = LOCAL_AI_TURN_COOLDOWN_MS
 } = {}) {
   const app = express()
@@ -129,6 +132,23 @@ export function createApp(database, {
     return resolvedTaskWorktrees
   }
 
+  // MCP discovery runs from the repository root because the CLI scopes its
+  // answer to the working directory, so project-configured servers are
+  // visible; the root resolves once on first scan, and tests inject a fake
+  // discovery instead of the real CLI. This runs the discovery - the route
+  // awaits its result - so an injected option is called directly.
+  let mcpRoot = null
+  const runMcpDiscovery = () => {
+    if (mcpDiscovery) return mcpDiscovery()
+    if (mcpRoot === null) {
+      mcpRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+        cwd: process.cwd(),
+        encoding: 'utf8'
+      }).trim()
+    }
+    return discoverMcpCatalog({ cwd: mcpRoot })
+  }
+
   const repositoryScope = createRepositoryScope(database)
 
   app.use(express.json({ limit: '16kb' }))
@@ -162,6 +182,7 @@ export function createApp(database, {
   app.use(createGitWorktreesRouter({ database }))
   app.use(createToolsRouter({ database }))
   app.use(createEnvironmentsRouter({ database }))
+  app.use(createMcpRouter({ database, discoverMcp: runMcpDiscovery }))
   app.use(createAiSessionsRouter({ database }))
   app.use(createPromptTemplatesRouter({ database }))
   app.use(createRunsRouter({ database }))

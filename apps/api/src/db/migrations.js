@@ -82,6 +82,35 @@ export function runMigrations(connection, { rootDir } = {}) {
     );
   `)
   connection.exec(`
+    CREATE TABLE IF NOT EXISTS mcp_servers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      title TEXT NOT NULL DEFAULT '',
+      integration_id TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT '',
+      status_error TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS mcp_resources (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      server_id INTEGER NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+      uri TEXT NOT NULL CHECK(length(trim(uri)) BETWEEN 1 AND 500),
+      name TEXT NOT NULL DEFAULT '',
+      description TEXT NOT NULL DEFAULT '',
+      mime_type TEXT NOT NULL DEFAULT '',
+      is_template INTEGER NOT NULL DEFAULT 0 CHECK(is_template IN (0, 1)),
+      first_seen_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      UNIQUE(server_id, uri)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mcp_resources_server
+      ON mcp_resources(server_id, last_seen_at DESC, id DESC);
+  `)
+  connection.exec(`
     CREATE TABLE IF NOT EXISTS folders (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       repository_id INTEGER NOT NULL DEFAULT 1 REFERENCES repositories(id),

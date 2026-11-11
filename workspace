@@ -194,6 +194,9 @@ print_help() {
   printf '  %-24s %s\n' 'environment scan' 'Scan and track runtime environment'
   printf '  %-24s %s\n' 'environment list' 'List tracked environment facts'
   printf '  %-24s %s\n' 'environment check' 'Verify environment facts are populated'
+  printf '  %-24s %s\n' 'mcp scan' 'Scan and track MCP servers and resources'
+  printf '  %-24s %s\n' 'mcp list' 'List tracked MCP servers and resources'
+  printf '  %-24s %s\n' 'mcp check' 'Verify discovered MCP entries are tracked'
   printf '  %-24s %s\n' 'tracks' 'List available tracking domains'
   printf '  %-24s %s\n' '--new-env "KEY=value"' 'Add or update one .env value'
   printf '  %-24s %s\n' 'env set KEY=value ...' 'Add or update .env values'
@@ -686,9 +689,34 @@ PY
         ;;
     esac
     ;;
+  mcp)
+    subcommand="${2:-scan}"
+    case "$subcommand" in
+      scan)
+        require_npm
+        shift 2 || true
+        run_with_env node "$ROOT_DIR/scripts/scan-mcp.mjs" scan "$@"
+        ;;
+      list)
+        require_npm
+        shift 2 || true
+        run_with_env node "$ROOT_DIR/scripts/scan-mcp.mjs" list "$@"
+        ;;
+      check)
+        require_npm
+        shift 2 || true
+        run_with_env node "$ROOT_DIR/scripts/scan-mcp.mjs" check "$@"
+        ;;
+      *)
+        error "Unknown mcp subcommand: $subcommand"
+        printf 'Usage: ./workspace mcp [scan|list|check] [--database PATH] [--quiet]\n' >&2
+        exit 2
+        ;;
+    esac
+    ;;
   tracks)
     info 'Tracking domains:'
-    printf '  tasks, repositories, user_files, folders, git_worktrees, tools, environments\n'
+    printf '  tasks, repositories, user_files, folders, git_worktrees, tools, environments, mcp_servers, mcp_resources\n'
     info 'Use ./workspace <domain> scan|list|check for each domain.'
     ;;
   self-check)
