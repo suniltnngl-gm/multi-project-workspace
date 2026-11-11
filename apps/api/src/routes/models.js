@@ -1,0 +1,83 @@
+// Objective: Own the model roster routes: the callable model list with budgets, the OpenCode roster, and local AI status.
+// Requirements: Budgets attach without replacing model status; roster discovery is cached and never runs the CLI in tests.
+// Decisions: The OpenCode roster cache resolves lazily inside this group because only the opencode route consumes it; withBudget stays here for the same reason.
+// Relevant Files: apps/api/src/routes/models.js, apps/api/src/modelRegistry.js, apps/api/src/opencodeDiscovery.js, apps/api/src/app.js
+// Important Context: User file. Route group for /api/models, /api/models/opencode, and /api/local-ai/status.
+// Work State: Completed: Extracted from app.js as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
+import { Router } from 'express'
+import { publicModelDefinition } from '../modelRegistry.js'
+import { createOpenCodeRosterCacheFromEnv } from '../opencodeDiscovery.js'
+
+export function createModelsRouter({
+  models,
+  modelMetrics,
+  modelBudget,
+  scheduler,
+  opencodeRosterCache
+}) {
+  const router = Router()
+
+  function withBudget(status) {
+    const budget = modelBudget.snapshot(status.id)
+    return budget ? { ...status, budget } : status
+  }
+
+  router.get('/api/models', (_request, response) => {
+    response.json(models.map((model) => withBudget({
+      ...publicModelDefinition(model),
+      ...(modelMetrics.snapshot(model.id) || {})
+    })))
+  })
+
+  // The OpenCode roster is discovered from the local CLI on demand and cached;
+  // tests inject a cache so the real CLI never runs in the suite.
+  let resolvedOpenCodeRosterCache = null
+  const getOpenCodeRosterCache = () => {
+    if (opencodeRosterCache) return opencodeRosterCache
+    if (resolvedOpenCodeRosterCache === null) {
+      resolvedOpenCodeRosterCache = createOpenCodeRosterCacheFromEnv()
+    }
+    return resolvedOpenCodeRosterCache
+  }
+
+  router.get('/api/models/opencode', async (request, response) => {
+    const slot = models.find((model) => model.id === 'opencode')
+    if (!slot) {
+      return response.status(404).json({ error: 'The OpenCode backend is not registered.' })
+    }
+    const refresh = ['1', 'true', 'yes'].includes(String(request.query.refresh ?? '').toLowerCase())
+    let roster
+    try {
+      roster = await getOpenCodeRosterCache().get({ refresh })
+    } catch (error) {
+      return response.status(500).json({ error: 'Could not read the OpenCode model roster.' })
+    }
+    const model = slot.cli?.model ?? null
+    return response.json({
+      model,
+      inRoster: roster.ok ? roster.models.includes(model) : null,
+      availableModels: roster.models,
+      count: roster.models.length,
+      fetchedAt: roster.fetchedAt,
+      ...(roster.ok ? {} : { error: roster.error })
+    })
+  })
+
+  router.get('/api/local-ai/status', async (_request, response) => {
+    try {
+      const status = await scheduler.status()
+      return response.json({
+        ...status,
+        models: status.models.map(withBudget)
+      })
+    } catch (error) {
+      console.error('Local AI status failed:', error)
+      return response.json({
+        state: 'unavailable',
+        error: 'Local AI status is unavailable.'
+      })
+    }
+  })
+
+  return router
+}
