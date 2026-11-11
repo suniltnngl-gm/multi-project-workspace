@@ -50,6 +50,8 @@ Set `DATABASE_PATH` to use a different SQLite file. Set `PORT` for the Node API 
 - `GET /api/files` — list centrally tracked user files; supports `search`
 - `POST /api/files/scan` — scan tracked Git files and register user files, excluding vendor/transient paths
 - `POST /api/files`, `PATCH /api/files/:id`, `DELETE /api/files/:id` — manage user-file metadata
+- `GET /api/verify` — list the allowlisted local checks with their commands and timeouts
+- `POST /api/verify` — run every allowlisted check, or a subset via `{ "checks": ["lint", "api-tests"] }`; each check runs in a bounded subprocess and returns structured pass/fail/timeout results with captured output
 - `GET /api/ai/sessions`, `POST /api/ai/sessions`, `GET /api/ai/sessions/:id`, `POST /api/ai/sessions/:id/messages`, `POST /api/ai/sessions/:id/compact`, `DELETE /api/ai/sessions/:id` — manage AI chat sessions, messages, and compacted summaries
 - `GET /api/prompt-templates`, `POST /api/prompt-templates`, `GET /api/prompt-templates/:id`, `PATCH /api/prompt-templates/:id`, `DELETE /api/prompt-templates/:id` — manage reusable prompt templates; templates render `{{variable}}` placeholders from a request's `variables` object
 - `POST /api/ai/improve` — generate AI improvement suggestions from workspace tracking summary; optional `create_tasks` creates task entries

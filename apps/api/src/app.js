@@ -10,6 +10,7 @@ import { createTaskJobStore } from './taskJobStore.js'
 import { createModelMetrics } from './modelMetrics.js'
 import { createModelBudget } from './modelBudget.js'
 import { scanWorkspaceUserFiles, listWorkspaceFolders } from './workspaceScan.js'
+import { createLocalVerifier, VerificationError } from './localVerifier.js'
 import { loadWorkspaceEnv } from '../../../scripts/env.mjs'
 
 loadWorkspaceEnv()
@@ -509,6 +510,7 @@ export function createApp(database, {
     repository: database,
     profiles: modelQuotaProfiles(models)
   }),
+  verifier,
   turnCooldownMs = LOCAL_AI_TURN_COOLDOWN_MS
 } = {}) {
   const app = express()
@@ -527,10 +529,60 @@ export function createApp(database, {
     getModelMetrics: modelMetrics.snapshot
   })
   const jobStore = createTaskJobStore({ repository: database })
+
+  // The local verifier resolves the repository root on first use, mirroring
+  // the scan endpoints, so the API works from any cwd inside the repository.
+  let resolvedVerifier = null
+  const getVerifier = () => {
+    if (verifier) return verifier
+    if (resolvedVerifier === null) {
+      const root = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+        cwd: process.cwd(),
+        encoding: 'utf8'
+      }).trim()
+      resolvedVerifier = createLocalVerifier({ rootDir: root })
+    }
+    return resolvedVerifier
+  }
   app.use(express.json({ limit: '16kb' }))
 
   app.get('/health', (_request, response) => {
     response.json({ status: 'ok', service: 'api', database: 'sqlite' })
+  })
+
+  app.get('/api/verify', (_request, response) => {
+    let verifierForRequest
+    try {
+      verifierForRequest = getVerifier()
+    } catch (error) {
+      return response.status(500).json({ error: 'Could not resolve the repository for local checks.' })
+    }
+    return response.json({ checks: verifierForRequest.listChecks() })
+  })
+
+  app.post('/api/verify', async (request, response) => {
+    let verifierForRequest
+    try {
+      verifierForRequest = getVerifier()
+    } catch (error) {
+      return response.status(500).json({ error: 'Could not resolve the repository for local checks.' })
+    }
+    const requested = request.body?.checks
+    if (requested !== undefined && (
+      !Array.isArray(requested) ||
+      requested.length === 0 ||
+      requested.some((id) => typeof id !== 'string' || id.length === 0)
+    )) {
+      return response.status(400).json({ error: 'checks must be a non-empty array of check ids.' })
+    }
+    try {
+      return response.json(await verifierForRequest.runChecks(requested))
+    } catch (error) {
+      if (error instanceof VerificationError) {
+        return response.status(400).json({ error: error.message })
+      }
+      return response.status(500).json({ error: 'Could not run local checks.' })
+    }
   })
 
   app.get('/api/tasks', (request, response) => {
