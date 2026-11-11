@@ -229,6 +229,26 @@ export function runMigrations(connection, { rootDir } = {}) {
 
     CREATE INDEX IF NOT EXISTS idx_tool_runs_created
       ON tool_runs(created_at DESC, id DESC);
+
+    CREATE TABLE IF NOT EXISTS task_proposals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 200),
+      description TEXT NOT NULL DEFAULT '',
+      priority TEXT NOT NULL DEFAULT 'medium',
+      task_type TEXT NOT NULL DEFAULT 'chore',
+      project TEXT NOT NULL DEFAULT 'workspace',
+      rationale TEXT NOT NULL DEFAULT '',
+      origin_job_id TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'proposed'
+        CHECK(status IN ('proposed', 'approved', 'rejected', 'rolled_back')),
+      created_task_id INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      decided_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_task_proposals_status
+      ON task_proposals(status, created_at DESC, id DESC);
   `)
 
   // Carry the legacy daily counters into the generalized quota table. The old

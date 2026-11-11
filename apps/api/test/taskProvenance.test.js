@@ -1,6 +1,6 @@
-// Objective: Test task-to-model provenance from draft and improvement runs to created tasks.
-// Requirements: Draft responses carry jobId; source_job_id creation records origin, links the job, and 404/409s on bad references; improvement runs are jobs whose created tasks carry origin; ai runs match by task link or origin.
-// Decisions: Reuse the aiComplete fixture pattern (injected local model plus fake modelClient) so no real backend is contacted; PATCH must never set provenance fields.
+// Objective: Test task-to-model provenance from draft and improvement runs to approved tasks.
+// Requirements: Draft responses carry jobId; source_job_id creation records origin, links the job, and 404/409s on bad references; improvement runs persist proposals whose approved tasks carry origin; ai runs match by task link or origin.
+// Decisions: Reuse the aiComplete fixture pattern (injected local model plus fake modelClient) so no real backend is contacted; PATCH must never set provenance fields; the improve flow is exercised through its real decisions (re-run dedupe, approve) so origin linkage is proven end to end.
 // Relevant Files: apps/api/test/taskProvenance.test.js, apps/api/src/app.js, apps/api/src/database.js, apps/api/src/taskJobStore.js
 // Important Context: User file. The database lives in a temp directory and is shared across tests; each test builds its own app instance.
 // Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
@@ -161,18 +161,38 @@ test('task creation validates the source job reference and provenance stays immu
   })
 })
 
-test('an improvement run is a job and its created tasks carry the origin', async () => {
+test('an improvement run is a job whose approved proposals carry the origin', async () => {
   await withApp({ respond: async () => IMPROVEMENTS }, async (url) => {
-    const improve = await post(url, '/api/ai/improve', { create_tasks: true })
+    const improve = await post(url, '/api/ai/improve', {})
     assert.equal(improve.status, 200)
     const body = await improve.json()
     assert.ok(body.jobId.startsWith('job-'))
-    assert.equal(body.suggestions.length, 1)
-    assert.equal(body.created.length, 1)
-    assert.equal(body.created[0].title, 'Improve tracking')
-    assert.equal(body.created[0].origin_job_id, body.jobId)
+    assert.equal(body.proposals.length, 1)
+    assert.equal(body.skipped, 0)
+    assert.equal(body.proposals[0].title, 'Improve tracking')
+    assert.equal(body.proposals[0].status, 'proposed')
+    assert.equal(body.proposals[0].originJobId, body.jobId)
 
-    const detail = await (await fetch(`${url}/api/tasks/${body.created[0].id}`)).json()
+    // The run is a dry-run: no task exists until the proposal is approved.
+    const beforeApprove = await (await fetch(`${url}/api/tasks`)).json()
+    assert.ok(!beforeApprove.some((task) => task.title === 'Improve tracking'))
+
+    // A re-run skips titles that still have an undecided proposal.
+    const rerun = await post(url, '/api/ai/improve', {})
+    assert.equal(rerun.status, 200)
+    const rerunBody = await rerun.json()
+    assert.equal(rerunBody.proposals.length, 0)
+    assert.equal(rerunBody.skipped, 1)
+
+    const approve = await post(url, `/api/proposals/${body.proposals[0].id}/approve`, {})
+    assert.equal(approve.status, 200)
+    const decision = await approve.json()
+    assert.equal(decision.proposal.status, 'approved')
+    assert.equal(decision.proposal.createdTaskId, decision.task.id)
+    assert.equal(decision.task.title, 'Improve tracking')
+    assert.equal(decision.task.origin_job_id, body.jobId)
+
+    const detail = await (await fetch(`${url}/api/tasks/${decision.task.id}`)).json()
     assert.ok(detail.activity.some(
       (event) => event.action === 'drafted' && event.field === 'origin_job_id' &&
         event.newValue === body.jobId
@@ -187,13 +207,5 @@ test('an improvement run is a job and its created tasks carry the origin', async
     assert.equal(job.state, 'done')
     assert.equal(job.taskId, undefined)
     assert.equal(job.title, 'Improve workspace')
-
-    // Without create_tasks the suggestions come back and nothing is saved.
-    const dryRun = await post(url, '/api/ai/improve', {})
-    assert.equal(dryRun.status, 200)
-    const dryBody = await dryRun.json()
-    assert.equal(dryBody.created.length, 0)
-    assert.equal(dryBody.suggestions.length, 1)
-    assert.ok(dryBody.jobId.startsWith('job-'))
   })
 })

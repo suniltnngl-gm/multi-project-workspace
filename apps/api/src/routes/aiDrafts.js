@@ -1,6 +1,6 @@
 // Objective: Own the AI drafting routes: refine-task, background jobs, complete, and improve, with their shared model selection and runner logic.
-// Requirements: One attempt per selected model with budget, cooldown, and provenance recorded; drafts parse into task shape; complete and improve run as jobs like any other model call.
-// Decisions: Draft validation, prompt building, and runner helpers stay in one group because refine-task, jobs, complete, and improve share them; env-based AI limits load at module top after the workspace env file.
+// Requirements: One attempt per selected model with budget, cooldown, and provenance recorded; drafts parse into task shape; complete and improve run as jobs like any other model call; improve suggestions persist as proposals that never become tasks without approval.
+// Decisions: Draft validation, prompt building, and runner helpers stay in one group because refine-task, jobs, complete, and improve share them; env-based AI limits load at module top after the workspace env file; the improve route hands parsed suggestions to the proposals store so the board, not the model, decides what becomes a task.
 // Relevant Files: apps/api/src/routes/aiDrafts.js, apps/api/src/routes/util.js, apps/api/src/taskJobStore.js, apps/api/src/localAiPrompt.js
 // Important Context: User file. Route group for /api/local-ai/* and /api/ai/*.
 // Work State: Completed: Extracted from app.js as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
@@ -595,7 +595,6 @@ export function createAiDraftsRouter({
       ? request.body
       : {}
     const requestedModel = typeof body.model === 'string' ? body.model.trim() : undefined
-    const createTasks = body.create_tasks === true
 
     const summary = {
       tasks: database.listTasks().length,
@@ -690,24 +689,16 @@ export function createAiDraftsRouter({
       suggestions = [{ title: 'Review AI improvement output', description: content, priority: 'medium', rationale: 'Model output was not JSON.' }]
     }
 
-    const created = []
-    if (createTasks) {
-      for (const suggestion of suggestions) {
-        if (typeof suggestion?.title !== 'string' || !suggestion.title.trim()) continue
-        const task = database.createTask({
-          title: suggestion.title.trim().slice(0, 200),
-          description: typeof suggestion.description === 'string' ? suggestion.description.slice(0, 2000) : '',
-          priority: ['low', 'medium', 'high', 'urgent'].includes(suggestion.priority) ? suggestion.priority : 'medium',
-          task_type: 'chore',
-          project: 'workspace'
-        })
-        // Created tasks carry the run as their drafting origin; the run
-        // itself stays task-unlinked because one run can draft several tasks.
-        created.push(database.setTaskOrigin(task.id, job.id))
-      }
-    }
+    // Suggestions persist as proposals, never tasks: the improve run is a
+    // dry-run by design, and a human approves, rejects, or rolls back through
+    // the proposal endpoints. Titles with an undecided proposal are skipped so
+    // re-runs do not duplicate pending work.
+    const { created, skipped } = database.createTaskProposals({
+      proposals: suggestions,
+      jobId: job.id
+    })
 
-    response.json({ suggestions, created, summary, jobId: job.id })
+    response.json({ proposals: created, skipped, summary, jobId: job.id })
   })
 
   return router

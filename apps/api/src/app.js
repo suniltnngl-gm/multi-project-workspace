@@ -32,6 +32,7 @@ import { createModelsRouter } from './routes/models.js'
 import { createAiDraftsRouter } from './routes/aiDrafts.js'
 import { createRunsRouter } from './routes/runs.js'
 import { createMcpRouter } from './routes/mcp.js'
+import { createProposalsRouter } from './routes/proposals.js'
 
 loadWorkspaceEnv()
 
@@ -174,6 +175,7 @@ export function createApp(database, {
 
   app.use(createVerifyRouter({ getVerifier }))
   app.use(createTasksRouter({ database, jobStore, getTaskWorktrees }))
+  app.use(createProposalsRouter({ database }))
   app.use(createModelsRouter({ models, modelMetrics, modelBudget, scheduler, opencodeRosterCache }))
   app.use(createAiDraftsRouter({ database, jobStore, scheduler, modelClient, modelMetrics, modelBudget }))
   app.use(createRepositoriesRouter({ database, repositoryScope }))

@@ -215,6 +215,7 @@ print_help() {
   printf '  %-24s %s\n' 'local-ai [all|0.5b|1.5b]' 'Start local models within memory limits'
   printf '  %-24s %s\n' 'colab [status|stop] [session]' 'Inspect or stop the reusable Colab session'
   printf '  %-24s %s\n' 'ai doctor [...]' 'Check local and remote model configuration'
+  printf '  %-24s %s\n' 'ai improve [SUBCMD] ...' 'Run the AI improvement flow on draft proposals'
   printf '  %-24s %s\n' 'ai ask [--model ID] ...' 'Ask the running API a direct AI question'
   printf '  %-24s %s\n' 'doctor' 'Alias for ai doctor'
   printf '\n%sDependencies%s\n' "$C_BOLD" "$C_RESET"
@@ -748,15 +749,156 @@ PY
         run_with_env node "$ROOT_DIR/scripts/ai-doctor.mjs" "$@"
         ;;
       improve)
-        shift 2 || true
-        info 'Workspace tracking summary:'
-        require_uv
-        "$UV" run --project apps/python python "$ROOT_DIR/scripts/tracking_status.py"
-        info 'Run ./workspace self-check for deterministic validation.'
-        info 'AI improvement prompt:'
-        cat <<'PROMPT'
-Analyze the workspace tracking summary and repository status. Propose the smallest high-value improvements, prioritized by risk and impact. For each proposal include: title, rationale, affected files, validation commands, and rollback. Do not make changes without approval.
-PROMPT
+        improve_sub="${3:-run}"
+        case "$improve_sub" in
+          run)
+            if ! command -v curl >/dev/null 2>&1; then
+              error 'curl is required for ai improve run.'
+              exit 1
+            fi
+            if ! port_in_use "$API_PORT"; then
+              error "The Node API is not running on port $API_PORT. Start it with ./workspace dev or ./workspace node."
+              exit 1
+            fi
+            improve_result="$(curl -sS -w '\n%{http_code}' -X POST "http://127.0.0.1:${API_PORT}/api/ai/improve" \
+              -H 'Content-Type: application/json' \
+              -d '{}')"
+            improve_body="${improve_result%$'\n'*}"
+            improve_code="${improve_result##*$'\n'}"
+            if [[ "$improve_code" != "2"* ]]; then
+              python3 - "$improve_body" "$improve_code" <<'PY'
+import json
+import sys
+
+body, code = sys.argv[1], sys.argv[2]
+try:
+    data = json.loads(body) or {}
+except json.JSONDecodeError:
+    data = {}
+message = data.get("error") or f"The improvement run failed (HTTP {code})."
+print(message, file=sys.stderr)
+if data.get("retryAfter"):
+    print(f"Retry after about {data['retryAfter']} seconds.", file=sys.stderr)
+sys.exit(1)
+PY
+            fi
+            python3 - "$improve_body" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+proposals = data.get("proposals") or []
+for proposal in proposals:
+    print(f"#{proposal['id']} [{proposal.get('status', 'proposed')}] {proposal['title']}")
+    if proposal.get("description"):
+        print(f"    {proposal['description']}")
+print(f"{len(proposals)} proposal(s) created, {data.get('skipped') or 0} skipped (job {data.get('jobId', '')}).")
+print("Review with ./workspace ai improve list, then ./workspace ai improve approve|reject <id>.")
+PY
+            ;;
+          list)
+            improve_status=""
+            shift 3 || true
+            while [[ "$#" -gt 0 ]]; do
+              case "$1" in
+                --status)
+                  [[ $# -ge 2 ]] || { error 'Usage: ./workspace ai improve list [--status proposed|approved|rejected|rolled_back]'; exit 2; }
+                  improve_status="$2"
+                  shift 2
+                  ;;
+                *)
+                  error "Unknown ai improve list option: $1"
+                  exit 2
+                  ;;
+              esac
+            done
+            if ! command -v curl >/dev/null 2>&1; then
+              error 'curl is required for ai improve list.'
+              exit 1
+            fi
+            if ! port_in_use "$API_PORT"; then
+              error "The Node API is not running on port $API_PORT. Start it with ./workspace dev or ./workspace node."
+              exit 1
+            fi
+            improve_query=""
+            if [[ -n "$improve_status" ]]; then
+              improve_query="?status=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))' "$improve_status")"
+            fi
+            improve_result="$(curl -sS -w '\n%{http_code}' "http://127.0.0.1:${API_PORT}/api/proposals${improve_query}")"
+            improve_body="${improve_result%$'\n'*}"
+            improve_code="${improve_result##*$'\n'}"
+            if [[ "$improve_code" != "2"* ]]; then
+              error "Could not list task proposals (HTTP $improve_code)."
+              exit 1
+            fi
+            python3 - "$improve_body" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+if not data:
+    print("No task proposals.")
+else:
+    for proposal in data:
+        created = f" -> task #{proposal['createdTaskId']}" if proposal.get("createdTaskId") else ""
+        print(f"#{proposal['id']} | {proposal['status']} | {proposal['title']} | {proposal['priority']}{created}")
+PY
+            ;;
+          approve|reject|rollback)
+            improve_id="${4:-}"
+            if [[ -z "$improve_id" || ! "$improve_id" =~ ^[1-9][0-9]*$ ]]; then
+              error "Usage: ./workspace ai improve $improve_sub <id>"
+              exit 2
+            fi
+            if ! command -v curl >/dev/null 2>&1; then
+              error "curl is required for ai improve $improve_sub."
+              exit 1
+            fi
+            if ! port_in_use "$API_PORT"; then
+              error "The Node API is not running on port $API_PORT. Start it with ./workspace dev or ./workspace node."
+              exit 1
+            fi
+            improve_result="$(curl -sS -w '\n%{http_code}' -X POST "http://127.0.0.1:${API_PORT}/api/proposals/${improve_id}/${improve_sub}" \
+              -H 'Content-Type: application/json')"
+            improve_body="${improve_result%$'\n'*}"
+            improve_code="${improve_result##*$'\n'}"
+            if [[ "$improve_code" != "2"* ]]; then
+              python3 - "$improve_body" "$improve_code" <<'PY'
+import json
+import sys
+
+body, code = sys.argv[1], sys.argv[2]
+try:
+    data = json.loads(body) or {}
+except json.JSONDecodeError:
+    data = {}
+message = data.get("error") or f"The proposal decision failed (HTTP {code})."
+print(message, file=sys.stderr)
+sys.exit(1)
+PY
+            fi
+            python3 - "$improve_body" "$improve_sub" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+action = sys.argv[2]
+proposal = data.get("proposal") or {}
+task = data.get("task") or {}
+if action == "approve":
+    print(f"Approved proposal #{proposal.get('id')}: created task #{task.get('id')} ({task.get('title', '')}).")
+elif action == "rollback":
+    print(f"Rolled back proposal #{proposal.get('id')}: the task it created was deleted.")
+else:
+    print(f"Rejected proposal #{proposal.get('id')}: {proposal.get('title', '')}.")
+PY
+            ;;
+          *)
+            error "Unknown ai improve subcommand: $improve_sub"
+            printf 'Usage: ./workspace ai improve [run|list|approve <id>|reject <id>|rollback <id>]\n' >&2
+            exit 2
+            ;;
+        esac
         ;;
       ask)
         shift 2 || true
@@ -852,7 +994,7 @@ PY
       *)
         error "Unknown ai subcommand: $subcommand"
         printf 'Usage: ./workspace ai doctor [--json] [--strict] [--offline]\n' >&2
-        printf '       ./workspace ai improve\n' >&2
+        printf '       ./workspace ai improve [run|list|approve <id>|reject <id>|rollback <id>]\n' >&2
         printf '       ./workspace ai ask [--model ID] [--session ID] "prompt"\n' >&2
         exit 2
         ;;
