@@ -263,6 +263,11 @@ function buildCompleteMessages(body, template, session) {
 function quotaLimitLabel(budget) {
   const limiter = budget?.budget
   if (!limiter) return 'configured quota'
+  const learned = limiter.unit === 'requests' && limiter.window === 'day' &&
+    limiter.observed?.cap !== undefined &&
+    limiter.limit === limiter.observed.cap &&
+    limiter.used === limiter.observed.requests
+  if (learned) return 'learned daily request limit'
   if (limiter.unit === 'requests' && limiter.window === 'day') {
     return 'daily request limit'
   }
@@ -272,6 +277,10 @@ function quotaLimitLabel(budget) {
 
 function applyCooldown(modelBudget, model, error) {
   if (error?.status !== 429 || error.retryAfter === undefined) return
+  if (typeof modelBudget.observe429 === 'function') {
+    modelBudget.observe429(model.id, { retryAfter: error.retryAfter })
+    return
+  }
   modelBudget.cooldown?.(model.id, error.retryAfter)
 }
 

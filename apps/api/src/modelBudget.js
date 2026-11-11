@@ -11,6 +11,13 @@
  *
  * Values come from AI_QUOTA_PROFILES or the legacy *_MAX_REQUESTS_PER_DAY
  * variables. No vendor table lives in source, and HTTP 429 stays authoritative.
+ *
+ * Observation layers a separate ledger on top for models whose limits are not
+ * configured: every request counts into an observed-requests day bucket, and a
+ * 429 with a retry delay records a marker plus a cooldown. The smallest
+ * used-at-failure seen today becomes a learned cap that tightens only and
+ * never overwrites configured profiles; token usage is never guessed, so
+ * recordUsage stays gated on configured metered limits.
  */
 const MINUTE = 60000
 const HOUR = 60 * MINUTE
@@ -21,6 +28,23 @@ const WINDOW_MS = { minute: MINUTE, hour: HOUR, day: DAY, week: WEEK }
 const UNIT_NAMES = new Set(['requests', 'tokens', 'compute_seconds'])
 const WINDOW_NAMES = new Set(['minute', 'hour', 'session', 'day', 'week', 'month', 'none'])
 const RESET_NAMES = new Set(['rolling', 'fixed', 'pool'])
+// Observation ledger policies live in the same ai_quota rows but under their
+// own names, so learned behavior can never collide with configured profiles.
+const OBSERVED_REQUESTS_POLICY = 'observed-requests'
+const OBSERVED_429_POLICY = 'observed-429'
+const OBSERVED_COOLDOWN_POLICY = 'observed-cooldown'
+// The observed ledger buckets on UTC day boundaries; the learned cap is
+// applied as its own limiter shape when a cap exists.
+const OBSERVED_DAY = {
+  policy: 'observed-day',
+  unit: 'requests',
+  limit: Infinity,
+  window: 'day',
+  reset: 'fixed',
+  timezone: 'UTC',
+  windowMs: DAY,
+  usage: 'total'
+}
 const zoneFormats = new Map()
 const LEGACY_LIMITS = [
   ['serverless', 'SERVERLESS_AI_MAX_REQUESTS_PER_DAY'],
@@ -315,6 +339,60 @@ export function createModelBudget({
     return best
   }
 
+  function listBuckets(id, policy) {
+    try {
+      if (typeof repository?.listQuota === 'function') {
+        return repository.listQuota(id, policy)
+      }
+    } catch (error) {
+      console.error(`Could not list the AI quota for ${id}: ${error.message}`)
+    }
+    const rows = []
+    const prefix = `${id}|${policy}|`
+    for (const [key, used] of memoryBuckets) {
+      if (!key.startsWith(prefix)) continue
+      const bucket = Number(key.slice(prefix.length))
+      if (Number.isFinite(bucket)) rows.push({ bucket, used })
+    }
+    return rows
+  }
+
+  function listBucketsByPolicy(policy) {
+    try {
+      if (typeof repository?.listQuotaByPolicy === 'function') {
+        return repository.listQuotaByPolicy(policy)
+      }
+    } catch (error) {
+      console.error(`Could not list the AI quota for ${policy}: ${error.message}`)
+    }
+    const rows = []
+    const marker = `|${policy}|`
+    for (const [key, used] of memoryBuckets) {
+      const at = key.indexOf(marker)
+      if (at === -1) continue
+      const model = key.slice(0, at)
+      const bucket = Number(key.slice(at + marker.length))
+      if (model && Number.isFinite(bucket)) rows.push({ model, bucket, used })
+    }
+    return rows
+  }
+
+  // Learned cap: the smallest observed request count at which a 429 struck
+  // today. Markers from earlier days never apply, so a new day starts fresh.
+  function observedCap(id, at) {
+    const dayStart = startOfFixedWindow(at, OBSERVED_DAY)
+    const dayEnd = nextFixedBoundary(dayStart, OBSERVED_DAY)
+    let cap = null
+    for (const row of listBuckets(id, OBSERVED_429_POLICY)) {
+      const bucket = Number(row.bucket)
+      if (!Number.isFinite(bucket) || bucket < dayStart || bucket >= dayEnd) continue
+      const usedAtFailure = Number(row.used)
+      if (!Number.isFinite(usedAtFailure)) continue
+      if (cap === null || usedAtFailure < cap) cap = usedAtFailure
+    }
+    return cap
+  }
+
   function rollingEvents(id, limit, at) {
     const key = `${id}|${limit.policy}`
     let events = rolling.get(key)
@@ -387,10 +465,14 @@ export function createModelBudget({
 
   function snapshot(id) {
     const limits = configs.get(id)
-    if (!limits || limits.length === 0) return undefined
     const at = now()
+    const dayBucket = startOfFixedWindow(at, OBSERVED_DAY)
+    const observedRequests = readBucket(id, OBSERVED_REQUESTS_POLICY, dayBucket)
+    const cap = observedCap(id, at)
+    const hasObserved = observedRequests > 0 || cap !== null
+    if ((!limits || limits.length === 0) && !hasObserved) return undefined
     const cooldownUntil = cooldowns.get(id) ?? 0
-    const limiters = limits.map((limit) => {
+    const limiters = (limits ?? []).map((limit) => {
       const used = usedFor(id, limit, at)
       const bucket = limit.reset === 'rolling' || limit.reset === 'pool'
         ? null
@@ -411,14 +493,46 @@ export function createModelBudget({
           : {})
       }
     })
+    if (cap !== null) {
+      // The learned limiter gates after configured ones: once today's
+      // observed requests reach the learned cap, the model waits for the
+      // next UTC day boundary.
+      const used = observedRequests
+      const ok = used + 1 <= cap
+      limiters.push({
+        policy: OBSERVED_DAY.policy,
+        unit: 'requests',
+        window: 'day',
+        reset: 'fixed',
+        limit: cap,
+        used,
+        remaining: Math.max(0, cap - used),
+        ok,
+        resetsInSeconds: ok
+          ? 0
+          : Math.max(1, Math.ceil((nextFixedBoundary(dayBucket, OBSERVED_DAY) - at) / 1000)),
+        bucket: dayBucket,
+        observed: true
+      })
+    }
+    const cooldownSeconds = cooldownUntil > at
+      ? Math.max(1, Math.ceil((cooldownUntil - at) / 1000))
+      : 0
+    if (limiters.length === 0) {
+      // Unprofiled model with observed usage but no learned cap yet: report
+      // the ledger without inventing a primary limiter.
+      return {
+        ok: cooldownSeconds === 0,
+        limiters,
+        observed: { requests: observedRequests },
+        ...(cooldownSeconds > 0 ? { cooldownSeconds, retryAfter: cooldownSeconds } : {})
+      }
+    }
     const primary = [...limiters].sort((a, b) => {
       const ratioA = a.limit === 0 ? -1 : a.remaining / a.limit
       const ratioB = b.limit === 0 ? -1 : b.remaining / b.limit
       return ratioA - ratioB
     })[0]
-    const cooldownSeconds = cooldownUntil > at
-      ? Math.max(1, Math.ceil((cooldownUntil - at) / 1000))
-      : 0
     const blocked = limiters.filter((limiter) => !limiter.ok)
     const waits = blocked.map((limiter) => limiter.resetsInSeconds)
     const retryAfter = cooldownSeconds > 0
@@ -444,7 +558,15 @@ export function createModelBudget({
         : {}),
       ...(cooldownSeconds > 0 ? { cooldownSeconds } : {}),
       ...(!ok && retryAfter !== 0 ? { retryAfter } : {}),
-      limiters
+      limiters,
+      ...(hasObserved
+        ? {
+          observed: {
+            requests: observedRequests,
+            ...(cap !== null ? { cap } : {})
+          }
+        }
+        : {})
     }
   }
 
@@ -456,14 +578,15 @@ export function createModelBudget({
   }
 
   function record(id, amount = 1) {
-    const limits = configs.get(id)
-    if (!limits) return
     const at = now()
     const count = Number(amount)
     if (!Number.isFinite(count) || count <= 0) return
-    for (const limit of limits) {
+    const limits = configs.get(id)
+    for (const limit of limits ?? []) {
       if (limit.unit === 'requests') addAmount(id, limit, count, at)
     }
+    // Observation counts every real request, profiled or not.
+    addBucket(id, OBSERVED_REQUESTS_POLICY, startOfFixedWindow(at, OBSERVED_DAY), count)
   }
 
   function recordUsage(id, usage) {
@@ -515,6 +638,34 @@ export function createModelBudget({
     cooldowns.set(id, now() + value * 1000)
   }
 
+  // Learn from a live 429 without touching configured profiles: a marker
+  // (bucket = when it struck, used = observed requests so far today) feeds
+  // the learned cap, and a cooldown row survives restarts.
+  function observe429(id, { retryAfter } = {}) {
+    const seconds = Math.ceil(Number(retryAfter))
+    if (!Number.isFinite(seconds) || seconds <= 0) return
+    const at = now()
+    const requests = readBucket(
+      id,
+      OBSERVED_REQUESTS_POLICY,
+      startOfFixedWindow(at, OBSERVED_DAY)
+    )
+    addBucket(id, OBSERVED_429_POLICY, at, requests)
+    const until = at + seconds * 1000
+    addBucket(id, OBSERVED_COOLDOWN_POLICY, until, seconds)
+    cooldowns.set(id, Math.max(cooldowns.get(id) ?? 0, until))
+  }
+
+  function restoreObservedCooldowns() {
+    const at = now()
+    for (const row of listBucketsByPolicy(OBSERVED_COOLDOWN_POLICY)) {
+      const until = Number(row.bucket)
+      if (!Number.isFinite(until) || until <= at) continue
+      const id = String(row.model)
+      cooldowns.set(id, Math.max(cooldowns.get(id) ?? 0, until))
+    }
+  }
+
   function prune() {
     try {
       repository?.pruneQuotaBefore?.(now() - RETENTION_MS)
@@ -524,6 +675,7 @@ export function createModelBudget({
   }
 
   prune()
+  restoreObservedCooldowns()
 
-  return { check, record, recordUsage, cooldown, snapshot, prune }
+  return { check, record, recordUsage, cooldown, observe429, snapshot, prune }
 }

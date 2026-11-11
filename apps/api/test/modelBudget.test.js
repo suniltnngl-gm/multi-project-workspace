@@ -261,3 +261,142 @@ test('fixed buckets persist across budget instances', async () => {
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+test('observation counts requests for models without quota profiles', () => {
+  const clock = clockAt('2026-01-15T10:00:00Z')
+  const budget = createModelBudget({ env: {}, now: clock.now })
+
+  assert.equal(budget.snapshot('opencode'), undefined)
+  assert.equal(budget.check('opencode').ok, true)
+
+  budget.record('opencode')
+  budget.record('opencode')
+  const snapshot = budget.snapshot('opencode')
+  assert.equal(snapshot.ok, true)
+  assert.equal(snapshot.observed.requests, 2)
+  assert.deepEqual(snapshot.limiters, [])
+  assert.equal(budget.check('opencode').ok, true)
+
+  // Token usage is never guessed into the observation ledger.
+  budget.recordUsage('opencode', { totalTokens: 500 })
+  const after = budget.snapshot('opencode')
+  assert.equal(after.observed.requests, 2)
+  assert.equal(after.observed.cap, undefined)
+})
+
+test('a live 429 records a learned cap, a cooldown, and a day reset', () => {
+  const clock = clockAt('2026-01-15T10:00:00Z')
+  const budget = createModelBudget({ env: {}, now: clock.now })
+
+  budget.record('opencode')
+  budget.record('opencode')
+  budget.record('opencode')
+  budget.observe429('opencode', { retryAfter: 60 })
+
+  const blocked = budget.check('opencode')
+  assert.equal(blocked.ok, false)
+  assert.equal(blocked.budget.cooldownSeconds, 60)
+  assert.equal(blocked.budget.observed.requests, 3)
+  assert.equal(blocked.budget.observed.cap, 3)
+  assert.equal(blocked.budget.limit, 3)
+  const observedLimiter = blocked.budget.limiters.find((limiter) => limiter.observed)
+  assert.equal(observedLimiter.limit, 3)
+  assert.equal(observedLimiter.resetsInSeconds, 14 * 60 * 60) // until UTC midnight
+
+  clock.advance(61 * 1000)
+  const stillBlocked = budget.check('opencode')
+  assert.equal(stillBlocked.ok, false)
+  assert.equal(stillBlocked.budget.cooldownSeconds, undefined)
+  assert.ok(stillBlocked.retryAfter > 0 && stillBlocked.retryAfter <= 14 * 60 * 60)
+  assert.equal(stillBlocked.budget.observed.cap, 3)
+
+  clock.set('2026-01-16T10:00:00Z')
+  assert.equal(budget.check('opencode').ok, true)
+  assert.equal(budget.snapshot('opencode'), undefined)
+})
+
+test('learned caps tighten with smaller markers and never loosen', () => {
+  const clock = clockAt('2026-01-15T10:00:00Z')
+  const budget = createModelBudget({ env: {}, now: clock.now })
+
+  budget.record('opencode')
+  budget.observe429('opencode', { retryAfter: 30 })
+  assert.equal(budget.snapshot('opencode').observed.cap, 1)
+
+  clock.advance(5 * 1000)
+  budget.record('opencode')
+  budget.observe429('opencode', { retryAfter: 30 })
+  const snapshot = budget.snapshot('opencode')
+  assert.equal(snapshot.observed.cap, 1)
+  assert.equal(snapshot.observed.requests, 2)
+  const observed = snapshot.limiters.find((limiter) => limiter.observed)
+  assert.equal(observed.limit, 1)
+  assert.equal(observed.ok, false)
+})
+
+test('observed cooldowns and learned caps survive restarts', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'workspace-observed-'))
+  const database = createDatabase(join(directory, 'observed.sqlite'))
+  const clock = clockAt('2026-01-15T10:00:00Z')
+  try {
+    const first = createModelBudget({ env: {}, now: clock.now, repository: database })
+    first.record('opencode')
+    first.record('opencode')
+    first.observe429('opencode', { retryAfter: 2 * HOUR / 1000 })
+    assert.equal(first.check('opencode').ok, false)
+
+    clock.advance(30 * 60 * 1000) // still inside the cooldown
+    const restarted = createModelBudget({ env: {}, now: clock.now, repository: database })
+    const restored = restarted.check('opencode')
+    assert.equal(restored.ok, false)
+    assert.equal(restored.budget.cooldownSeconds, 90 * 60)
+    assert.equal(restored.budget.observed.cap, 2)
+    assert.equal(restored.budget.observed.requests, 2)
+
+    clock.set('2026-01-15T23:00:00Z') // cooldown expired, still the same day
+    const later = createModelBudget({ env: {}, now: clock.now, repository: database })
+    const stillCapped = later.check('opencode')
+    assert.equal(stillCapped.ok, false)
+    assert.equal(stillCapped.budget.cooldownSeconds, undefined)
+    assert.equal(stillCapped.budget.observed.cap, 2)
+
+    clock.set('2026-01-16T10:00:00Z')
+    const nextDay = createModelBudget({ env: {}, now: clock.now, repository: database })
+    assert.equal(nextDay.check('opencode').ok, true)
+    assert.equal(nextDay.snapshot('opencode'), undefined)
+  } finally {
+    database.close()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('observation never overwrites configured profiles', () => {
+  const clock = clockAt('2026-01-15T10:00:00Z')
+  const budget = createModelBudget({
+    env: {},
+    profiles: {
+      api: [
+        { unit: 'requests', limit: 10, window: 'day', reset: 'fixed' },
+        { unit: 'tokens', limit: 5000, window: 'day', reset: 'fixed' }
+      ]
+    },
+    now: clock.now
+  })
+
+  budget.record('api')
+  budget.record('api')
+  budget.recordUsage('api', { totalTokens: 300 })
+  budget.observe429('api', { retryAfter: 60 })
+
+  const snapshot = budget.snapshot('api')
+  assert.equal(snapshot.limiters[0].limit, 10)
+  assert.equal(snapshot.limiters[0].used, 2)
+  assert.equal(snapshot.limiters[1].limit, 5000)
+  assert.equal(snapshot.limiters[1].used, 300)
+  assert.equal(snapshot.observed.requests, 2)
+  assert.equal(snapshot.observed.cap, 2)
+  const observed = snapshot.limiters.find((limiter) => limiter.observed)
+  assert.equal(observed.limit, 2)
+  assert.equal(observed.ok, false)
+  assert.equal(budget.check('api').ok, false)
+})

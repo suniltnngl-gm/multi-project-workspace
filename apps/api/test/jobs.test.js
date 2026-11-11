@@ -535,7 +535,9 @@ test('task AI runs retain failure details and retry delays', async () => {
   }, async (url) => {
     const task = database.createTask({ title: 'Failure history' })
     try {
-      const submitted = await (await postJob(url, { task_id: task.id })).json()
+      // Isolate the 429 on a model only this test uses: the observed cooldown
+      // it records now persists in the shared database across app instances.
+      const submitted = await (await postJob(url, { task_id: task.id, model: LOCAL_MODEL.id })).json()
       assert.equal((await waitForJob(url, submitted.id)).state, 'error')
 
       const detail = await (await fetch(`${url}/api/tasks/${task.id}`)).json()
