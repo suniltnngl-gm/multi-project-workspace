@@ -614,14 +614,22 @@ export function createAiDraftsRouter({
       environments: database.listEnvironments().length
     }
 
+    // Undecided titles are do-not-repeat hints: the proposal store skips them
+    // anyway, but telling the model saves the output tokens duplicates would
+    // waste. Cap the list so the hint cannot bloat the prompt.
+    const pendingTitles = database.listTaskProposals({ status: 'proposed' })
+      .map((proposal) => proposal.title.trim())
+      .filter(Boolean)
+      .slice(0, 20)
+
     const messages = [
       {
         role: 'system',
-        content: 'You are a workspace improvement assistant. Return only JSON: an array of objects with title, description, priority, and rationale. Keep proposals small, safe, and actionable.'
+        content: 'You are a workspace improvement assistant. Return only JSON: an array of at most 3 objects, each with title (up to 200 characters), description (up to 2000 characters), priority ("low", "medium", or "high"), and rationale (up to 2000 characters). Keep proposals small, safe, and actionable.'
       },
       {
         role: 'user',
-        content: `Workspace tracking summary: ${JSON.stringify(summary)}. Suggest up to 5 improvements.`
+        content: `Workspace tracking summary: ${JSON.stringify(summary)}. Suggest up to 3 improvements${pendingTitles.length > 0 ? `; do not repeat these pending titles: ${JSON.stringify(pendingTitles)}` : ''}.`
       }
     ]
 
@@ -645,7 +653,7 @@ export function createAiDraftsRouter({
         try {
           const content = await modelClient.complete(model, {
             messages,
-            maxTokens: 500,
+            maxTokens: 400,
             task: { title: 'Improve workspace', project: 'workspace', task_type: 'chore' },
             signal,
             onPhase,
