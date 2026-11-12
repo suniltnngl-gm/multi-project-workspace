@@ -72,12 +72,19 @@ def create_handler(database_path):
                 raise OSError(f"Database file does not exist: {database_path}")
             database_uri = f"{database_path.resolve().as_uri()}?mode=ro"
             with closing(sqlite3.connect(database_uri, uri=True, timeout=5)) as connection:
+                # Match the API's toTask view: a task is completed when its
+                # status is done or a legacy row still carries completed = 1.
+                # Counting either column alone would disagree with the board.
                 row = connection.execute(
                     """
                     SELECT
                       COUNT(*) AS total,
-                      COALESCE(SUM(CASE WHEN completed = 0 THEN 1 ELSE 0 END), 0) AS open,
-                      COALESCE(SUM(CASE WHEN completed = 1 THEN 1 ELSE 0 END), 0) AS completed
+                      COALESCE(SUM(
+                        CASE WHEN status = 'done' OR completed = 1 THEN 0 ELSE 1 END
+                      ), 0) AS open,
+                      COALESCE(SUM(
+                        CASE WHEN status = 'done' OR completed = 1 THEN 1 ELSE 0 END
+                      ), 0) AS completed
                     FROM tasks
                     """
                 ).fetchone()

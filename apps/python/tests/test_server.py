@@ -26,13 +26,19 @@ class SatelliteServerTests(unittest.TestCase):
                         id INTEGER PRIMARY KEY,
                         title TEXT NOT NULL,
                         description TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL DEFAULT 'todo',
                         completed INTEGER NOT NULL DEFAULT 0
                     )
                     """
                 )
                 connection.executemany(
-                    "INSERT INTO tasks (title, completed) VALUES (?, ?)",
-                    [("open task", 0), ("finished task", 1), ("another open task", 0)],
+                    "INSERT INTO tasks (title, status, completed) VALUES (?, ?, ?)",
+                    [
+                        ("open task", "todo", 0),
+                        ("finished by status", "done", 0),
+                        ("finished by flag", "todo", 1),
+                        ("another open task", "blocked", 0),
+                    ],
                 )
 
         self.server = ThreadingHTTPServer(
@@ -53,7 +59,7 @@ class SatelliteServerTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertEqual(
                 json.load(response),
-                {"total": 3, "open": 2, "completed": 1},
+                {"total": 4, "open": 2, "completed": 2},
             )
 
     def test_health_and_unknown_route(self):
