@@ -3,7 +3,7 @@
 // Decisions: The OpenCode roster cache resolves lazily inside this group because only the opencode route consumes it; withBudget stays here for the same reason.
 // Relevant Files: apps/api/src/routes/models.js, apps/api/src/modelRegistry.js, apps/api/src/opencodeDiscovery.js, apps/api/src/app.js
 // Important Context: User file. Route group for /api/models, /api/models/opencode, and /api/local-ai/status.
-// Work State: Completed: Extracted from app.js as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
+// Work State: Completed: Extracted from app.js as task #45; offline roster fields added as task #43; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { Router } from 'express'
 import { publicModelDefinition } from '../modelRegistry.js'
 import { createOpenCodeRosterCacheFromEnv } from '../opencodeDiscovery.js'
@@ -59,6 +59,9 @@ export function createModelsRouter({
       availableModels: roster.models,
       count: roster.models.length,
       fetchedAt: roster.fetchedAt,
+      stale: roster.stale === true,
+      source: roster.source ?? 'cli',
+      ...(roster.discoveryError ? { discoveryError: roster.discoveryError } : {}),
       ...(roster.ok ? {} : { error: roster.error })
     })
   })

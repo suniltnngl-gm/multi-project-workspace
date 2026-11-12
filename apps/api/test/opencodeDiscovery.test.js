@@ -115,6 +115,61 @@ test('the roster cache shares one in-flight discovery and caches failures', asyn
   assert.equal(cachedFailure, failure)
 })
 
+test('the roster cache persists the last good roster and falls back to it offline', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'workspace-opencode-cache-'))
+  const cacheFile = join(directory, 'roster.json')
+  try {
+    let clock = 1000
+    const cache = createOpenCodeRosterCache({
+      cacheFile,
+      now: () => clock,
+      discover: async () => ({ ok: true, models: ['console-a/a1', 'console-b/b2'], error: null })
+    })
+    const live = await cache.get()
+    assert.equal(live.ok, true)
+    assert.equal(live.stale, false)
+    assert.equal(live.source, 'cli')
+
+    const restartedCalls = []
+    const restarted = createOpenCodeRosterCache({
+      cacheFile,
+      now: () => clock,
+      discover: async () => {
+        restartedCalls.push(1)
+        return { ok: true, models: ['new'], error: null }
+      }
+    })
+    const fromDisk = await restarted.get()
+    assert.deepEqual(fromDisk.models, ['console-a/a1', 'console-b/b2'])
+    assert.equal(fromDisk.source, 'cache')
+    assert.equal(restartedCalls.length, 0, 'a fresh disk roster avoids the CLI')
+
+    clock += 600001
+    const offlineCalls = []
+    const offline = createOpenCodeRosterCache({
+      cacheFile,
+      now: () => clock,
+      discover: async () => {
+        offlineCalls.push(1)
+        return { ok: false, models: [], error: 'spawn opencode ENOENT' }
+      }
+    })
+    const stale = await offline.get()
+    assert.equal(stale.ok, true)
+    assert.equal(stale.stale, true)
+    assert.equal(stale.source, 'cache')
+    assert.match(stale.discoveryError, /ENOENT/)
+    assert.deepEqual(stale.models, ['console-a/a1', 'console-b/b2'])
+    assert.equal(offlineCalls.length, 1)
+
+    clock += 1000
+    await offline.get()
+    assert.equal(offlineCalls.length, 1, 'offline retries are throttled to the TTL')
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('the roster cache reads its bounds from the environment', () => {
   const cache = createOpenCodeRosterCacheFromEnv({
     OPENCODE_AI_DISCOVERY_TIMEOUT_MS: '25000',
@@ -136,6 +191,8 @@ test('the opencode roster endpoint reports the effective model and live roster',
   assert.ok(body.availableModels.includes('console-google/gemini-2.5-flash'))
   assert.equal(body.count, 2)
   assert.equal(typeof body.fetchedAt, 'number')
+  assert.equal(body.stale, false)
+  assert.equal(body.source, 'cli')
   const callsAfterFirst = server.discoveryState.calls()
 
   const cachedResponse = await fetch(`${baseUrl}/api/models/opencode`)
