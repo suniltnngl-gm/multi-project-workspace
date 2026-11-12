@@ -1,4 +1,10 @@
 #!/usr/bin/env node
+// Objective: List the models available through the OpenCode CLI so rotation and study can see the roster.
+// Requirements: Delegate to `opencode models`; propagate its failure; never cache a stale roster.
+// Decisions: A thin wrapper keeps the workspace command independent of the CLI's argument shape.
+// Relevant Files: scripts/opencode-console.mjs, scripts/model-study.mjs, scripts/rotate-model.mjs, workspace
+// Important Context: User file. Output is provider-prefixed model ids.
+// Work State: Completed: Added with the ai model command group; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { loadWorkspaceEnv } from './env.mjs'
 
 loadWorkspaceEnv()

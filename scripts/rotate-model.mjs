@@ -1,4 +1,10 @@
 #!/usr/bin/env node
+// Objective: Rotate the OpenCode CLI model daily so one exhausted free tier does not block the workspace.
+// Requirements: Change OPENCODE_AI_MODEL only when the UTC day changes; alternate providers; never rotate a key into the database or git.
+// Decisions: Rotation state lives in /tmp/opencode because it is local scheduling state, not workspace data; .env is the only sink so the server sees the model after restart.
+// Relevant Files: scripts/rotate-model.mjs, scripts/model-study.mjs, workspace, .env
+// Important Context: User file. .env is gitignored; only free-tier model ids are listed here.
+// Work State: Completed: Added with the ai model rotate command; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 

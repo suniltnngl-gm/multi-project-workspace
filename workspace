@@ -217,7 +217,7 @@ print_help() {
   printf '  %-24s %s\n' 'ai doctor [...]' 'Check local and remote model configuration'
   printf '  %-24s %s\n' 'ai improve [SUBCMD] ...' 'Run the AI improvement flow on draft proposals'
   printf '  %-24s %s\n' 'ai ask [--model ID] ...' 'Ask the running API a direct AI question'
-  printf '  %-24s %s\n' 'ai model [rotate|status]' 'Rotate OPENCODE_AI_MODEL daily or show current'
+  printf '  %-24s %s\n' 'ai model [rotate|study]' 'Rotate or study OpenCode models daily'
   printf '  %-24s %s\n' 'doctor' 'Alias for ai doctor'
   printf '\n%sDependencies%s\n' "$C_BOLD" "$C_RESET"
   printf '  %-24s %s\n' 'install' 'Install npm dependencies and sync the Python project'
@@ -1019,9 +1019,17 @@ PY
             fi
             run_with_env node "$ROOT_DIR/scripts/opencode-console.mjs" list
             ;;
+          study)
+            if ! command -v node >/dev/null 2>&1; then
+              error 'node is required for ai model study.'
+              exit 1
+            fi
+            shift 3 || true
+            run_with_env node "$ROOT_DIR/scripts/model-study.mjs" "$@"
+            ;;
           *)
             error "Unknown ai model subcommand: $model_sub"
-            printf 'Usage: ./workspace ai model [rotate|status|list]\n' >&2
+            printf 'Usage: ./workspace ai model [rotate|status|list|study] [--dry-run] [--all]\n' >&2
             exit 2
             ;;
         esac
@@ -1031,7 +1039,7 @@ PY
         printf 'Usage: ./workspace ai doctor [--json] [--strict] [--offline]\n' >&2
         printf '       ./workspace ai improve [run|list|approve <id>|reject <id>|rollback <id>]\n' >&2
         printf '       ./workspace ai ask [--model ID] [--session ID] "prompt"\n' >&2
-        printf '       ./workspace ai model [rotate|status|list]\n' >&2
+        printf '       ./workspace ai model [rotate|status|list|study]\n' >&2
         exit 2
         ;;
     esac
