@@ -83,6 +83,37 @@ export function createAgentsRouter({ database, bus }) {
     return response.json(result)
   })
 
+  router.get('/api/agents/runs/:id/usage', (request, response) => {
+    const runId = request.params.id
+    if (!isOpaqueId(runId, 'run')) {
+      return response.status(400).json({ error: 'Run ID is invalid.' })
+    }
+    if (!database.getAgentRun(runId)) {
+      return response.status(404).json({ error: 'Agent run not found.' })
+    }
+    return response.json({
+      usage: database.getAgentRunUsage(runId),
+      budgetState: bus.checkRunBudget(runId)
+    })
+  })
+
+  router.post('/api/agents/runs/:id/usage', (request, response) => {
+    const usage = request.body?.usage ?? request.body
+    const result = bus.recordUsage({
+      token: bus.readToken(request),
+      runId: request.params.id,
+      usage
+    })
+    if (sendError(response, result)) return
+    return response.status(201).json(result)
+  })
+
+  router.get('/api/agents/runs/:id/dispatch-plan', (request, response) => {
+    const result = bus.dispatchPlan(request.params.id)
+    if (sendError(response, result)) return
+    return response.json(result)
+  })
+
   router.post('/api/agents/runs/:id/transition', (request, response) => {
     const agent = bus.authenticate(bus.readToken(request))
     if (!agent) return response.status(401).json({ error: 'A valid agent token is required.' })

@@ -297,6 +297,14 @@ export function createModelBudget({
   const memoryBuckets = new Map()
   const usageSeen = new Map()
   const cooldowns = new Map()
+  // In-flight dispatch reservations. They are deliberately memory-only: a
+  // crash loses the reservation, not the usage already settled into the
+  // persisted ledger. Reservations make a check-then-call window safe when a
+  // parent dispatches several workers at once.
+  const reservations = new Map()
+  let reservationSeq = 0
+  const MIN_RESERVATION_TTL_MS = 1000
+  const MAX_RESERVATION_TTL_MS = 60 * 60 * 1000
 
   function memoryKey(id, policy, bucket) {
     return `${id}|${policy}|${bucket}`
@@ -470,21 +478,76 @@ export function createModelBudget({
     return Math.max(0, Math.ceil((retryAt - at) / 1000))
   }
 
+  // Drop expired reservations before they can block a call; the caller owns
+  // the TTL so a crashed dispatcher cannot reserve a provider forever.
+  function pendingReservations(id, scope, at) {
+    const scoped = scope ?? ''
+    const pending = []
+    for (const [reservationId, reservation] of reservations) {
+      if (reservation.expiresAt <= at) {
+        reservations.delete(reservationId)
+        continue
+      }
+      if (reservation.modelId !== id) continue
+      if ((reservation.scope ?? '') !== scoped) continue
+      pending.push(reservation)
+    }
+    return pending
+  }
+
+  function pendingAmount(pending, limit) {
+    let amount = 0
+    for (const reservation of pending) {
+      if (limit.unit === 'requests') amount += reservation.calls
+      else if (limit.unit === 'tokens') amount += reservation.tokens
+      else if (limit.unit === 'compute_seconds') amount += reservation.computeSeconds
+    }
+    return amount
+  }
+
+  function pendingCalls(pending) {
+    return pending.reduce((sum, reservation) => sum + reservation.calls, 0)
+  }
+
+  // A reservation is not usage yet, so it has no place in the rolling ledger.
+  // When reservations are the only reason a limiter is blocked, report the
+  // limiter's own wait (one full window for rolling limits) instead of a
+  // misleading zero. Waiting for the ledger to reset is the conservative
+  // answer: releasing or settling the reservation can only free the slot early.
+  function pendingWaitSeconds(id, limit, at) {
+    if (limit.reset === 'rolling') return Math.max(1, Math.ceil(limit.windowMs / 1000))
+    if (limit.reset === 'pool') return null
+    const retryAt = retryAtFor(id, limit, at)
+    return retryAt === null ? null : Math.max(1, Math.ceil((retryAt - at) / 1000))
+  }
+
   function snapshot(id, scope) {
     const limits = configs.get(id)
     const observedId = scope ? `${id}@${scope}` : id
     const at = now()
+    const pending = pendingReservations(id, scope, at)
     const dayBucket = startOfFixedWindow(at, OBSERVED_DAY)
     const observedRequests = readBucket(observedId, OBSERVED_REQUESTS_POLICY, dayBucket)
+      + pendingCalls(pending)
     const cap = observedCap(observedId, at)
     const hasObserved = observedRequests > 0 || cap !== null
     if ((!limits || limits.length === 0) && !hasObserved) return undefined
     const cooldownUntil = cooldowns.get(observedId) ?? 0
     const limiters = (limits ?? []).map((limit) => {
-      const used = usedFor(id, limit, at)
+      const baseUsed = usedFor(id, limit, at)
+      const used = baseUsed + pendingAmount(pending, limit)
       const bucket = limit.reset === 'rolling' || limit.reset === 'pool'
         ? null
         : bucketFor(id, limit, at)
+      const realWait = withinLimit(baseUsed, limit)
+        ? null
+        : resetSecondsFor(id, limit, at, baseUsed)
+      const pendingWait = withinLimit(used, limit)
+        ? 0
+        : pendingWaitSeconds(id, limit, at)
+      const wait = realWait === null
+        ? pendingWait
+        : (pendingWait === null ? realWait : Math.max(realWait, pendingWait))
       return {
         policy: limit.policy,
         unit: limit.unit,
@@ -494,7 +557,7 @@ export function createModelBudget({
         used,
         remaining: Math.max(0, limit.limit - used),
         ok: withinLimit(used, limit),
-        resetsInSeconds: resetSecondsFor(id, limit, at, used),
+        resetsInSeconds: wait,
         bucket,
         ...(limit.unit !== 'requests' && usageSeen.has(id)
           ? { usageSupported: usageSeen.get(id) }
@@ -654,6 +717,87 @@ export function createModelBudget({
     cooldowns.set(observedId, now() + value * 1000)
   }
 
+  /**
+   * Reserve one dispatch against a model before the call starts. The check and
+   * the reservation happen together, so two concurrent workers cannot both
+   * consume the last slot. Actual usage is settled later with settle(); a
+   * dispatcher that fails before calling releases the reservation so the slot
+   * returns immediately.
+   */
+  function reserve(id, {
+    scope,
+    calls = 1,
+    tokens = 0,
+    computeSeconds = 0,
+    ttlMs = 5 * 60 * 1000
+  } = {}) {
+    const requestedCalls = Number(calls)
+    const requestedTokens = Number(tokens)
+    const requestedCompute = Number(computeSeconds)
+    const ttl = Number(ttlMs)
+    const budget = snapshot(id, scope)
+    if (budget && !budget.ok) {
+      return { ok: false, budget, retryAfter: budget.retryAfter }
+    }
+    const at = now()
+    const reservationId = `res_${at}_${++reservationSeq}`
+    reservations.set(reservationId, {
+      id: reservationId,
+      modelId: id,
+      scope: scope ?? '',
+      calls: Number.isFinite(requestedCalls) && requestedCalls > 0
+        ? Math.floor(requestedCalls)
+        : 1,
+      tokens: Number.isFinite(requestedTokens) && requestedTokens > 0
+        ? Math.floor(requestedTokens)
+        : 0,
+      computeSeconds: Number.isFinite(requestedCompute) && requestedCompute > 0
+        ? requestedCompute
+        : 0,
+      createdAt: at,
+      expiresAt: at + (Number.isFinite(ttl)
+        ? Math.min(MAX_RESERVATION_TTL_MS, Math.max(MIN_RESERVATION_TTL_MS, ttl))
+        : 5 * 60 * 1000)
+    })
+    return { ok: true, reservationId, budget }
+  }
+
+  // Settle the reservation's real usage exactly once. Recording here, rather
+  // than before dispatch, keeps failed calls counted while avoiding a
+  // reservation that never becomes usage.
+  function settle(reservationId, { usage, calls } = {}) {
+    const reservation = reservations.get(reservationId)
+    if (!reservation) return { settled: false }
+    reservations.delete(reservationId)
+    const count = Number(calls)
+    const settledCalls = Number.isFinite(count) && count > 0
+      ? Math.floor(count)
+      : reservation.calls
+    record(reservation.modelId, settledCalls, reservation.scope || undefined)
+    if (usage) recordUsage(reservation.modelId, usage)
+    return { settled: true, budget: snapshot(reservation.modelId, reservation.scope || undefined) }
+  }
+
+  function release(reservationId) {
+    return reservations.delete(reservationId)
+  }
+
+  // Normalized headroom lets a provider-aware dispatcher compare models that
+  // have different limiter shapes without inventing a vendor table. 0 means
+  // blocked, 1 means the least-constrained limiter is untouched.
+  function headroom(id, scope) {
+    const budget = snapshot(id, scope)
+    if (!budget) return { ok: true, ratio: 1 }
+    if (!budget.ok) return { ok: false, ratio: 0, retryAfter: budget.retryAfter, budget }
+    const scored = (budget.limiters ?? []).filter(
+      (limiter) => Number.isFinite(limiter.limit) && limiter.limit > 0
+    )
+    const ratio = scored.length === 0
+      ? 1
+      : Math.min(...scored.map((limiter) => limiter.remaining / limiter.limit))
+    return { ok: true, ratio, budget }
+  }
+
   // Learn from a live 429 without touching configured profiles: a marker
   // (bucket = when it struck, used = observed requests so far today) feeds
   // the learned cap, and a cooldown row survives restarts.
@@ -694,5 +838,17 @@ export function createModelBudget({
   prune()
   restoreObservedCooldowns()
 
-  return { check, record, recordUsage, cooldown, observe429, snapshot, prune }
+  return {
+    check,
+    record,
+    recordUsage,
+    reserve,
+    settle,
+    release,
+    headroom,
+    cooldown,
+    observe429,
+    snapshot,
+    prune
+  }
 }

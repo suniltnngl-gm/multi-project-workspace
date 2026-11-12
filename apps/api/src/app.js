@@ -99,10 +99,11 @@ export function createApp(database, {
     maxCpuLoad: LOCAL_AI_MAX_LOAD,
     maxDiskBusyPercent: LOCAL_AI_MAX_DISK_BUSY_PERCENT,
     turnCooldownMs,
-    getModelMetrics: modelMetrics.snapshot
+    getModelMetrics: modelMetrics.snapshot,
+    getModelBudget: (model) => modelBudget.check(model.id, model.cli?.model)
   })
   const jobStore = createTaskJobStore({ repository: database })
-  const agentBus = createAgentBus({ database })
+  const agentBus = createAgentBus({ database, models, modelBudget })
 
   // The local verifier resolves the repository root on first use, mirroring
   // the scan endpoints, so the API works from any cwd inside the repository.

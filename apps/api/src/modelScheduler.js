@@ -64,7 +64,8 @@ export function createModelScheduler({
   maxCpuLoad,
   maxDiskBusyPercent,
   turnCooldownMs,
-  getModelMetrics
+  getModelMetrics,
+  getModelBudget
 }) {
   const callableModels = models.filter(isCallable)
   const states = new Map(callableModels.map((model) => [model.id, { inFlight: false }]))
@@ -218,6 +219,31 @@ export function createModelScheduler({
     return result
   }
 
+  function budgetFor(status) {
+    if (typeof getModelBudget !== 'function') return undefined
+    try {
+      return getModelBudget(status)
+    } catch (error) {
+      console.error(`Could not read the AI budget for ${status.id}: ${error.message}`)
+      return undefined
+    }
+  }
+
+  function budgetHeadroom(result) {
+    if (!result) return { ok: true, ratio: 1 }
+    if (result.ok === false) return { ok: false, ratio: 0 }
+    const limiters = result.budget?.limiters ?? []
+    const scored = limiters.filter(
+      (limiter) => Number.isFinite(limiter.limit) && limiter.limit > 0
+    )
+    return {
+      ok: true,
+      ratio: scored.length === 0
+        ? 1
+        : Math.min(...scored.map((limiter) => limiter.remaining / limiter.limit))
+    }
+  }
+
   async function select(requestedModelId) {
     let requested
     if (requestedModelId !== undefined) {
@@ -276,18 +302,32 @@ export function createModelScheduler({
         if (status.state !== 'ready') return false
         return requested ? status.id === requested.id : status.autoSelect
       })
+      .map((status) => ({
+        status,
+        quota: budgetHeadroom(budgetFor(status))
+      }))
       .sort((a, b) => {
-        const failuresA = Number.isFinite(a.failures) ? a.failures : 0
-        const failuresB = Number.isFinite(b.failures) ? b.failures : 0
+        // A model with provider headroom wins over one that is cooling down or
+        // exhausted. This is the main quota-saving path for automatic routing:
+        // a free provider with room is tried before a constrained one is
+        // touched, instead of selecting it and returning 429.
+        if (a.quota.ok !== b.quota.ok) return a.quota.ok ? -1 : 1
+
+        const failuresA = Number.isFinite(a.status.failures) ? a.status.failures : 0
+        const failuresB = Number.isFinite(b.status.failures) ? b.status.failures : 0
         if (failuresA !== failuresB) return failuresA - failuresB
 
-        const durationA = Number.isFinite(a.lastDurationMs) ? a.lastDurationMs : Number.MAX_SAFE_INTEGER
-        const durationB = Number.isFinite(b.lastDurationMs) ? b.lastDurationMs : Number.MAX_SAFE_INTEGER
+        if (a.quota.ratio !== b.quota.ratio) return b.quota.ratio - a.quota.ratio
+
+        const durationA = Number.isFinite(a.status.lastDurationMs) ? a.status.lastDurationMs : Number.MAX_SAFE_INTEGER
+        const durationB = Number.isFinite(b.status.lastDurationMs) ? b.status.lastDurationMs : Number.MAX_SAFE_INTEGER
         if (durationA !== durationB) return durationA - durationB
 
-        return b.priority - a.priority
+        return b.status.priority - a.status.priority
       })
-    const chosen = candidates.find((status) => !states.get(status.id).inFlight)
+    const chosen = (candidates.find((candidate) => (
+      candidate.quota.ok && !states.get(candidate.status.id).inFlight
+    )) ?? candidates.find((candidate) => !states.get(candidate.status.id).inFlight))?.status
     if (!chosen) {
       if (!requested) {
         const busyStatuses = evaluation.models.filter((status) => status.state === 'busy')

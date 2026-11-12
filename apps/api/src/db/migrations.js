@@ -276,6 +276,25 @@ export function runMigrations(connection, { rootDir } = {}) {
     CREATE INDEX IF NOT EXISTS idx_agent_runs_state
       ON agent_runs(state, updated_at DESC);
 
+    CREATE TABLE IF NOT EXISTS agent_run_usage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+      agent_id TEXT REFERENCES agent_agents(id) ON DELETE SET NULL,
+      model TEXT NOT NULL DEFAULT '',
+      provider TEXT NOT NULL DEFAULT '',
+      calls INTEGER NOT NULL DEFAULT 0,
+      prompt_tokens INTEGER NOT NULL DEFAULT 0,
+      completion_tokens INTEGER NOT NULL DEFAULT 0,
+      total_tokens INTEGER NOT NULL DEFAULT 0,
+      duration_ms INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_agent_run_usage_run
+      ON agent_run_usage(run_id, created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_agent_run_usage_agent
+      ON agent_run_usage(run_id, agent_id, created_at ASC);
+
     CREATE TABLE IF NOT EXISTS agent_agents (
       id TEXT PRIMARY KEY,
       run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,

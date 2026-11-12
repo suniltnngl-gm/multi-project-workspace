@@ -174,6 +174,9 @@ surface exposes metadata and optional content through
 - `POST /api/agents/runs/:id/transition` — move to an allowed next state
 - `POST /api/agents/runs/:id/cancel` — cancel and expire pending work
 - `POST /api/agents/runs/:id/checkpoint` — authenticated bounded run checkpoint
+- `GET|POST /api/agents/runs/:id/usage` — run usage totals, or record a worker's real usage
+- `GET /api/agents/runs/:id/dispatch-plan` — zero-token provider headroom and concurrency plan
+- `GET /api/models/providers` — provider-level quota headroom for the whole roster
 - `GET /api/agents/runs/:id/messages|events|task-ops` — run history
 - `POST /api/agents/messages` — send a typed message
 - `POST /api/agents/inbox/claim` — lease the next inbox messages
@@ -200,12 +203,44 @@ board. The API binds to `127.0.0.1` by default; agent writes require a per-run t
 | `AGENT_CLAIM_LIMIT` | `10` | Default messages per claim |
 | `AGENT_MAX_CLAIM_LIMIT` | `20` | Largest allowed claim |
 | `AGENT_CHECKPOINT_MAX_BYTES` | `65536` | Checkpoint size cap |
+| `AGENT_MAX_PARALLEL_PER_PROVIDER` | `1` | Active assignments allowed per provider quota domain |
 | `AGENT_ARTIFACT_DIR` | `apps/api/data/agent-artifacts` | Artifact byte directory |
 
 Budgets are stored on the run and reported by the broker; they do not bypass the
 existing model quota ledger. Provider `429`/`503` responses and `Retry-After` remain
 authoritative, and changing a model mid-run remains forbidden because it discards the
 provider prompt cache.
+
+## Provider-aware dispatch
+
+An `assign` message is the only message kind that asks a worker to spend model
+quota, so the broker gates it before writing the queue record. Three checks run in
+order, and a refusal costs no model call:
+
+1. The run budget must have remaining tokens, calls, and wall-clock time.
+2. The worker's model must have quota headroom in the existing `modelBudget`
+   ledger. A blocked or cooling-down provider returns `429` with `retryAfter` and
+   the limiter snapshot.
+3. The provider quota domain must have fewer than
+   `AGENT_MAX_PARALLEL_PER_PROVIDER` active assignments. A provider is blocked
+   until a claimed assignment is completed, failed, or expired.
+
+Messages other than `assign` stay ungated so a worker can always report a result,
+ask a question, or fail. Workers report real usage with
+`POST /api/agents/runs/:id/usage`; the broker stores it in `agent_run_usage` and
+counts it toward the run budget even when the spend pushes the run over. The next
+assignment is what stops. `GET /api/agents/runs/:id/usage` returns totals by model,
+and `GET /api/agents/runs/:id/dispatch-plan` returns the same plan the broker uses:
+which model each agent is pinned to, which provider it spends, current headroom,
+active assignments, and the budget that remains. Provider grouping is data-driven:
+named backends share a quota domain, while each generic `serverless` slot or
+`ollama` model keeps its own domain because it may be a different account. Billing
+category is ordering metadata only and never grants permission.
+
+Reservations are memory-only. A dispatch reserves a slot before the call and
+settles the real usage afterward, so two concurrent jobs cannot both consume the
+last request. A crash loses the reservation, not the persisted usage already
+settled into `ai_quota`.
 
 ## Example flow
 

@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { after, before, test } from 'node:test'
 import { createDatabase } from '../src/database.js'
 import { createAgentBus } from '../src/agentBus.js'
+import { createModelBudget } from '../src/modelBudget.js'
 
 let directory
 let database
@@ -27,8 +28,8 @@ function createTask(title) {
   return database.createTask({ title, description: title })
 }
 
-function createRun(taskId, extra = {}) {
-  const result = bus.createRun({
+function createRun(taskId, extra = {}, instance = bus) {
+  const result = instance.createRun({
     task_id: taskId,
     agents: [
       { role: 'parent', name: 'parent', model: 'test-model' },
@@ -43,13 +44,23 @@ function createRun(taskId, extra = {}) {
   return { run: result, parent: byName.parent, reviewer: byName.reviewer, a: byName['worker-a'], b: byName['worker-b'] }
 }
 
-function send(agent, run, body) {
-  return bus.sendMessage({
+function send(agent, run, body, instance = bus) {
+  return instance.sendMessage({
     token: agent.token,
     runId: run.id,
     idempotencyKey: body.idempotencyKey ?? `k-${Math.random()}`,
     ...body
   })
+}
+
+const TEST_MODEL = {
+  id: 'test-model',
+  label: 'Test Model',
+  provider: 'provider-a',
+  backend: 'http',
+  callable: true,
+  autoSelect: true,
+  billingCategory: 'free'
 }
 
 test('a run exposes agent tokens once and never on reads', () => {
@@ -289,4 +300,140 @@ test('run transitions are explicit and checkpoints are authenticated', () => {
     checkpoint: { round: 2 }
   })
   assert.equal(unauthenticated.error.status, 401)
+})
+
+test('assignments are serialized per provider unless the slot is free', () => {
+  const task = createTask('Provider concurrency task')
+  const instance = createAgentBus({
+    database,
+    now: () => clock,
+    models: [TEST_MODEL]
+  })
+  const { run, parent, a, b } = createRun(task.id, {}, instance)
+
+  const first = send(parent, run, {
+    to: 'worker-a',
+    kind: 'assign',
+    payload: { goal: 'first unit' },
+    idempotencyKey: 'provider-concurrency-1'
+  }, instance)
+  assert.ok(!first.error, JSON.stringify(first.error))
+
+  const blocked = send(parent, run, {
+    to: 'worker-b',
+    kind: 'assign',
+    payload: { goal: 'second unit' },
+    idempotencyKey: 'provider-concurrency-2'
+  }, instance)
+  assert.equal(blocked.error.status, 429)
+  assert.equal(blocked.error.body.provider, 'provider-a')
+  assert.equal(blocked.error.body.activeAssignments, 1)
+  assert.equal(blocked.error.body.parallelLimit, 1)
+  assert.equal(bus.getRun(run.id).messages.length, 1)
+
+  // Finishing the in-flight assignment frees the provider slot (and costs no
+  // model call in this test because the broker never invokes a model).
+  bus.claimInbox({ token: a.token, runId: run.id })
+  const completed = bus.completeMessage({
+    token: a.token,
+    messageId: first.message.id,
+    result: { summary: 'done' }
+  })
+  assert.equal(completed.message.state, 'completed')
+
+  const next = send(parent, run, {
+    to: 'worker-b',
+    kind: 'assign',
+    payload: { goal: 'second unit' },
+    idempotencyKey: 'provider-concurrency-2'
+  }, instance)
+  assert.ok(!next.error, JSON.stringify(next.error))
+  assert.equal(next.message.toAgentId, b.id)
+})
+
+test('an assignment is refused when the provider quota has no headroom', () => {
+  const task = createTask('Provider quota task')
+  const modelBudget = createModelBudget({
+    profiles: {
+      'test-model': [{ unit: 'requests', limit: 1, window: 'day', reset: 'fixed' }]
+    },
+    now: () => clock
+  })
+  modelBudget.record('test-model')
+  const instance = createAgentBus({
+    database,
+    now: () => clock,
+    models: [TEST_MODEL],
+    modelBudget
+  })
+  const { run, parent } = createRun(task.id, {}, instance)
+
+  const denied = send(parent, run, {
+    to: 'worker-a',
+    kind: 'assign',
+    payload: { goal: 'quota-bound unit' },
+    idempotencyKey: 'provider-quota-1'
+  }, instance)
+  assert.equal(denied.error.status, 429)
+  assert.match(denied.error.body.error, /no provider quota headroom/)
+  assert.equal(denied.error.body.provider, 'provider-a')
+  assert.ok(Number.isFinite(denied.error.body.retryAfter))
+  assert.equal(denied.error.body.budget.remaining, 0)
+  assert.equal(bus.getRun(run.id).messages.length, 0)
+})
+
+test('run usage totals gate further assignments without hiding the spend', () => {
+  const task = createTask('Run usage task')
+  const instance = createAgentBus({ database, now: () => clock })
+  const { run, parent, a } = createRun(task.id, {
+    budget: { maxTokens: 10, maxCalls: 10, maxMs: 600000 }
+  }, instance)
+
+  const first = instance.recordUsage({
+    token: a.token,
+    runId: run.id,
+    usage: { calls: 1, prompt_tokens: 3, completion_tokens: 2, duration_ms: 15 }
+  })
+  assert.ok(!first.error, JSON.stringify(first.error))
+  assert.equal(first.usage.totalTokens, 5)
+  assert.equal(first.exhausted, false)
+
+  const second = instance.recordUsage({
+    token: a.token,
+    runId: run.id,
+    usage: { calls: 1, prompt_tokens: 5, completion_tokens: 2, duration_ms: 20 }
+  })
+  assert.ok(!second.error, JSON.stringify(second.error))
+  assert.equal(second.usage.calls, 2)
+  assert.equal(second.usage.totalTokens, 12)
+  assert.equal(second.exhausted, true)
+  assert.equal(second.remaining.tokens, -2)
+
+  const totals = database.getAgentRunUsage(run.id)
+  assert.equal(totals.entries, 2)
+  assert.equal(totals.totalTokens, 12)
+  assert.equal(totals.byModel.length, 1)
+  assert.equal(totals.byModel[0].calls, 2)
+
+  const denied = send(parent, run, {
+    to: 'worker-a',
+    kind: 'assign',
+    payload: { goal: 'over budget' },
+    idempotencyKey: 'run-budget-1'
+  }, instance)
+  assert.equal(denied.error.status, 429)
+  assert.equal(denied.error.body.exhausted, true)
+  assert.equal(denied.error.body.usage.totalTokens, 12)
+
+  const plan = instance.dispatchPlan(run.id)
+  assert.equal(plan.exhausted, true)
+  assert.equal(plan.usage.totalTokens, 12)
+  assert.equal(plan.ok, false)
+
+  const invalid = instance.recordUsage({
+    token: a.token,
+    runId: run.id,
+    usage: { calls: -1 }
+  })
+  assert.equal(invalid.error.status, 400)
 })

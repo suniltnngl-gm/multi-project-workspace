@@ -299,6 +299,39 @@ function applyCooldown(modelBudget, model, error) {
   modelBudget.cooldown?.(model.id, error.retryAfter, scope)
 }
 
+// Prefer a reservation when the ledger supports it so two concurrent jobs
+// cannot both consume the last provider slot. Older injected budgets keep the
+// check/record path and still work.
+function gateModelBudget(modelBudget, model) {
+  const scope = model.cli?.model
+  if (typeof modelBudget.reserve === 'function') {
+    return { ...modelBudget.reserve(model.id, { scope, calls: 1 }), scope }
+  }
+  return { ...modelBudget.check(model.id, scope), scope }
+}
+
+function budgetUsageSink(gate) {
+  return (usage) => {
+    gate.usage = usage
+  }
+}
+
+function settleModelBudget(modelBudget, model, gate) {
+  if (!gate) return
+  if (gate.reservationId && typeof modelBudget.settle === 'function') {
+    modelBudget.settle(gate.reservationId, { usage: gate.usage })
+    return
+  }
+  modelBudget.record?.(model.id, 1, gate.scope)
+  if (gate.usage) modelBudget.recordUsage?.(model.id, gate.usage)
+}
+
+function releaseModelBudget(modelBudget, gate) {
+  if (gate?.reservationId && typeof modelBudget.release === 'function') {
+    modelBudget.release(gate.reservationId)
+  }
+}
+
 export function createAiDraftsRouter({
   database,
   jobStore,
@@ -325,29 +358,29 @@ export function createAiDraftsRouter({
     if (selection.error) return { error: selection.error }
 
     const model = selection.model
-    const budget = modelBudget.check(model.id, model.cli?.model)
-    if (!budget.ok) {
+    const gate = gateModelBudget(modelBudget, model)
+    if (!gate.ok) {
+      releaseModelBudget(modelBudget, gate)
       selection.release({ inferenceStarted: false })
       return {
         error: {
           status: 429,
           body: {
-            error: quotaErrorMessage(model, budget),
-            ...budget
+            error: quotaErrorMessage(model, gate),
+            ...gate
           }
         }
       }
     }
-    return { selection, model }
+    return { selection, model, gate }
   }
 
-  function submitDraftJob(input, model, selection) {
+  function submitDraftJob(input, model, selection, gate) {
     const task = taskFromRefineInput(input)
     const sessionSummary = input.session_id !== undefined
       ? String(database.getAiSession(input.session_id)?.summary ?? '')
       : ''
     const prompt = buildTaskPrompt(task, { sessionSummary })
-    modelBudget.record(model.id, 1, model.cli?.model)
 
     const runner = async ({ signal, onPhase }) => {
       let inferenceStarted = false
@@ -364,7 +397,7 @@ export function createAiDraftsRouter({
             task,
             signal,
             onPhase,
-            onUsage: (usage) => modelBudget.recordUsage?.(model.id, usage)
+            onUsage: budgetUsageSink(gate)
           })
           modelMetrics.recordSuccess(model.id, { durationMs: Date.now() - startedAt })
         } catch (error) {
@@ -385,6 +418,7 @@ export function createAiDraftsRouter({
           )
         }
       } finally {
+        settleModelBudget(modelBudget, model, gate)
         selection.release({ inferenceStarted })
       }
     }
@@ -402,16 +436,21 @@ export function createAiDraftsRouter({
     const selected = await selectDraftModel(input)
     if (selected.error) return selected
     if (taskNotFound(input)) {
+      releaseModelBudget(modelBudget, selected.gate)
       selected.selection.release({ inferenceStarted: false })
       return { error: { status: 404, body: { error: 'Task not found.' } } }
     }
     if (sessionNotFound(input)) {
+      releaseModelBudget(modelBudget, selected.gate)
       selected.selection.release({ inferenceStarted: false })
       return { error: { status: 404, body: { error: 'AI session not found.' } } }
     }
     try {
-      return { job: submitDraftJob(input, selected.model, selected.selection) }
+      return {
+        job: submitDraftJob(input, selected.model, selected.selection, selected.gate)
+      }
     } catch (error) {
+      releaseModelBudget(modelBudget, selected.gate)
       selected.selection.release({ inferenceStarted: false })
       throw error
     }
@@ -533,13 +572,11 @@ export function createAiDraftsRouter({
     if (selected.error) {
       return response.status(selected.error.status).json(selected.error.body)
     }
-    const { model, selection } = selected
+    const { model, selection, gate } = selected
     const maxTokens = body.max_tokens ?? AI_COMPLETE_DEFAULT_MAX_TOKENS
     const jobTitle = typeof body.prompt === 'string' && body.prompt.trim()
       ? body.prompt.trim().slice(0, 80)
       : 'AI chat'
-
-    modelBudget.record(model.id, 1, model.cli?.model)
 
     const runner = async ({ signal, onPhase }) => {
       let inferenceStarted = false
@@ -557,7 +594,7 @@ export function createAiDraftsRouter({
             ...(worktreePath ? { worktreePath } : {}),
             signal,
             onPhase,
-            onUsage: (usage) => modelBudget.recordUsage?.(model.id, usage)
+            onUsage: budgetUsageSink(gate)
           })
           modelMetrics.recordSuccess(model.id, { durationMs: Date.now() - startedAt })
         } catch (error) {
@@ -577,6 +614,7 @@ export function createAiDraftsRouter({
         }
         return { content }
       } finally {
+        settleModelBudget(modelBudget, model, gate)
         selection.release({ inferenceStarted })
       }
     }
@@ -591,6 +629,7 @@ export function createAiDraftsRouter({
         runner
       })
     } catch (error) {
+      releaseModelBudget(modelBudget, gate)
       selection.release({ inferenceStarted: false })
       throw error
     }
@@ -652,8 +691,7 @@ export function createAiDraftsRouter({
     if (selected.error) {
       return response.status(selected.error.status).json(selected.error.body)
     }
-    const { model, selection } = selected
-    modelBudget.record(model.id, 1, model.cli?.model)
+    const { model, selection, gate } = selected
 
     // The improvement run is a job like any other model call, so it records
     // model provenance, honors budget and cooldown, and can be inspected or
@@ -672,7 +710,7 @@ export function createAiDraftsRouter({
             task: { title: 'Improve workspace', project: 'workspace', task_type: 'chore' },
             signal,
             onPhase,
-            onUsage: (usage) => modelBudget.recordUsage?.(model.id, usage)
+            onUsage: budgetUsageSink(gate)
           })
           modelMetrics.recordSuccess(model.id, { durationMs: Date.now() - startedAt })
           return content
@@ -684,6 +722,7 @@ export function createAiDraftsRouter({
           throw error
         }
       } finally {
+        settleModelBudget(modelBudget, model, gate)
         selection.release({ inferenceStarted })
       }
     }
@@ -697,6 +736,7 @@ export function createAiDraftsRouter({
         runner
       })
     } catch (error) {
+      releaseModelBudget(modelBudget, gate)
       selection.release({ inferenceStarted: false })
       throw error
     }

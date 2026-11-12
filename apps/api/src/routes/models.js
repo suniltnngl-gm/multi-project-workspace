@@ -7,6 +7,7 @@
 import { Router } from 'express'
 import { publicModelDefinition } from '../modelRegistry.js'
 import { createOpenCodeRosterCacheFromEnv } from '../opencodeDiscovery.js'
+import { providerSnapshots } from '../providerQuota.js'
 
 export function createModelsRouter({
   models,
@@ -27,6 +28,16 @@ export function createModelsRouter({
       ...publicModelDefinition(model),
       ...(modelMetrics.snapshot(model.id) || {})
     }, model)))
+  })
+
+  // Provider headroom groups models that share a quota domain. The response is
+  // derived from the same ledger as /api/models and never calls a provider.
+  router.get('/api/models/providers', (_request, response) => {
+    const providers = providerSnapshots({ models, modelBudget })
+    response.json({
+      ok: providers.every((provider) => provider.ok),
+      providers
+    })
   })
 
   // The OpenCode roster is discovered from the local CLI on demand and cached;

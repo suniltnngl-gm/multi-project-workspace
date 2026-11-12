@@ -951,3 +951,31 @@ test('slot quota limiters configure the default model budget', async () => {
     assert.equal(payload.budget.used, 1)
   })
 })
+
+test('provider headroom groups models by quota domain without calling them', async () => {
+  const modelBudget = createModelBudget({
+    profiles: {
+      'local-small': [{ unit: 'requests', limit: 2, window: 'minute', reset: 'rolling' }],
+      'local-large': [{ unit: 'requests', limit: 1, window: 'minute', reset: 'rolling' }]
+    }
+  })
+  modelBudget.record('local-small')
+  modelBudget.record('local-large')
+
+  await withApp({ modelBudget }, async (url) => {
+    const response = await fetch(`${url}/api/models/providers`)
+    assert.equal(response.status, 200)
+    const body = await response.json()
+    assert.equal(body.ok, true)
+
+    const local = body.providers.find((provider) => provider.groupKey === 'local')
+    assert.equal(local.ok, true)
+    assert.equal(local.preferredModel, 'local-small')
+    assert.equal(local.headroom, 0.5)
+    assert.equal(local.models.find((model) => model.id === 'local-large').ok, false)
+
+    const colab = body.providers.find((provider) => provider.groupKey === 'colab')
+    assert.equal(colab.preferredModel, 'colab')
+    assert.equal(colab.billingCategory, 'subscription')
+  })
+})

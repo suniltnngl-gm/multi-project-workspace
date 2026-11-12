@@ -229,6 +229,64 @@ export function createAgentRunsStore(connection) {
     }
   })
 
+  const insertRunUsageStatement = connection.prepare(`
+    INSERT INTO agent_run_usage (
+      run_id, agent_id, model, provider, calls, prompt_tokens,
+      completion_tokens, total_tokens, duration_ms, created_at
+    ) VALUES (
+      @runId, @agentId, @model, @provider, @calls, @promptTokens,
+      @completionTokens, @totalTokens, @durationMs, @createdAt
+    )
+  `)
+  const sumRunUsageStatement = connection.prepare(`
+    SELECT
+      COUNT(*) AS entries,
+      COALESCE(SUM(calls), 0) AS calls,
+      COALESCE(SUM(prompt_tokens), 0) AS promptTokens,
+      COALESCE(SUM(completion_tokens), 0) AS completionTokens,
+      COALESCE(SUM(total_tokens), 0) AS totalTokens,
+      COALESCE(SUM(duration_ms), 0) AS durationMs
+    FROM agent_run_usage
+    WHERE run_id = ?
+  `)
+  const groupRunUsageStatement = connection.prepare(`
+    SELECT
+      model,
+      provider,
+      SUM(calls) AS calls,
+      SUM(prompt_tokens) AS promptTokens,
+      SUM(completion_tokens) AS completionTokens,
+      SUM(total_tokens) AS totalTokens,
+      SUM(duration_ms) AS durationMs
+    FROM agent_run_usage
+    WHERE run_id = ?
+    GROUP BY model, provider
+    ORDER BY totalTokens DESC, model ASC
+  `)
+  const listRunUsageStatement = connection.prepare(`
+    SELECT * FROM agent_run_usage
+    WHERE run_id = ?
+    ORDER BY created_at ASC, id ASC
+  `)
+  const activeAssignmentsStatement = connection.prepare(`
+    SELECT id, to_agent_id, state FROM agent_messages
+    WHERE run_id = ? AND kind = 'assign'
+      AND state IN ('queued', 'leased', 'delivered', 'acked')
+  `)
+
+  function readRunUsage(runId) {
+    const totals = sumRunUsageStatement.get(runId)
+    return {
+      entries: totals.entries,
+      calls: totals.calls,
+      promptTokens: totals.promptTokens,
+      completionTokens: totals.completionTokens,
+      totalTokens: totals.totalTokens,
+      durationMs: totals.durationMs,
+      byModel: groupRunUsageStatement.all(runId)
+    }
+  }
+
   return {
     createAgentRun({ id, taskId = null, state = 'draft', primaryAgentId = null, reviewerAgentId = null, modelPlan = {}, budget = {}, plan = {}, checkpoint = {}, createdAt, updatedAt }) {
       insertRunStatement.run({
@@ -293,6 +351,45 @@ export function createAgentRunsStore(connection) {
         'UPDATE agent_runs SET checkpoint = ?, updated_at = ? WHERE id = ?'
       ).run(JSON.stringify(checkpoint), updatedAt, id)
       return toRun(getRunStatement.get(id))
+    },
+    addAgentRunUsage({
+      runId,
+      agentId = null,
+      model = '',
+      provider = '',
+      calls = 0,
+      promptTokens = 0,
+      completionTokens = 0,
+      totalTokens = 0,
+      durationMs = 0,
+      createdAt
+    }) {
+      insertRunUsageStatement.run({
+        runId,
+        agentId,
+        model,
+        provider,
+        calls,
+        promptTokens,
+        completionTokens,
+        totalTokens,
+        durationMs,
+        createdAt
+      })
+      return readRunUsage(runId)
+    },
+    getAgentRunUsage(runId) {
+      return readRunUsage(runId)
+    },
+    listAgentRunUsage(runId) {
+      return listRunUsageStatement.all(runId)
+    },
+    listActiveAgentAssignments(runId) {
+      return activeAssignmentsStatement.all(runId).map((row) => ({
+        id: row.id,
+        toAgentId: row.to_agent_id,
+        state: row.state
+      }))
     },
     createAgent({ id, runId, role, name, model, backend = '', state = 'idle', tokenHash, promptCacheKey = '', createdAt }) {
       insertAgentStatement.run({

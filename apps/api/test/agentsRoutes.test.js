@@ -106,6 +106,29 @@ test('agent routes create runs, carry messages, apply task ops, and cancel', asy
   const child = database.getTask(taskOps.results[0].taskId)
   assert.equal(child.parent_task_id, task.id)
 
+  const usageResponse = await post(`/api/agents/runs/${created.id}/usage`, {
+    usage: { calls: 1, prompt_tokens: 12, completion_tokens: 8, duration_ms: 40 }
+  }, worker.token)
+  assert.equal(usageResponse.status, 201)
+  const recordedUsage = await usageResponse.json()
+  assert.equal(recordedUsage.usage.calls, 1)
+  assert.equal(recordedUsage.usage.totalTokens, 20)
+  assert.equal(recordedUsage.exhausted, false)
+
+  const usageRead = await fetch(`${baseUrl}/api/agents/runs/${created.id}/usage`)
+  assert.equal(usageRead.status, 200)
+  const storedUsage = await usageRead.json()
+  assert.equal(storedUsage.usage.totalTokens, 20)
+  assert.equal(storedUsage.budgetState.remaining.tokens, 19980)
+
+  const planResponse = await fetch(`${baseUrl}/api/agents/runs/${created.id}/dispatch-plan`)
+  assert.equal(planResponse.status, 200)
+  const plan = await planResponse.json()
+  assert.equal(plan.parallelLimit, 1)
+  assert.equal(plan.usage.totalTokens, 20)
+  assert.equal(plan.exhausted, false)
+  assert.equal(plan.agents.find((agent) => agent.name === 'worker-a').resolved, false)
+
   const detailResponse = await fetch(`${baseUrl}/api/agents/runs/${created.id}`)
   assert.equal(detailResponse.status, 200)
   const detail = await detailResponse.json()
