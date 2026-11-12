@@ -1,9 +1,9 @@
 // Objective: Own centrally tracked user files, their header sync, and their activity trail.
 // Requirements: Sync only fields whose header value changed; skip unchanged content by hash; never erase a field whose header line is missing; preserve event history across syncs and manual edits; stamp every event with the tool run that produced it.
-// Decisions: Header parsing and content hashing live here because only this domain reads file bodies; scans are scoped per repository; the whole scan pass runs as one scan tool run so its events point at the scanner rather than whatever request triggered it, with the run body kept factory-level so the public surface stays one thin entry.
+// Decisions: Header parsing and content hashing live here because only this domain reads file bodies; scans are scoped per repository; the whole scan pass runs as one scan tool run so its events point at the scanner rather than whatever request triggered it, with the run body kept factory-level so the public surface stays one thin entry; a vanished file is marked missing_at (event "missing") and restored on return (event "restored") instead of being pruned, so history survives and only an explicit delete cascades events.
 // Relevant Files: apps/api/src/db/userFiles.js, apps/api/src/db/toolRuns.js, apps/api/src/workspaceScan.js, apps/api/src/database.js
 // Important Context: User file. Composed into the createDatabase surface.
-// Work State: Completed: Extracted from database.js as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
+// Work State: Completed: Extracted from database.js as task #45; deleted-file row lifecycle added as task #46; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { createHash } from 'node:crypto'
 
 export function createUserFilesStore(connection, { toolRuns } = {}) {
@@ -105,6 +105,12 @@ export function createUserFilesStore(connection, { toolRuns } = {}) {
     const updateUserFileHashStatement = connection.prepare(
       'UPDATE user_files SET content_hash = ? WHERE id = ?'
     )
+    const markUserFileMissingStatement = connection.prepare(
+      'UPDATE user_files SET missing_at = ?, updated_at = ? WHERE id = ?'
+    )
+    const clearUserFileMissingStatement = connection.prepare(
+      'UPDATE user_files SET missing_at = NULL, updated_at = ? WHERE id = ?'
+    )
     const deleteUserFileStatement = connection.prepare('DELETE FROM user_files WHERE id = ?')
     const listUserFileEventsStatement = connection.prepare(`
       SELECT user_file_events.id, user_file_events.user_file_id, user_file_events.action,
@@ -135,6 +141,7 @@ export function createUserFilesStore(connection, { toolRuns } = {}) {
         relevant_files: row.relevant_files,
         important_context: row.important_context,
         contentHash: row.content_hash ?? null,
+        missingAt: row.missing_at ?? null,
         createdAt: row.created_at,
         updatedAt: row.updated_at
       }
@@ -149,13 +156,26 @@ export function createUserFilesStore(connection, { toolRuns } = {}) {
     const existing = new Map(
       listUserFilesForRepositoryStatement.all(repositoryId).map((row) => [row.path, row])
     )
+    const present = new Set(files.map(({ path }) => path))
     let inserted = 0
     let synced = 0
     let refreshed = 0
     let skipped = 0
+    let missing = 0
+    let restored = 0
     for (const { path, content } of files) {
       const hash = hashUserFileContent(content)
       const current = existing.get(path)
+      if (current && current.missing_at !== null) {
+        // The row survived while the file was gone; clear the marker and
+        // record the return before the normal content sync runs.
+        clearUserFileMissingStatement.run(now, current.id)
+        insertUserFileEventStatement.run(
+          current.id, 'restored', null, current.missing_at, null, now, currentRunId()
+        )
+        current.missing_at = null
+        restored += 1
+      }
       if (!current) {
         const headers = parseUserFileHeaders(content)
         const result = insertUserFileStatement.run(
@@ -208,7 +228,13 @@ export function createUserFilesStore(connection, { toolRuns } = {}) {
       }
       synced += 1
     }
-    return { inserted, synced, refreshed, skipped, total: files.length }
+    for (const [path, row] of existing) {
+      if (present.has(path) || row.missing_at !== null) continue
+      markUserFileMissingStatement.run(now, now, row.id)
+      insertUserFileEventStatement.run(row.id, 'missing', null, null, null, now, currentRunId())
+      missing += 1
+    }
+    return { inserted, synced, refreshed, skipped, missing, restored, total: files.length }
   }
 
   return {
@@ -305,6 +331,13 @@ export function createUserFilesStore(connection, { toolRuns } = {}) {
      *
      * The whole pass runs as one scan tool run, so every event it writes
      * points at the scanner rather than whatever request triggered it.
+     *
+     * Rows are never deleted by a scan. A tracked path that vanished from
+     * disk is marked with missing_at and gets a "missing" event; if it comes
+     * back, missing_at clears and a "restored" event records the return. The
+     * row and its full activity trail therefore survive deletions, and the
+     * explicit DELETE /api/files/:id route remains the only prune path (its
+     * foreign-key cascade removes that file's events with it).
      */
     scanUserFiles(files, { repositoryId = 1 } = {}) {
       const runScan = () => scanUserFilesWithinRun(files, repositoryId)

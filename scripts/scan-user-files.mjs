@@ -4,7 +4,7 @@
 // Decisions: Import the API database layer instead of duplicating the parser in Python; mirror the ai-doctor import pattern; roots resolve through the repository registry so a fresh database registers its first root on scan.
 // Relevant Files: scripts/scan-user-files.mjs, apps/api/src/workspaceScan.js, apps/api/src/database.js
 // Important Context: User file. Replaces scripts/scan_user_files.py and works without the API running.
-// Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
+// Work State: Completed: Implemented; stale-row reporting and missing/restored scans added as task #46; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { createDatabase } from '../apps/api/src/database.js'
@@ -62,7 +62,7 @@ function main() {
     if (process.exitCode === 2) return
 
     if (command === 'scan') {
-      const totals = { inserted: 0, synced: 0, refreshed: 0, skipped: 0, total: 0 }
+      const totals = { inserted: 0, synced: 0, refreshed: 0, skipped: 0, missing: 0, restored: 0, total: 0 }
       for (const repository of targets) {
         if (!existsSync(repository.rootPath)) {
           // A missing root is drift the check command reports; the scan
@@ -80,19 +80,23 @@ function main() {
         if (!quiet) {
           console.log(
             `Scanned ${repository.name}: ${result.total} user files: ${result.inserted} inserted, ` +
-              `${result.synced} synced, ${result.refreshed} refreshed, ${result.skipped} unchanged.`
+              `${result.synced} synced, ${result.refreshed} refreshed, ${result.skipped} unchanged, ` +
+              `${result.missing} missing, ${result.restored} restored.`
           )
         }
         totals.inserted += result.inserted
         totals.synced += result.synced
         totals.refreshed += result.refreshed
         totals.skipped += result.skipped
+        totals.missing += result.missing
+        totals.restored += result.restored
         totals.total += result.total
       }
       if (!quiet && targets.length > 1) {
         console.log(
           `Total across ${targets.length} repositories: ${totals.total} user files: ` +
-            `${totals.inserted} inserted, ${totals.synced} synced, ${totals.refreshed} refreshed, ${totals.skipped} unchanged.`
+            `${totals.inserted} inserted, ${totals.synced} synced, ${totals.refreshed} refreshed, ` +
+            `${totals.skipped} unchanged, ${totals.missing} missing, ${totals.restored} restored.`
         )
       }
       return
@@ -102,7 +106,7 @@ function main() {
       let count = 0
       for (const repository of targets) {
         for (const file of database.listUserFiles({ repositoryId: repository.id })) {
-          console.log(`${repository.name}/${file.path}`)
+          console.log(`${repository.name}/${file.path}${file.missingAt ? ' (missing)' : ''}`)
           count += 1
         }
       }
@@ -116,15 +120,26 @@ function main() {
         failures.push(`Repository ${repository.name} root is missing: ${repository.rootPath}`)
         continue
       }
-      const tracked = new Set(
-        database.listUserFiles({ repositoryId: repository.id }).map((file) => file.path)
-      )
-      const missing = listWorkspaceUserFiles(repository.rootPath).filter((path) => !tracked.has(path))
+      const trackedRows = database.listUserFiles({ repositoryId: repository.id })
+      const tracked = new Set(trackedRows.map((file) => file.path))
+      const diskFiles = listWorkspaceUserFiles(repository.rootPath)
+      const disk = new Set(diskFiles)
+      const missing = diskFiles.filter((path) => !tracked.has(path))
       if (missing.length > 0) {
         failures.push(`Missing tracked user files in ${repository.name}:`)
         for (const path of missing) failures.push(`  ${repository.name}/${path}`)
       } else if (!quiet) {
         console.log(`${repository.name}: all ${tracked.size} user files are tracked.`)
+      }
+      // Stale rows are reported but never fail the check (or the post-commit
+      // hook): a deletion can be intentional, and pruning stays an explicit
+      // DELETE /api/files/:id decision.
+      const stale = trackedRows.filter((file) => !disk.has(file.path))
+      if (stale.length > 0) {
+        console.log(
+          `Stale tracked user files in ${repository.name} (missing on disk, kept for history):`
+        )
+        for (const file of stale) console.log(`  ${repository.name}/${file.path}`)
       }
     }
     if (failures.length > 0) {

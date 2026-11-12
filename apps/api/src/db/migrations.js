@@ -132,6 +132,7 @@ export function runMigrations(connection, { rootDir } = {}) {
       relevant_files TEXT NOT NULL DEFAULT '',
       important_context TEXT NOT NULL DEFAULT '',
       content_hash TEXT,
+      missing_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       UNIQUE(repository_id, path)
@@ -307,6 +308,11 @@ export function runMigrations(connection, { rootDir } = {}) {
   if (!userFileColumns.has('content_hash')) {
     connection.exec('ALTER TABLE user_files ADD COLUMN content_hash TEXT')
   }
+  // A tracked file that disappears from disk keeps its row and event trail;
+  // missing_at records when the scan noticed, and a later scan clears it.
+  if (!userFileColumns.has('missing_at')) {
+    connection.exec('ALTER TABLE user_files ADD COLUMN missing_at TEXT')
+  }
 
   // Provenance: link every activity event to the tool run that produced it.
   // The column is nullable so the ALTER preserves ids and trails; events that
@@ -394,6 +400,7 @@ export function runMigrations(connection, { rootDir } = {}) {
             relevant_files TEXT NOT NULL DEFAULT '',
             important_context TEXT NOT NULL DEFAULT '',
             content_hash TEXT,
+            missing_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             UNIQUE(repository_id, path)
@@ -402,10 +409,10 @@ export function runMigrations(connection, { rootDir } = {}) {
         connection.exec(`
           INSERT INTO user_files_scoped (
             id, repository_id, path, objective, requirements, decisions,
-            relevant_files, important_context, content_hash, created_at, updated_at
+            relevant_files, important_context, content_hash, missing_at, created_at, updated_at
           )
           SELECT id, 1, path, objective, requirements, decisions,
-                 relevant_files, important_context, content_hash, created_at, updated_at
+                 relevant_files, important_context, content_hash, missing_at, created_at, updated_at
           FROM user_files
         `)
         connection.exec('DROP TABLE user_files')

@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, test } from 'node:test'
 import { createApp } from '../src/app.js'
 import { createDatabase } from '../src/database.js'
+import { scanWorkspaceUserFiles } from '../src/workspaceScan.js'
 
 let directory
 let database
@@ -85,6 +86,46 @@ test('the files search filter rejects non-string and oversized values', async ()
 
   const empty = await fetch(`${baseUrl}/api/files?search=`)
   assert.equal(empty.status, 200)
+})
+
+test('scans mark vanished files missing and restore them without losing history', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'workspace-file-lifecycle-'))
+  const lifecycleDatabase = createDatabase(join(root, 'lifecycle.sqlite'), { rootDir: root })
+  try {
+    await mkdir(join(root, 'docs'), { recursive: true })
+    const filePath = join(root, 'docs', 'old.md')
+    await writeFile(filePath, '# Objective: Kept for history.\n')
+
+    const first = scanWorkspaceUserFiles({ rootDir: root, database: lifecycleDatabase })
+    assert.equal(first.inserted, 1)
+    assert.equal(first.missing, 0)
+    assert.equal(first.restored, 0)
+    const tracked = lifecycleDatabase.getUserFileByPath('docs/old.md')
+    assert.equal(tracked.missingAt, null)
+
+    await rm(filePath)
+    const second = scanWorkspaceUserFiles({ rootDir: root, database: lifecycleDatabase })
+    assert.equal(second.missing, 1)
+    const missing = lifecycleDatabase.getUserFileByPath('docs/old.md')
+    assert.ok(missing, 'the row survives the deleted file')
+    assert.ok(missing.missingAt)
+    assert.ok(
+      lifecycleDatabase.getUserFileDetail(tracked.id).activity
+        .some((event) => event.action === 'missing')
+    )
+
+    await writeFile(filePath, '# Objective: Kept for history.\n')
+    const third = scanWorkspaceUserFiles({ rootDir: root, database: lifecycleDatabase })
+    assert.equal(third.restored, 1)
+    const restored = lifecycleDatabase.getUserFileByPath('docs/old.md')
+    assert.equal(restored.missingAt, null)
+    const activity = lifecycleDatabase.getUserFileDetail(tracked.id).activity
+    assert.ok(activity.some((event) => event.action === 'restored'))
+    assert.ok(activity.some((event) => event.action === 'created'), 'history is preserved')
+  } finally {
+    lifecycleDatabase.close()
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('header syncs from the repository reach tracked fields', async () => {
