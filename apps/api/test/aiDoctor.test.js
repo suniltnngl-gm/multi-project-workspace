@@ -226,6 +226,45 @@ test('default doctor still probes every registered model', async () => {
   }
 })
 
+test('doctor skips probing serverless slots without credentials', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'workspace-doctor-'))
+  try {
+    const probed = []
+    const modelClient = {
+      probe: async (model) => {
+        probed.push(model.id)
+        return { ok: true }
+      }
+    }
+
+    const { checks } = await runDoctorChecks({
+      env: {
+        SERVERLESS_AI_SLOTS: JSON.stringify([{
+          id: 'keyless',
+          label: 'Keyless slot',
+          url: 'https://example.invalid/openai',
+          apiModel: 'provider/model',
+          apiKeyEnv: 'KEYLESS_SLOT_KEY'
+        }])
+      },
+      databasePath: join(directory, 'doctor.sqlite'),
+      modelClient
+    })
+
+    assert.ok(!probed.includes('keyless'), 'a slot without a key must not be probed')
+    const skipped = checks.find((check) => check.area === 'keyless')
+    assert.ok(skipped, 'the skipped slot must be reported')
+    assert.equal(skipped.level, 'info')
+    assert.match(skipped.message, /KEYLESS_SLOT_KEY is not set/)
+    assert.ok(!checks.some((check) => check.area === 'keyless' && check.level === 'error'))
+    assert.ok(checks.some(
+      (check) => check.area === 'serverless' && /no API key/.test(check.message)
+    ))
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('the doctor CLI skips probing in offline mode', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'workspace-doctor-cli-'))
   try {
@@ -251,11 +290,13 @@ test('the doctor CLI skips probing in offline mode', async () => {
     assert.ok(parsed.checks.some((check) => check.area === 'probing'))
     for (const check of parsed.checks) {
       assert.ok(
-        !/^(local-|colab|kaggle|serverless|opencode|ollama)/.test(check.area),
+        !/reachable|unavailable|was not probed/.test(check.message),
         `offline CLI reported a probe result for ${check.area}`
       )
-      assert.ok(!/reachable|unavailable/.test(check.message))
     }
+    assert.ok(!parsed.checks.some(
+      (check) => /^(local-|colab-|kaggle-|groq$|opencode$)/.test(check.area)
+    ))
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

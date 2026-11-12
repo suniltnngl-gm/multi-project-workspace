@@ -155,7 +155,25 @@ function checkSafetyOptions(models, env, record) {
 }
 
 async function checkModelProbing(models, modelClient, record) {
-  const probes = await Promise.all(models.map(async (model) => {
+  const probeable = []
+  for (const model of models) {
+    // A serverless slot without credentials is intentionally dormant: the
+    // configuration check already warns about the missing key, so probing it
+    // would only repeat the same cause as an unreachable endpoint.
+    if (model.provider === 'serverless' && !model.apiKey) {
+      record(
+        'info',
+        model.id,
+        model.apiKeyEnv
+          ? `${model.label} was not probed because ${model.apiKeyEnv} is not set.`
+          : `${model.label} was not probed because it has no API key configured.`
+      )
+      continue
+    }
+    probeable.push(model)
+  }
+
+  const probes = await Promise.all(probeable.map(async (model) => {
     try {
       return { model, result: await modelClient.probe(model) }
     } catch (error) {
