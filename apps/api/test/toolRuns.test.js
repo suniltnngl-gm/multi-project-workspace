@@ -129,11 +129,18 @@ test('events without a run keep their legacy shape', () => {
 
 test('runs nest, and the innermost run stamps the events', () => {
   const outer = database.startToolRun({ kind: 'api', label: 'outer' })
-  database.enterToolRun(outer)
   try {
-    const inner = database.withToolRun({ kind: 'scan', label: 'inner' }, () => {
-      database.createTask({ title: 'Nested provenance' })
-      return database.currentToolRunId()
+    const inner = database.runWithToolRun(outer, () => {
+      const innerId = database.withToolRun({ kind: 'scan', label: 'inner' }, () => {
+        database.createTask({ title: 'Nested provenance' })
+        return database.currentToolRunId()
+      })
+      assert.equal(
+        database.currentToolRunId(),
+        outer.id,
+        'leaving the inner run restores the outer'
+      )
+      return innerId
     })
     const innerRun = database.getToolRun(inner)
     assert.equal(innerRun.label, 'inner')
@@ -141,10 +148,49 @@ test('runs nest, and the innermost run stamps the events', () => {
     const task = database.listTasks({ search: 'Nested provenance' })[0]
     const createdEvent = database.getTaskDetail(task.id).activity.at(-1)
     assert.equal(createdEvent.run.id, inner, 'the inner run stamped the event')
+    assert.equal(
+      database.currentToolRunId(),
+      null,
+      'runWithToolRun does not leak past its callback'
+    )
   } finally {
     database.finishToolRun(outer.id)
-    assert.equal(database.currentToolRunId(), outer.id, 'leaving the inner run restores the outer')
   }
+})
+
+test('concurrent run contexts never cross-stamp events', async () => {
+  const runA = database.startToolRun({ kind: 'api', label: 'concurrent-a' })
+  const runB = database.startToolRun({ kind: 'api', label: 'concurrent-b' })
+
+  let releaseA
+  const gateA = new Promise((resolve) => { releaseA = resolve })
+  const created = {}
+
+  const flowA = database.runWithToolRun(runA, async () => {
+    await gateA
+    created.a = database.createTask({ title: 'Concurrent A' })
+    return database.currentToolRunId()
+  })
+
+  const flowB = database.runWithToolRun(runB, async () => {
+    created.b = database.createTask({ title: 'Concurrent B' })
+    releaseA()
+    await new Promise((resolve) => setImmediate(resolve))
+    created.b2 = database.createTask({ title: 'Concurrent B2' })
+    return database.currentToolRunId()
+  })
+
+  const [stampedA, stampedB] = await Promise.all([flowA, flowB])
+  assert.equal(stampedA, runA.id)
+  assert.equal(stampedB, runB.id)
+
+  for (const task of [created.a, created.b, created.b2]) {
+    const event = database.getTaskDetail(task.id).activity.at(-1)
+    const expected = task === created.a ? runA.id : runB.id
+    assert.equal(event.run.id, expected, `${task.title} keeps its own run`)
+  }
+  database.finishToolRun(runA.id)
+  database.finishToolRun(runB.id)
 })
 
 test('the runs routes list and filter runs', async () => {

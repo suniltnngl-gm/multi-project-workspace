@@ -3,7 +3,7 @@
 // Decisions: Repository resolution flows through the shared repository scope so files and folders never diverge.
 // Relevant Files: apps/api/src/routes/files.js, apps/api/src/routes/util.js, apps/api/src/routes/repositories.js, apps/api/src/workspaceScan.js
 // Important Context: User file. Route group for /api/files.
-// Work State: Completed: Extracted from app.js as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
+// Work State: Completed: Extracted from app.js as task #45; search query validation added as task #55; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { Router } from 'express'
 import { scanWorkspaceUserFiles } from '../workspaceScan.js'
 import { parseId, validateUserFileInput, USER_FILE_TEXT_FIELDS } from './util.js'
@@ -13,6 +13,14 @@ export function createFilesRouter({ database, repositoryScope }) {
   const router = Router()
 
   router.get('/api/files', (request, response) => {
+    if (
+      request.query.search !== undefined
+      && (typeof request.query.search !== 'string' || request.query.search.length > 200)
+    ) {
+      return response.status(400).json({
+        error: 'Search must be a single string of at most 200 characters.'
+      })
+    }
     let repositoryId
     if (request.query.repository) {
       const repository = database.getRepositoryByName(String(request.query.repository))

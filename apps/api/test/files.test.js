@@ -73,6 +73,20 @@ test('user files can be scanned, created, updated, and deleted', async () => {
   assert.equal(deleteResponse.status, 204)
 })
 
+test('the files search filter rejects non-string and oversized values', async () => {
+  const repeated = await fetch(`${baseUrl}/api/files?search=a&search=b`)
+  assert.equal(repeated.status, 400)
+
+  const nested = await fetch(`${baseUrl}/api/files?search[term]=a`)
+  assert.equal(nested.status, 400)
+
+  const oversized = await fetch(`${baseUrl}/api/files?search=${'a'.repeat(201)}`)
+  assert.equal(oversized.status, 400)
+
+  const empty = await fetch(`${baseUrl}/api/files?search=`)
+  assert.equal(empty.status, 200)
+})
+
 test('header syncs from the repository reach tracked fields', async () => {
   const searchResponse = await fetch(`${baseUrl}/api/files?search=tracking_status`)
   assert.equal(searchResponse.status, 200)

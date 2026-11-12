@@ -3,7 +3,7 @@
 // Decisions: The store takes the tasks store the way gitWorktrees takes repositories so approve and rollback coordinate task creation and deletion atomically (better-sqlite3 nests transactions via savepoints); re-runs skip titles that still have an undecided proposal so pending work is not duplicated, while decided titles may be proposed again; created_task_id survives rollback as the historical record of what the proposal created; priority and task type normalize to their defaults instead of rejecting, mirroring how the improve route coerces model output.
 // Relevant Files: apps/api/src/db/taskProposals.js, apps/api/src/db/tasks.js, apps/api/src/routes/proposals.js, apps/api/src/routes/aiDrafts.js, apps/api/src/database.js
 // Important Context: User file. Composed into the createDatabase surface; fed by the AI improve route.
-// Work State: Completed: Added as task #41; Active: None; Blocked: None; Next Move: Maintain as needed.
+// Work State: Completed: Added as task #41; rollback updates a prepared statement as task #56; Active: None; Blocked: None; Next Move: Maintain as needed.
 const PRIORITIES = new Set(['low', 'medium', 'high', 'urgent'])
 const TASK_TYPES = new Set(['feature', 'bug', 'chore', 'test', 'docs'])
 
@@ -31,6 +31,9 @@ export function createTaskProposalsStore(connection, { tasks } = {}) {
     SET status = ?, created_task_id = ?, decided_at = ?, updated_at = ?
     WHERE id = ?
   `)
+  const rollbackProposalStatement = connection.prepare(
+    'UPDATE task_proposals SET status = ?, updated_at = ? WHERE id = ?'
+  )
 
   function toProposal(row) {
     if (!row) return null
@@ -147,9 +150,7 @@ export function createTaskProposalsStore(connection, { tasks } = {}) {
       tasks.deleteTask(row.created_task_id)
     }
     const now = new Date().toISOString()
-    connection.prepare(
-      'UPDATE task_proposals SET status = ?, updated_at = ? WHERE id = ?'
-    ).run('rolled_back', now, id)
+    rollbackProposalStatement.run('rolled_back', now, id)
     return { proposal: toProposal(getProposalStatement.get(id)) }
   })
 

@@ -10,11 +10,8 @@ const execFileAsync = promisify(execFile)
 const RESULT_SENTINEL = '__WORKSPACE_MODEL_RESULT__'
 const PROBE_CACHE_MS = 60000
 const DEFAULT_HTTP_TIMEOUT_MS = 120000
-const PROMPT_CACHE_ENABLED = process.env.AI_PROMPT_CACHE === 'true'
-const PROMPT_CACHE_TTL_MS = Number(process.env.AI_PROMPT_CACHE_TTL_MS ?? 3600000)
-const PROMPT_CACHE_MAX_ENTRIES = Number(process.env.AI_PROMPT_CACHE_MAX_ENTRIES ?? 100)
-const promptCache = new Map()
-const adaptiveTimeouts = new Map()
+const DEFAULT_PROMPT_CACHE_TTL_MS = 3600000
+const DEFAULT_PROMPT_CACHE_MAX_ENTRIES = 100
 const DEFAULT_COLAB_TIMEOUT_MS = 900000
 const DEFAULT_KAGGLE_TIMEOUT_MS = 3600000
 const SCRIPTS_DIR = fileURLToPath(new URL('../../../scripts', import.meta.url))
@@ -188,10 +185,29 @@ export function createModelClient({
   fetchImpl = fetch,
   runCommand = defaultRunCommand,
   apiKey = '',
-  scriptsDir = SCRIPTS_DIR
+  scriptsDir = SCRIPTS_DIR,
+  promptCache: promptCacheOptions = {}
 } = {}) {
   const colabStates = new Map()
   const probeCache = new Map()
+  // Cache and adaptive timeout state belong to the client instance. Module
+  // singletons leaked cached completions and timeouts between app instances
+  // (and between tests), so each client now starts clean. The prompt cache
+  // options are injectable so tests can exercise it without mutating env.
+  const promptCacheEnabled = promptCacheOptions.enabled
+    ?? (process.env.AI_PROMPT_CACHE === 'true')
+  const promptCacheTtlMs = Number(
+    promptCacheOptions.ttlMs
+      ?? process.env.AI_PROMPT_CACHE_TTL_MS
+      ?? DEFAULT_PROMPT_CACHE_TTL_MS
+  )
+  const promptCacheMaxEntries = Number(
+    promptCacheOptions.maxEntries
+      ?? process.env.AI_PROMPT_CACHE_MAX_ENTRIES
+      ?? DEFAULT_PROMPT_CACHE_MAX_ENTRIES
+  )
+  const promptCache = new Map()
+  const adaptiveTimeouts = new Map()
 
   function authHeaders(model) {
     // Never send the local llama.cpp key to an external endpoint; remote
@@ -610,10 +626,15 @@ export function createModelClient({
   }
 
   function promptCacheKey(model, request) {
+    // Worktree and task are part of the prompt's effective input for the CLI
+    // backends, so two otherwise-identical requests must not share a cache
+    // entry across repositories or task payloads.
     return createHash('sha256')
       .update(model.id)
       .update(JSON.stringify(request.messages ?? []))
       .update(String(request.maxTokens ?? ''))
+      .update(JSON.stringify(request.task ?? null))
+      .update(String(request.worktreePath ?? ''))
       .digest('hex')
   }
 
@@ -666,11 +687,11 @@ export function createModelClient({
   async function complete(model, request) {
     const startedAt = Date.now()
     const auditDir = process.env.AI_AUDIT_DIR || ''
-    const cacheKey = PROMPT_CACHE_ENABLED ? promptCacheKey(model, request) : ''
+    const cacheKey = promptCacheEnabled ? promptCacheKey(model, request) : ''
 
     if (cacheKey) {
       const cached = promptCache.get(cacheKey)
-      if (cached && Date.now() - cached.createdAt < PROMPT_CACHE_TTL_MS) {
+      if (cached && Date.now() - cached.createdAt < promptCacheTtlMs) {
         return cached.content
       }
       if (cached) promptCache.delete(cacheKey)
@@ -699,7 +720,7 @@ export function createModelClient({
     }
 
     if (cacheKey && content && !error) {
-      if (promptCache.size >= PROMPT_CACHE_MAX_ENTRIES) {
+      if (promptCache.size >= promptCacheMaxEntries) {
         const oldestKey = promptCache.keys().next().value
         if (oldestKey) promptCache.delete(oldestKey)
       }

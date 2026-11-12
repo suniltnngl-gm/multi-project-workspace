@@ -1,6 +1,6 @@
 // Objective: Compose the API application from per-domain route groups behind one public entry.
 // Requirements: Keep the createApp signature and behavior identical so index.js and the tests never know about the split; resolve the verifier, task worktrees, and MCP discovery lazily so the API works from any cwd inside the repository; turn every mutating request into a tool run.
-// Decisions: The shared context (scheduler, job store, metrics, budget) is built here and handed to each group; the repository scope is built once and shared by repositories, files, and folders so scoping cannot drift; the JSON error handler stays with the app because it is cross-group; the request-run middleware enters an AsyncLocalStorage context so events written by async handlers stamp their own request even under concurrency, and finishes the run on response finish or close; MCP discovery resolves the repository root once and passes it as the CLI cwd because the catalog is scoped to the working directory.
+// Decisions: The shared context (scheduler, job store, metrics, budget) is built here and handed to each group; the repository scope is built once and shared by repositories, files, and folders so scoping cannot drift; the JSON error handler stays with the app because it is cross-group; the request-run middleware scopes an AsyncLocalStorage context with run() (never enterWith()) so events written by async handlers stamp their own request without one request overwriting another's run, and finishes the run on response finish or close; MCP discovery resolves the repository root once and passes it as the CLI cwd because the catalog is scoped to the working directory.
 // Relevant Files: apps/api/src/app.js, apps/api/src/routes/tasks.js, apps/api/src/routes/aiDrafts.js, apps/api/src/routes/repositories.js, apps/api/src/routes/runs.js, apps/api/src/routes/mcp.js
 // Important Context: User file. The composition entry for the API server and the tests.
 // Work State: Completed: Split into routes/ group modules as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
@@ -156,17 +156,18 @@ export function createApp(database, {
 
   // Every mutating request becomes a tool run, and its context propagates
   // through the route handlers (including awaits), so the activity events
-  // it writes point at the request that produced them. Concurrent requests
-  // each carry their own run. The run finishes when the response settles.
+  // it writes point at the request that produced them. The context is scoped
+  // with run(), not enterWith(), so concurrent requests cannot overwrite one
+  // another's run id. The run finishes when the response settles.
   app.use((request, response, next) => {
     if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)) return next()
     const path = request.originalUrl.split('?')[0]
     const run = database.startToolRun({ kind: 'api', label: `${request.method} ${path}` })
-    database.enterToolRun(run)
+    request.toolRunId = run.id
     const finish = () => database.finishToolRun(run.id)
     response.on('finish', finish)
     response.on('close', finish)
-    next()
+    database.runWithToolRun(run, next)
   })
 
   app.get('/health', (_request, response) => {

@@ -397,6 +397,26 @@ test('OpenCode joins the prompt with newlines and parses text events', async () 
   assert.equal(prompt, 'system: Be brief.\n\nuser: Draft a task')
 })
 
+test('prompt cache is per client instance', async () => {
+  let calls = 0
+  const runCommand = async () => {
+    calls += 1
+    return {
+      stdout: JSON.stringify({ type: 'text', part: { text: `reply ${calls}` } }),
+      stderr: ''
+    }
+  }
+  const options = { runCommand, scriptsDir: SCRIPTS, promptCache: { enabled: true } }
+  const first = createModelClient(options)
+  assert.equal(await first.complete(opencodeModel(), REQUEST), 'reply 1')
+  assert.equal(await first.complete(opencodeModel(), REQUEST), 'reply 1')
+  assert.equal(calls, 1, 'the same client reuses its cached completion')
+
+  const second = createModelClient(options)
+  assert.equal(await second.complete(opencodeModel(), REQUEST), 'reply 2')
+  assert.equal(calls, 2, 'a new client starts with an empty cache')
+})
+
 test('OpenCode reports empty CLI output as a model error', async () => {
   const client = createModelClient({
     runCommand: async () => ({ stdout: '\n\n', stderr: '' }),

@@ -1,9 +1,9 @@
 // Objective: Own the tool-run provenance domain recording which tool or workflow produced each tracked change.
 // Requirements: Every activity event carries the run that produced it; concurrent requests never cross-stamp; runs record when they finished.
-// Decisions: AsyncLocalStorage carries the innermost run through sync and async flows because request handlers await between writes; kind is constrained to api and scan since every CLI mutation either calls the API or goes through the scan methods; finishToolRun only stamps the first completion so response finish and close both firing is harmless.
+// Decisions: AsyncLocalStorage carries the innermost run through sync and async flows because request handlers await between writes, but the store is always scoped with run() - never enterWith() - so one request cannot overwrite another request's run on a shared async fiber; kind is constrained to api and scan since every CLI mutation either calls the API or goes through the scan methods; finishToolRun only stamps the first completion so response finish and close both firing is harmless; list queries are prepared once per shape so repeated reads do not recompile SQL.
 // Relevant Files: apps/api/src/db/toolRuns.js, apps/api/src/db/tasks.js, apps/api/src/db/userFiles.js, apps/api/src/app.js
 // Important Context: User file. Composed into the createDatabase surface and passed to the event-emitting stores.
-// Work State: Completed: Added as task #33; Active: None; Blocked: None; Next Move: Maintain as needed.
+// Work State: Completed: Added as task #33; run contexts are scoped with run() and list queries are precompiled as tasks #52/#53; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { AsyncLocalStorage } from 'node:async_hooks'
 
 const runStorage = new AsyncLocalStorage()
@@ -19,6 +19,19 @@ export function createToolRunsStore(connection) {
     SELECT id, kind, label, created_at, finished_at
     FROM tool_runs
     WHERE id = ?
+  `)
+  const listRunsByKindStatement = connection.prepare(`
+    SELECT id, kind, label, created_at, finished_at
+    FROM tool_runs
+    WHERE kind = ?
+    ORDER BY created_at DESC, id DESC
+    LIMIT ?
+  `)
+  const listRunsStatement = connection.prepare(`
+    SELECT id, kind, label, created_at, finished_at
+    FROM tool_runs
+    ORDER BY created_at DESC, id DESC
+    LIMIT ?
   `)
 
   function toRun(row) {
@@ -51,19 +64,8 @@ export function createToolRunsStore(connection) {
     },
     listToolRuns({ kind, limit = 50 } = {}) {
       const runs = kind
-        ? connection.prepare(`
-            SELECT id, kind, label, created_at, finished_at
-            FROM tool_runs
-            WHERE kind = ?
-            ORDER BY created_at DESC, id DESC
-            LIMIT ?
-          `).all(String(kind), boundedLimit(limit, 50))
-        : connection.prepare(`
-            SELECT id, kind, label, created_at, finished_at
-            FROM tool_runs
-            ORDER BY created_at DESC, id DESC
-            LIMIT ?
-          `).all(boundedLimit(limit, 50))
+        ? listRunsByKindStatement.all(String(kind), boundedLimit(limit, 50))
+        : listRunsStatement.all(boundedLimit(limit, 50))
       return runs.map(toRun)
     },
     /**
@@ -88,12 +90,14 @@ export function createToolRunsStore(connection) {
       }
     },
     /**
-     * Enter a run for the rest of the current async flow. Request middleware
-     * uses this because the response only finishes after the handler returns;
-     * withToolRun would close the run too early.
+     * Run fn with an already-started run in scope. Request middleware uses
+     * this so the rest of the Express handler chain inherits the run through
+     * run(): the context is confined to that callback and its async children,
+     * unlike enterWith(), which mutates a shared fiber and can let concurrent
+     * requests overwrite each other's run id.
      */
-    enterToolRun(run) {
-      runStorage.enterWith({ runId: run.id })
+    runWithToolRun(run, fn) {
+      return runStorage.run({ runId: run.id }, fn)
     },
     currentToolRunId() {
       return runStorage.getStore()?.runId ?? null
