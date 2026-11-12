@@ -3,7 +3,7 @@
 // Decisions: The scope helpers close over the database and are exported as one factory so files and folders consume the identical resolution logic; scannable roots must exist on disk before registration.
 // Relevant Files: apps/api/src/routes/repositories.js, apps/api/src/routes/files.js, apps/api/src/routes/folders.js, apps/api/src/app.js
 // Important Context: User file. Route group for /api/repositories.
-// Work State: Completed: Extracted from app.js as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
+// Work State: Completed: Extracted from app.js as task #45; root resolution cached per scope as task #64; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { Router } from 'express'
 import { execFileSync } from 'node:child_process'
 import { existsSync, statSync } from 'node:fs'
@@ -13,13 +13,17 @@ import { parseId } from './util.js'
 export function createRepositoryScope(database) {
   // Repository registry: tracked rows are scoped per repository root. The
   // API's own repository is registered lazily as the primary row whenever a
-  // default-scoped write needs one.
+  // default-scoped write needs one. The root cannot change for the life of an
+  // app instance, so it resolves once instead of spawning git per scan.
+  let workspaceRoot = null
   function resolveWorkspaceRoot() {
-    return execFileSync('git', ['rev-parse', '--show-toplevel'], {
+    if (workspaceRoot !== null) return workspaceRoot
+    workspaceRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], {
       cwd: process.cwd(),
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore']
     }).trim()
+    return workspaceRoot
   }
 
   function resolvePrimaryRepository() {
