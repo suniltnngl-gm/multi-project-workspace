@@ -256,6 +256,10 @@ test('legacy tracking databases are migrated without losing data', () => {
   ]) {
     assert.ok(tables.includes(created), `missing table ${created}`)
   }
+  const sensorRunColumns = tableColumns(inspection, 'sensor_runs')
+  for (const added of ['trigger_kind', 'promoted']) {
+    assert.ok(sensorRunColumns.includes(added), `sensor_runs is missing ${added}`)
+  }
 
   const quota = inspection.prepare(
     "SELECT policy, bucket, used FROM ai_quota WHERE model = 'legacy-model'"
@@ -323,6 +327,44 @@ test('a legacy database opened with rootDir backfills onto the registered primar
   assert.equal(reopened.getFolderByPath('legacy-folder').id, 1)
   assert.equal(reopened.listGitWorktrees().length, 1)
   reopened.close()
+})
+
+test('sensor runs gain trigger and promotion columns in place', () => {
+  const databasePath = join(directory, 'legacy-sensor-runs.sqlite')
+  const legacy = new Database(databasePath)
+  legacy.exec(`
+    CREATE TABLE sensor_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      status TEXT NOT NULL DEFAULT 'running',
+      sensors INTEGER NOT NULL DEFAULT 0,
+      detected INTEGER NOT NULL DEFAULT 0,
+      created INTEGER NOT NULL DEFAULT 0,
+      updated INTEGER NOT NULL DEFAULT 0,
+      resolved INTEGER NOT NULL DEFAULT 0,
+      reopened INTEGER NOT NULL DEFAULT 0,
+      unchanged INTEGER NOT NULL DEFAULT 0,
+      error TEXT,
+      started_at INTEGER NOT NULL,
+      finished_at INTEGER
+    );
+    INSERT INTO sensor_runs (status, sensors, started_at)
+      VALUES ('completed', 1, 1234);
+  `)
+  legacy.close()
+
+  const migrated = createDatabase(databasePath)
+  const run = migrated.getSensorRun(1)
+  assert.equal(run.status, 'completed')
+  assert.equal(run.triggerKind, 'manual')
+  assert.equal(run.promoted, 0)
+  migrated.close()
+
+  const inspection = new Database(databasePath, { readonly: true })
+  const columns = tableColumns(inspection, 'sensor_runs')
+  for (const added of ['trigger_kind', 'promoted']) {
+    assert.ok(columns.includes(added), `sensor_runs is missing ${added}`)
+  }
+  inspection.close()
 })
 
 test('reopening a migrated database is idempotent', () => {

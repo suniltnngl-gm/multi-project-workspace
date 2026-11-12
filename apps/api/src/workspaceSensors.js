@@ -1,9 +1,10 @@
 // Objective: Detect workspace gaps and improvement opportunities deterministically, without spending model quota.
-// Requirements: Sensors read one immutable snapshot and never call a model or a provider; finding keys stay stable across scans so lifecycle state survives; thresholds come from configuration; every detector is independently testable.
-// Decisions: One registry of pure detect(snapshot) functions behind buildWorkspaceSnapshot() keeps detection separate from persistence and from the API/CLI; the snapshot carries only data plus local filesystem checks, so the same rules run in the API and in scripts; aggregated detectors report a count and a bounded sample instead of one finding per file to keep the queue actionable.
-// Relevant Files: apps/api/src/workspaceSensors.js, apps/api/src/db/sensors.js, apps/api/src/routes/sensors.js, apps/api/src/providerQuota.js, apps/api/src/modelBudget.js
+// Requirements: Sensors read one immutable snapshot and never call a model or a provider; finding keys stay stable across scans so lifecycle state survives; thresholds come from configuration; every detector is independently testable; meta suggestions only appear when the snapshot proves the gap.
+// Decisions: One registry of pure detect(snapshot) functions behind buildWorkspaceSnapshot() keeps detection separate from persistence and from the API/CLI; the snapshot carries only data plus local filesystem checks, so the same rules run in the API and in scripts; aggregated detectors report a count and a bounded sample instead of one finding per file to keep the queue actionable; SENSOR_IDEAS is a fixed evidence-gated catalog rather than free-form model output.
+// Relevant Files: apps/api/src/workspaceSensors.js, apps/api/src/sensorCycles.js, apps/api/src/db/sensors.js, apps/api/src/routes/sensors.js, apps/api/src/providerQuota.js, apps/api/src/modelBudget.js
 // Important Context: User file. Zero-token control plane: findings complement, but never replace, model-generated proposals.
 import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { modelQuotaProfiles } from './modelRegistry.js'
 import { resolveQuotaProfiles } from './modelBudget.js'
 import { providerSnapshots, quotaScopeForModel } from './providerQuota.js'
@@ -12,6 +13,7 @@ export const SENSOR_SEVERITIES = Object.freeze(['low', 'medium', 'high'])
 export const SENSOR_DEFAULTS = Object.freeze({
   staleTaskHours: 72,
   staleRunHours: 24,
+  metadataStaleHours: 720,
   sampleLimit: 10
 })
 
@@ -38,15 +40,20 @@ export function resolveSensorConfig({ env = process.env } = {}) {
   const staleRunHours = readNumber(
     env, 'SENSOR_STALE_RUN_HOURS', SENSOR_DEFAULTS.staleRunHours, { max: 24 * 365 }
   )
+  const metadataStaleHours = readNumber(
+    env, 'SENSOR_STALE_METADATA_HOURS', SENSOR_DEFAULTS.metadataStaleHours, { max: 24 * 365 }
+  )
   const sampleLimit = Math.floor(readNumber(
     env, 'SENSOR_SAMPLE_LIMIT', SENSOR_DEFAULTS.sampleLimit, { min: 1, max: 100 }
   ))
   return {
     staleTaskHours,
     staleRunHours,
+    metadataStaleHours,
     sampleLimit,
     staleTaskMs: staleTaskHours * HOUR_MS,
-    staleRunMs: staleRunHours * HOUR_MS
+    staleRunMs: staleRunHours * HOUR_MS,
+    metadataStaleMs: metadataStaleHours * HOUR_MS
   }
 }
 
@@ -149,6 +156,17 @@ export function buildWorkspaceSnapshot({
     ...repository,
     rootExists: safePathExists(pathExists, repository.rootPath)
   }))
+  const repositoryRoots = new Map(
+    repositories.map((repository) => [repository.id, repository.rootPath])
+  )
+  const folders = database.listFolders().map((folder) => {
+    const root = repositoryRoots.get(folder.repositoryId)
+    const absolutePath = root ? join(root, folder.path) : folder.path
+    return {
+      ...folder,
+      pathExists: safePathExists(pathExists, absolutePath)
+    }
+  })
   const gitWorktrees = database.listGitWorktrees().map((worktree) => ({
     ...worktree,
     pathExists: safePathExists(pathExists, worktree.worktreePath)
@@ -161,6 +179,7 @@ export function buildWorkspaceSnapshot({
     tasks,
     agentRuns,
     agentRunUsage,
+    findings: database.listSensorFindings({ limit: 500 }),
     models: modelEntries,
     providers: providerSnapshots({
       models: Array.isArray(models) ? models : [],
@@ -171,11 +190,167 @@ export function buildWorkspaceSnapshot({
     repositories,
     gitWorktrees,
     userFiles: database.listUserFiles(),
-    folders: database.listFolders(),
+    folders,
     agentScripts: database.listAgentScripts({ limit: 500 }),
     mcpServers: database.listMcpServers()
   }
 }
+
+// Candidate detectors the meta-sensor can propose. These are intentionally not
+// implemented as detectors yet: each idea describes a coverage gap that the
+// current snapshot proves is worth closing, so the suggestion queue is
+// evidence-based instead of a generic wish list.
+export const SENSOR_IDEAS = Object.freeze([
+  {
+    id: 'task.project_blocker_cluster',
+    title: 'Cluster blocked tasks by project',
+    description: 'Report one finding when several unfinished tasks in the same project are blocked, because the blocker is likely project-level.',
+    category: 'tasks',
+    severity: 'medium',
+    rationale: 'Blocked tasks are currently reported one by one, which hides project-level dependencies and creates duplicate triage.',
+    applies(snapshot) {
+      return this.evidence(snapshot).projects.length > 0
+    },
+    evidence(snapshot) {
+      const groups = new Map()
+      for (const task of snapshot.tasks) {
+        if (task.status !== 'blocked') continue
+        const project = text(task.project) || 'workspace'
+        const group = groups.get(project) ?? []
+        group.push(task.id)
+        groups.set(project, group)
+      }
+      return {
+        projects: [...groups.entries()]
+          .filter(([, taskIds]) => taskIds.length >= 2)
+          .map(([project, taskIds]) => ({ project, taskIds, count: taskIds.length }))
+          .sort((a, b) => b.count - a.count || a.project.localeCompare(b.project))
+      }
+    }
+  },
+  {
+    id: 'task.priority_aging',
+    title: 'High-priority task is aging',
+    description: 'Report high or urgent todo tasks that have waited longer than the stale-task window without starting.',
+    category: 'tasks',
+    severity: 'medium',
+    rationale: 'Staleness is currently checked only for in-progress tasks, so high-priority work can wait indefinitely in todo.',
+    applies(snapshot) {
+      return this.evidence(snapshot).tasks.length > 0
+    },
+    evidence(snapshot) {
+      return {
+        tasks: snapshot.tasks
+          .filter((task) => task.status === 'todo' && ['high', 'urgent'].includes(task.priority))
+          .map((task) => ({ task, age: ageMs(task.updated_at, snapshot.now) }))
+          .filter((entry) => entry.age !== null && entry.age >= snapshot.thresholds.staleTaskMs)
+          .map((entry) => ({
+            taskId: entry.task.id,
+            priority: entry.task.priority,
+            ageHours: hours(entry.age)
+          }))
+      }
+    }
+  },
+  {
+    id: 'tracking.folder_missing',
+    title: 'Tracked folder is missing on disk',
+    description: 'Report tracked folders whose path no longer exists under their repository root.',
+    category: 'tracking',
+    severity: 'medium',
+    rationale: 'File and worktree existence are checked, but folder rows can outlive their directories without any signal.',
+    applies(snapshot) {
+      return this.evidence(snapshot).folders.length > 0
+    },
+    evidence(snapshot) {
+      return {
+        folders: snapshot.folders
+          .filter((folder) => folder.pathExists === false)
+          .map((folder) => ({ folderId: folder.id, repositoryId: folder.repositoryId, path: folder.path }))
+      }
+    }
+  },
+  {
+    id: 'tracking.environment_stale',
+    title: 'Environment facts are stale',
+    description: 'Report environment facts that have not been refreshed within the metadata window.',
+    category: 'tracking',
+    severity: 'low',
+    rationale: 'Environment rows can guide model and tool decisions long after the runtime changed; staleness is currently invisible.',
+    applies(snapshot) {
+      return this.evidence(snapshot).facts.length > 0
+    },
+    evidence(snapshot) {
+      return {
+        facts: snapshot.environments
+          .map((fact) => ({ fact, age: ageMs(fact.checkedAt, snapshot.now) }))
+          .filter((entry) => entry.age !== null && entry.age >= snapshot.thresholds.metadataStaleMs)
+          .map((entry) => ({ name: entry.fact.name, ageHours: hours(entry.age) }))
+      }
+    }
+  },
+  {
+    id: 'tracking.mcp_server_stale',
+    title: 'MCP server has not been seen recently',
+    description: 'Report discovered MCP servers whose last successful sighting is older than the metadata window.',
+    category: 'tracking',
+    severity: 'low',
+    rationale: 'A vanished MCP server keeps its catalog rows and can mislead agents about available tools.',
+    applies(snapshot) {
+      return this.evidence(snapshot).servers.length > 0
+    },
+    evidence(snapshot) {
+      return {
+        servers: snapshot.mcpServers
+          .map((server) => ({ server, age: ageMs(server.lastSeenAt, snapshot.now) }))
+          .filter((entry) => entry.age !== null && entry.age >= snapshot.thresholds.metadataStaleMs)
+          .map((entry) => ({ name: entry.server.name, ageHours: hours(entry.age) }))
+      }
+    }
+  },
+  {
+    id: 'tracking.script_stale',
+    title: 'Verified script is stale',
+    description: 'Report scripts whose last verification is older than the metadata window.',
+    category: 'tracking',
+    severity: 'low',
+    rationale: 'A script can keep its verified flag while its command or environment drifts; only never-verified scripts are checked today.',
+    applies(snapshot) {
+      return this.evidence(snapshot).scripts.length > 0
+    },
+    evidence(snapshot) {
+      return {
+        scripts: snapshot.agentScripts
+          .filter((script) => script.verifiedAt !== undefined)
+          .map((script) => ({ script, age: ageMs(script.verifiedAt, snapshot.now) }))
+          .filter((entry) => entry.age !== null && entry.age >= snapshot.thresholds.metadataStaleMs)
+          .map((entry) => ({ scriptId: entry.script.id, name: entry.script.name, ageHours: hours(entry.age) }))
+      }
+    }
+  },
+  {
+    id: 'quota.provider_recurring_block',
+    title: 'Provider keeps blocking work',
+    description: 'Report a provider that has been blocked across several scans and suggest cooldown-aware routing or a fallback model.',
+    category: 'quota',
+    severity: 'medium',
+    rationale: 'A provider blocked once is routine; a provider blocked repeatedly is a routing problem that should become work.',
+    applies(snapshot) {
+      return this.evidence(snapshot).providers.length > 0
+    },
+    evidence(snapshot) {
+      return {
+        providers: (snapshot.findings ?? [])
+          .filter((entry) => entry.sensorId === 'provider.quota_blocked' && entry.occurrences >= 3)
+          .map((entry) => ({
+            findingId: entry.id,
+            groupKey: entry.entity?.id,
+            occurrences: entry.occurrences
+          }))
+      }
+    }
+  }
+])
 
 // One detector per gap. Each returns zero or more findings; keys are stable for
 // the same entity so a rescan updates the same row instead of duplicating it.
@@ -713,6 +888,42 @@ export const SENSORS = Object.freeze([
           entityId: domain,
           details: { domain, label, count: 0 }
         }))
+    }
+  },
+  {
+    id: 'meta.sensor_suggestion',
+    title: 'A new sensor could cover this gap',
+    description: 'Evidence from the current snapshot matches a candidate detector that is not implemented yet.',
+    category: 'meta',
+    defaultSeverity: 'low',
+    detect(snapshot) {
+      const implemented = new Set(SENSORS.map((sensor) => sensor.id))
+      const found = []
+      for (const idea of SENSOR_IDEAS) {
+        if (implemented.has(idea.id) || !idea.applies(snapshot)) continue
+        const evidence = idea.evidence(snapshot)
+        found.push(finding('meta.sensor_suggestion', {
+          key: `idea:${idea.id}`,
+          severity: idea.severity ?? 'low',
+          title: `Sensor idea: ${idea.title}`,
+          summary: idea.rationale,
+          entityType: 'sensor_idea',
+          entityId: idea.id,
+          details: {
+            suggestedSensor: {
+              id: idea.id,
+              title: idea.title,
+              description: idea.description,
+              category: idea.category,
+              defaultSeverity: idea.severity ?? 'low'
+            },
+            rationale: idea.rationale,
+            detectionMode: 'deterministic',
+            evidence
+          }
+        }))
+      }
+      return found
     }
   }
 ])

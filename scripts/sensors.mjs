@@ -1,20 +1,30 @@
 #!/usr/bin/env node
 // Objective: Run deterministic workspace sensors and manage their findings without spending model quota.
-// Requirements: Support scan, list, show, runs, catalog, acknowledge, dismiss, resolve, reopen, and promote; work without the API running; print JSON on request.
-// Decisions: The CLI imports the same registry, snapshot builder, and persistence layer as the API so both surfaces cannot drift; scans create an audit run exactly like POST /api/sensors/scan; list defaults to actionable findings only.
-// Relevant Files: scripts/sensors.mjs, apps/api/src/workspaceSensors.js, apps/api/src/db/sensors.js, apps/api/src/modelRegistry.js, apps/api/src/modelBudget.js
+// Requirements: Support scan, cycle, suggestions, list, show, runs, catalog, acknowledge, dismiss, resolve, reopen, and promote; work without the API running; print JSON on request.
+// Decisions: The CLI imports the same registry, snapshot builder, cycle runner, and persistence layer as the API so both surfaces cannot drift; scans and cycles create audit runs exactly like their HTTP equivalents; list defaults to actionable findings only.
+// Relevant Files: scripts/sensors.mjs, apps/api/src/workspaceSensors.js, apps/api/src/sensorCycles.js, apps/api/src/db/sensors.js, apps/api/src/modelRegistry.js, apps/api/src/modelBudget.js
 // Important Context: User file. Zero-token control-plane tool; no provider is contacted.
 import { resolve } from 'node:path'
 import { createDatabase } from '../apps/api/src/database.js'
 import { createModelRegistry, modelQuotaProfiles } from '../apps/api/src/modelRegistry.js'
 import { createModelBudget } from '../apps/api/src/modelBudget.js'
-import { scanWorkspaceSensors, SENSOR_CATALOG } from '../apps/api/src/workspaceSensors.js'
+import { AUTO_PROMOTE_POLICIES, runSensorCycle } from '../apps/api/src/sensorCycles.js'
+import { SENSOR_CATALOG, SENSOR_IDEAS } from '../apps/api/src/workspaceSensors.js'
 import { loadWorkspaceEnv, ROOT_DIR } from './env.mjs'
 
 const COMMANDS = new Set([
-  'scan', 'list', 'show', 'runs', 'catalog',
+  'scan', 'list', 'show', 'runs', 'catalog', 'suggestions', 'cycle',
   'ack', 'dismiss', 'resolve', 'reopen', 'promote'
 ])
+const AUTO_PROMOTE_SET = new Set(AUTO_PROMOTE_POLICIES)
+const TASK_TYPES = new Set(['feature', 'bug', 'chore', 'test', 'docs'])
+const IDEA_CATALOG = SENSOR_IDEAS.map((idea) => ({
+  id: idea.id,
+  title: idea.title,
+  description: idea.description,
+  category: idea.category,
+  defaultSeverity: idea.severity ?? 'low'
+}))
 const arguments_ = process.argv.slice(2)
 const command = arguments_[0] ?? 'scan'
 
@@ -50,10 +60,12 @@ const databasePath = resolve(
 
 function usage() {
   console.error(
-    'Usage: sensors.mjs <scan|list|show|runs|catalog|ack|dismiss|resolve|reopen|promote> [options]\n' +
+    'Usage: sensors.mjs <scan|list|show|runs|catalog|suggestions|cycle|ack|dismiss|resolve|reopen|promote> [options]\n' +
     '  list [--state STATE] [--severity LEVEL] [--sensor ID] [--limit N] [--all]\n' +
     '  show <id> [--events N]\n' +
     '  runs [--limit N]\n' +
+    '  suggestions [--state STATE] [--limit N] [--all]\n' +
+    '  cycle [--auto-promote off|high|medium|all] [--project NAME] [--task-type T]\n' +
     '  ack|dismiss|resolve|reopen <id> [--note TEXT]\n' +
     '  promote <id> [--title TEXT] [--description TEXT] [--priority P] [--project NAME] [--task-type T]\n' +
     '  --database PATH  --json'
@@ -92,10 +104,9 @@ function main() {
     const previous = list[index - 1]
     return previous === undefined || !previous.startsWith('--')
   })
-  const id = command === 'scan' || command === 'list' || command === 'runs' || command === 'catalog'
-    ? null
-    : parseId(positionals[0])
-  if (command !== 'scan' && command !== 'list' && command !== 'runs' && command !== 'catalog' && id === null) {
+  const needsId = !['scan', 'list', 'runs', 'catalog', 'suggestions', 'cycle'].includes(command)
+  const id = needsId ? parseId(positionals[0]) : null
+  if (needsId && id === null) {
     console.error(`${command} requires a numeric finding id.`)
     process.exitCode = 2
     return
@@ -104,47 +115,120 @@ function main() {
   const database = createDatabase(databasePath, { rootDir: ROOT_DIR })
   try {
     if (command === 'catalog') {
-      if (!emit({ sensors: SENSOR_CATALOG })) {
+      if (!emit({ sensors: SENSOR_CATALOG, ideas: IDEA_CATALOG })) {
         for (const sensor of SENSOR_CATALOG) {
           console.log(`${sensor.id}  [${sensor.category}/${sensor.defaultSeverity}]  ${sensor.title}`)
           console.log(`  ${sensor.description}`)
+        }
+        console.log('\nCandidate sensor ideas (suggested by the meta detector when evidence applies):')
+        for (const idea of IDEA_CATALOG) {
+          console.log(`${idea.id}  [${idea.category}/${idea.defaultSeverity}]  ${idea.title}`)
+          console.log(`  ${idea.description}`)
         }
       }
       return
     }
 
-    if (command === 'scan') {
+    if (command === 'scan' || command === 'cycle') {
       const models = createModelRegistry()
       const modelBudget = createModelBudget({
         repository: database,
         profiles: modelQuotaProfiles(models)
       })
-      const run = database.createSensorRun({ sensors: SENSOR_CATALOG.length })
-      const result = scanWorkspaceSensors({ database, models, modelBudget })
-      const counts = database.applySensorScan(result.findings, { scanId: run.id })
-      const finished = database.finishSensorRun(run.id, {
-        status: result.errors.length > 0 ? 'failed' : 'completed',
-        sensors: SENSOR_CATALOG.length,
-        detected: result.findings.length,
-        ...counts,
-        error: result.errors.length > 0
-          ? result.errors.map((entry) => `${entry.sensorId}: ${entry.error}`).join('\n').slice(0, 2000)
-          : null
-      })
-      const summary = database.getSensorSummary()
-      if (!emit({ run: finished, counts, errors: result.errors, summary })) {
+      const autoPromote = command === 'cycle' ? flag('auto-promote') : 'off'
+      const project = flag('project')
+      const taskType = flag('task-type')
+      if (autoPromote !== undefined && !AUTO_PROMOTE_SET.has(autoPromote)) {
+        console.error(`--auto-promote must be one of: ${AUTO_PROMOTE_POLICIES.join(', ')}.`)
+        process.exitCode = 2
+        return
+      }
+      if (project !== undefined && !project.trim()) {
+        console.error('--project must not be empty.')
+        process.exitCode = 2
+        return
+      }
+      if (taskType !== undefined && !TASK_TYPES.has(taskType)) {
+        console.error(`--task-type must be one of: ${[...TASK_TYPES].join(', ')}.`)
+        process.exitCode = 2
+        return
+      }
+      let result
+      try {
+        result = runSensorCycle({
+          database,
+          models,
+          modelBudget,
+          triggerKind: 'cli',
+          autoPromote,
+          promoteProject: project,
+          promoteTaskType: taskType
+        })
+      } catch (error) {
+        console.error(error.message)
+        process.exitCode = 2
+        return
+      }
+      if (result.failed) {
+        console.error(`Sensor ${command} failed: ${result.error}`)
+        process.exitCode = 1
+        return
+      }
+      const { run, counts, summary, errors, promotions } = result
+      if (!emit({
+        run,
+        counts,
+        promotions,
+        errors,
+        summary,
+        findings: result.findings
+      })) {
         console.log(
-          `Scan #${finished.id}: ${finished.detected} detected, ${counts.created} created, ` +
-          `${counts.updated} updated, ${counts.resolved} resolved, ${counts.reopened} reopened, ` +
-          `${counts.unchanged} unchanged.`
+          `${command === 'cycle' ? 'Cycle' : 'Scan'} #${run.id} (${run.triggerKind}): ` +
+          `${run.detected} detected, ${counts.created} created, ` +
+          `${counts.updated} updated, ${counts.resolved} resolved, ` +
+          `${counts.reopened} reopened, ${counts.unchanged} unchanged, ` +
+          `${run.promoted} promoted.`
         )
+        for (const promotion of promotions) {
+          console.log(`  promoted #${promotion.finding.id} -> task #${promotion.task.id}: ${promotion.task.title}`)
+        }
         console.log(
           `Active findings: ${summary.active} (high ${summary.bySeverity.high}, ` +
           `medium ${summary.bySeverity.medium}, low ${summary.bySeverity.low}).`
         )
-        if (result.errors.length > 0) {
-          for (const error of result.errors) console.error(`${error.sensorId}: ${error.error}`)
+        if (errors.length > 0) {
+          for (const error of errors) console.error(`${error.sensorId}: ${error.error}`)
         }
+      }
+      return
+    }
+
+    if (command === 'suggestions') {
+      const state = flag('state')
+      const limitValue = flag('limit')
+      const limit = limitValue === undefined ? 100 : Number(limitValue)
+      if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+        console.error('--limit must be an integer between 1 and 500.')
+        process.exitCode = 2
+        return
+      }
+      let suggestions = database.listSensorFindings({
+        state,
+        sensorId: 'meta.sensor_suggestion',
+        limit
+      })
+      if (state === undefined && !arguments_.includes('--all')) {
+        suggestions = suggestions.filter(
+          (finding) => ['open', 'acknowledged'].includes(finding.state)
+        )
+      }
+      if (!emit({ suggestions, ideas: IDEA_CATALOG })) {
+        for (const finding of suggestions) printFinding(finding)
+        console.error(`Suggestions: ${suggestions.length}`)
+        console.error(
+          `Candidate ideas: ${IDEA_CATALOG.map((idea) => idea.id).join(', ')}`
+        )
       }
       return
     }

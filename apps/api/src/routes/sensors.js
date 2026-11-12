@@ -1,16 +1,29 @@
-// Objective: Expose deterministic workspace sensors over the local API: catalog, scans, findings, lifecycle decisions, run audit, and promotion into tasks.
-// Requirements: Every read is token-free for the local board; scans spend no model quota; lifecycle errors map to 404/409 verbatim; promotion is only valid from an open finding.
-// Decisions: The route group owns request validation only and delegates detection to workspaceSensors and persistence to the sensors store, so the CLI and the API share one rule set; the scan route creates the run row first so a crash still leaves an audit trail.
-// Relevant Files: apps/api/src/routes/sensors.js, apps/api/src/workspaceSensors.js, apps/api/src/db/sensors.js, apps/api/src/app.js
+// Objective: Expose deterministic workspace sensors over the local API: catalog, scans, atomic improvement cycles, suggestions, findings, lifecycle decisions, run audit, and promotion into tasks.
+// Requirements: Every read is token-free for the local board; scans and cycles spend no model quota; lifecycle errors map to 404/409 verbatim; promotion is only valid from an open finding; cycle input is validated before any detection runs.
+// Decisions: The route group owns request validation only and delegates detection to workspaceSensors, orchestration to sensorCycles, and persistence to the sensors store, so the CLI and the API share one rule set; both scan and cycle create the run and findings inside one store transaction.
+// Relevant Files: apps/api/src/routes/sensors.js, apps/api/src/workspaceSensors.js, apps/api/src/sensorCycles.js, apps/api/src/db/sensors.js, apps/api/src/app.js
 // Important Context: User file. Findings are persisted separately from model-generated task proposals.
 import { Router } from 'express'
-import { SENSOR_CATALOG, scanWorkspaceSensors, resolveSensorConfig } from '../workspaceSensors.js'
+import {
+  SENSOR_CATALOG,
+  SENSOR_IDEAS,
+  resolveSensorConfig
+} from '../workspaceSensors.js'
+import { AUTO_PROMOTE_POLICIES, runSensorCycle } from '../sensorCycles.js'
 import { SENSOR_SEVERITIES, SENSOR_STATES } from '../db/sensors.js'
 
 const SENSOR_STATE_SET = new Set(SENSOR_STATES)
 const SENSOR_SEVERITY_SET = new Set(SENSOR_SEVERITIES)
+const AUTO_PROMOTE_SET = new Set(AUTO_PROMOTE_POLICIES)
 const TASK_PRIORITIES = new Set(['low', 'medium', 'high', 'urgent'])
 const TASK_TYPES = new Set(['feature', 'bug', 'chore', 'test', 'docs'])
+const IDEA_CATALOG = Object.freeze(SENSOR_IDEAS.map((idea) => ({
+  id: idea.id,
+  title: idea.title,
+  description: idea.description,
+  category: idea.category,
+  defaultSeverity: idea.severity ?? 'low'
+})))
 
 function parseId(value) {
   if (typeof value !== 'string' || !/^[1-9]\d*$/.test(value)) return null
@@ -43,46 +56,114 @@ export function createSensorsRouter({ database, models = [], modelBudget, env = 
   router.get('/api/sensors/catalog', (_request, response) => {
     response.json({
       sensors: SENSOR_CATALOG,
-      thresholds: (({ staleTaskHours, staleRunHours, sampleLimit }) => ({
+      ideas: IDEA_CATALOG,
+      thresholds: (({ staleTaskHours, staleRunHours, metadataStaleHours, sampleLimit }) => ({
         staleTaskHours,
         staleRunHours,
+        metadataStaleHours,
         sampleLimit
       }))(resolveSensorConfig({ env })),
       states: SENSOR_STATES,
-      severities: SENSOR_SEVERITIES
+      severities: SENSOR_SEVERITIES,
+      autoPromotePolicies: AUTO_PROMOTE_POLICIES
     })
   })
 
   router.post('/api/sensors/scan', (_request, response) => {
-    const run = database.createSensorRun({ sensors: SENSOR_CATALOG.length })
-    try {
-      const result = scanWorkspaceSensors({ database, models, modelBudget, env })
-      const counts = database.applySensorScan(result.findings, {
-        scanId: run.id
-      })
-      const finished = database.finishSensorRun(run.id, {
-        status: result.errors.length > 0 ? 'failed' : 'completed',
-        sensors: SENSOR_CATALOG.length,
-        detected: result.findings.length,
-        ...counts,
-        error: result.errors.length > 0
-          ? result.errors.map((entry) => `${entry.sensorId}: ${entry.error}`).join('\n').slice(0, 2000)
-          : null
-      })
-      return response.json({
-        run: finished,
-        findings: result.findings,
-        errors: result.errors,
-        counts,
-        summary: database.getSensorSummary()
-      })
-    } catch (error) {
-      const failed = database.failSensorRun(run.id, error.message)
+    const result = runSensorCycle({
+      database,
+      models,
+      modelBudget,
+      env,
+      triggerKind: 'api',
+      autoPromote: 'off'
+    })
+    if (result.failed) {
       return response.status(500).json({
-        error: `Sensor scan failed: ${error.message}`,
-        run: failed
+        error: `Sensor scan failed: ${result.error}`,
+        run: result.run,
+        errors: result.errors
       })
     }
+    return response.json({
+      run: result.run,
+      findings: result.findings,
+      errors: result.errors,
+      counts: result.counts,
+      summary: result.summary
+    })
+  })
+
+  router.post('/api/sensors/cycles', (request, response) => {
+    const body = request.body ?? {}
+    for (const field of ['auto_promote', 'project', 'task_type']) {
+      if (body[field] !== undefined && typeof body[field] !== 'string') {
+        return response.status(400).json({ error: `${field} must be a string.` })
+      }
+    }
+    if (body.auto_promote !== undefined && !AUTO_PROMOTE_SET.has(body.auto_promote)) {
+      return response.status(400).json({
+        error: `auto_promote must be one of: ${AUTO_PROMOTE_POLICIES.join(', ')}.`
+      })
+    }
+    if (body.task_type !== undefined && !TASK_TYPES.has(body.task_type)) {
+      return response.status(400).json({
+        error: `task_type must be one of: ${[...TASK_TYPES].join(', ')}.`
+      })
+    }
+    if (body.project !== undefined && !body.project.trim()) {
+      return response.status(400).json({ error: 'project must not be empty.' })
+    }
+    const result = runSensorCycle({
+      database,
+      models,
+      modelBudget,
+      env,
+      triggerKind: 'api',
+      autoPromote: body.auto_promote,
+      promoteProject: body.project,
+      promoteTaskType: body.task_type
+    })
+    if (result.failed) {
+      return response.status(500).json({
+        error: `Sensor cycle failed: ${result.error}`,
+        run: result.run,
+        errors: result.errors
+      })
+    }
+    return response.json({
+      run: result.run,
+      findings: result.findings,
+      errors: result.errors,
+      counts: result.counts,
+      promotions: result.promotions,
+      summary: result.summary
+    })
+  })
+
+  router.get('/api/sensors/suggestions', (request, response) => {
+    let state
+    if (request.query.state !== undefined) {
+      if (typeof request.query.state !== 'string' || !SENSOR_STATE_SET.has(request.query.state)) {
+        return response.status(400).json({ error: `State must be one of: ${SENSOR_STATES.join(', ')}.` })
+      }
+      state = request.query.state
+    }
+    const limit = parseLimit(request.query.limit, 100, 500)
+    if (limit === null) {
+      return response.status(400).json({ error: 'Limit must be a positive integer of at most 500.' })
+    }
+    let suggestions = database.listSensorFindings({
+      state,
+      sensorId: 'meta.sensor_suggestion',
+      limit
+    })
+    if (state === undefined) {
+      suggestions = suggestions.filter(
+        (finding) => ['open', 'acknowledged'].includes(finding.state)
+      )
+    }
+    return response.json({ suggestions, ideas: IDEA_CATALOG })
   })
 
   router.get('/api/sensors/summary', (_request, response) => {

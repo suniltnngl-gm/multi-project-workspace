@@ -8,9 +8,23 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, test } from 'node:test'
+import Database from 'better-sqlite3'
 import { createApp } from '../src/app.js'
 import { createDatabase } from '../src/database.js'
-import { runSensorScan, SENSOR_CATALOG } from '../src/workspaceSensors.js'
+import { runMigrations } from '../src/db/migrations.js'
+import { createSensorsStore } from '../src/db/sensors.js'
+import {
+  autoPromoteSeverities,
+  createSensorCycleScheduler,
+  resolveCycleConfig,
+  runSensorCycle
+} from '../src/sensorCycles.js'
+import {
+  runSensorScan,
+  SENSOR_CATALOG,
+  SENSOR_IDEAS,
+  SENSORS
+} from '../src/workspaceSensors.js'
 
 let directory
 let database
@@ -24,9 +38,11 @@ function syntheticSnapshot() {
   const thresholds = {
     staleTaskHours: 72,
     staleRunHours: 24,
+    metadataStaleHours: 720,
     sampleLimit: 10,
     staleTaskMs: 72 * HOUR,
-    staleRunMs: 24 * HOUR
+    staleRunMs: 24 * HOUR,
+    metadataStaleMs: 720 * HOUR
   }
   const old = new Date(NOW - 100 * HOUR).toISOString()
   return {
@@ -138,7 +154,8 @@ test('detectors report every scripted gap from one snapshot', () => {
     'tracking.folders_without_objective',
     'tracking.repository_root_missing',
     'tracking.worktree_missing',
-    'tracking.script_unverified'
+    'tracking.script_unverified',
+    'meta.sensor_suggestion'
   ]) {
     assert.ok(sensors.has(id), `expected ${id}`)
   }
@@ -321,3 +338,366 @@ test('sensor routes scan, filter, transition, promote, and audit', async () => {
   assert.ok(summary.total >= 1)
   assert.equal(summary.states.open + summary.states.acknowledged, summary.active)
 })
+
+test('detectors suggest a new sensor only when the snapshot proves the gap', () => {
+  const snapshot = structuralClone(syntheticSnapshot())
+  const { findings, errors } = runSensorScan({ snapshot })
+  assert.deepEqual(errors, [])
+
+  const projectIdea = findings.find(
+    (finding) => finding.sensorId === 'meta.sensor_suggestion'
+      && finding.entity.id === 'task.project_blocker_cluster'
+  )
+  assert.ok(projectIdea, 'two blocked workspace tasks prove the cluster gap')
+  assert.equal(projectIdea.details.detectionMode, 'deterministic')
+  assert.equal(projectIdea.details.suggestedSensor.id, 'task.project_blocker_cluster')
+  assert.equal(projectIdea.details.evidence.projects[0].project, 'workspace')
+  assert.equal(projectIdea.details.evidence.projects[0].count, 2)
+
+  const covered = new Set(SENSORS.map((sensor) => sensor.id))
+  for (const idea of SENSOR_IDEAS) {
+    assert.ok(!covered.has(idea.id), `${idea.id} is already implemented but still suggested`)
+  }
+
+  snapshot.folders[0].pathExists = false
+  const withFolderGap = runSensorScan({ snapshot }).findings.find(
+    (finding) => finding.sensorId === 'meta.sensor_suggestion'
+      && finding.entity.id === 'tracking.folder_missing'
+  )
+  assert.ok(withFolderGap, 'a missing tracked folder proves the folder gap')
+  assert.equal(withFolderGap.details.evidence.folders[0].path, 'src')
+
+  const differentProjects = structuralClone(syntheticSnapshot())
+  differentProjects.tasks[0].project = 'alpha'
+  differentProjects.tasks[3].project = 'beta'
+  const none = runSensorScan({ snapshot: differentProjects }).findings.filter(
+    (finding) => finding.sensorId === 'meta.sensor_suggestion'
+  )
+  assert.equal(none.length, 0, 'split projects do not prove a project-level cluster')
+
+  const catalog = new Set(SENSOR_CATALOG.map((sensor) => sensor.id))
+  assert.ok(catalog.has('meta.sensor_suggestion'))
+})
+
+test('an atomic cycle records run, findings, and promotions together', () => {
+  const databasePath = join(directory, 'cycle-atomic.sqlite')
+  const cycleDatabase = createDatabase(databasePath)
+  try {
+    const high = {
+      key: 'test:cycle-high',
+      sensorId: 'test.cycle',
+      severity: 'high',
+      title: 'Cycle high',
+      summary: 'High finding',
+      entity: { type: 'test', id: 'high' },
+      details: {}
+    }
+    const medium = {
+      key: 'test:cycle-medium',
+      sensorId: 'test.cycle',
+      severity: 'medium',
+      title: 'Cycle medium',
+      summary: 'Medium finding',
+      entity: { type: 'test', id: 'medium' },
+      details: {}
+    }
+    const at = Date.parse('2026-02-01T00:00:00.000Z')
+    const result = cycleDatabase.applySensorCycle({
+      findings: [high, medium],
+      sensors: 2,
+      triggerKind: 'cli',
+      promoteSeverities: ['high'],
+      promoteProject: 'quality',
+      promoteTaskType: 'bug',
+      at
+    })
+
+    assert.equal(result.run.status, 'completed')
+    assert.equal(result.run.triggerKind, 'cli')
+    assert.equal(result.run.sensors, 2)
+    assert.equal(result.run.detected, 2)
+    assert.equal(result.run.promoted, 1)
+    assert.deepEqual(result.counts, {
+      created: 2, updated: 0, unchanged: 0, resolved: 0, reopened: 0
+    })
+    assert.equal(result.promotions.length, 1)
+    assert.equal(result.promotions[0].task.project, 'quality')
+    assert.equal(result.promotions[0].task.task_type, 'bug')
+    assert.equal(result.promotions[0].task.priority, 'high')
+    assert.equal(cycleDatabase.getSensorFindingByKey(high.key).state, 'acknowledged')
+    assert.equal(cycleDatabase.getSensorFindingByKey(medium.key).state, 'open')
+    const runs = cycleDatabase.listSensorRuns({ limit: 5 })
+    assert.equal(runs[0].id, result.run.id)
+    assert.equal(runs[0].triggerKind, 'cli')
+    assert.equal(runs[0].promoted, 1)
+  } finally {
+    cycleDatabase.close()
+  }
+})
+
+test('a failed promotion rolls back the whole cycle', () => {
+  const databasePath = join(directory, 'cycle-rollback.sqlite')
+  const connection = new Database(databasePath)
+  connection.pragma('foreign_keys = ON')
+  runMigrations(connection)
+  const store = createSensorsStore(connection, {
+    tasks: {
+      createTask() {
+        throw new Error('task write failed')
+      }
+    }
+  })
+  try {
+    const finding = {
+      key: 'test:rollback',
+      sensorId: 'test.rollback',
+      severity: 'high',
+      title: 'Rollback me',
+      summary: 'Rollback summary',
+      entity: { type: 'test', id: 'rollback' },
+      details: {}
+    }
+    store.applySensorScan([finding])
+    assert.equal(store.listSensorRuns({ limit: 10 }).length, 0)
+
+    assert.throws(
+      () => store.applySensorCycle({
+        findings: [finding],
+        sensors: 1,
+        promoteSeverities: ['high']
+      }),
+      /task write failed/
+    )
+
+    assert.equal(store.listSensorRuns({ limit: 10 }).length, 0)
+    assert.equal(store.getSensorFindingByKey(finding.key).state, 'open')
+    const detail = store.getSensorFindingDetail(
+      store.getSensorFindingByKey(finding.key).id
+    )
+    assert.ok(detail, 'finding detail still exists after rollback')
+    assert.ok(
+      !detail.events.some((event) => event.action === 'promoted'),
+      'the rolled-back promotion left no event'
+    )
+  } finally {
+    connection.close()
+  }
+})
+
+test('cycle records detector errors without losing good findings', () => {
+  const databasePath = join(directory, 'cycle-errors.sqlite')
+  const cycleDatabase = createDatabase(databasePath)
+  try {
+    const result = runSensorCycle({
+      database: cycleDatabase,
+      // A bad scheduler interval must not break a manual cycle; only the
+      // periodic scheduler validates it.
+      env: { SENSOR_CYCLE_INTERVAL_MS: '500' },
+      now: Date.parse('2026-03-01T00:00:00.000Z'),
+      sensors: [
+        {
+          id: 'test.throws',
+          detect() {
+            throw new Error('detector boom')
+          }
+        },
+        {
+          id: 'test.works',
+          detect() {
+            return [{
+              key: 'test:worked',
+              severity: 'low',
+              title: 'Worked',
+              summary: 'A good finding',
+              entity: { type: 'test', id: 'worked' },
+              details: {}
+            }]
+          }
+        }
+      ]
+    })
+
+    assert.equal(result.failed, false)
+    assert.equal(result.run.status, 'failed')
+    assert.ok(result.run.error.includes('test.throws: detector boom'))
+    assert.equal(result.errors.length, 1)
+    assert.equal(result.findings.length, 1)
+    assert.equal(cycleDatabase.getSensorFindingByKey('test:worked').state, 'open')
+  } finally {
+    cycleDatabase.close()
+  }
+})
+
+test('cycle config validates intervals, policies, and severity mapping', () => {
+  const defaults = resolveCycleConfig({ env: {} })
+  assert.equal(defaults.intervalMs, 0)
+  assert.equal(defaults.autoPromote, 'off')
+  assert.equal(defaults.runOnStart, false)
+  assert.equal(defaults.taskType, 'chore')
+  assert.throws(
+    () => resolveCycleConfig({ env: { SENSOR_CYCLE_INTERVAL_MS: '500' } }),
+    /at least 1000/
+  )
+  assert.throws(
+    () => resolveCycleConfig({ env: { SENSOR_CYCLE_AUTO_PROMOTE: 'sometimes' } }),
+    /one of/
+  )
+  assert.throws(
+    () => resolveCycleConfig({ env: { SENSOR_CYCLE_TASK_TYPE: 'nope' } }),
+    /one of/
+  )
+  assert.deepEqual(autoPromoteSeverities('off'), [])
+  assert.deepEqual(autoPromoteSeverities('high'), ['high'])
+  assert.deepEqual(autoPromoteSeverities('medium'), ['high', 'medium'])
+  assert.deepEqual(autoPromoteSeverities('all'), ['low', 'medium', 'high'])
+  assert.throws(() => autoPromoteSeverities('nope'), /one of/)
+})
+
+test('the periodic scheduler skips overlapping ticks and stops cleanly', async () => {
+  let release
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  let calls = 0
+  const scheduler = createSensorCycleScheduler({
+    intervalMs: 0,
+    logger: { error() {} },
+    runCycle: async ({ triggerKind }) => {
+      calls += 1
+      await gate
+      return { triggerKind, failed: false }
+    }
+  })
+
+  const first = scheduler.runNow()
+  const skipped = await scheduler.runNow()
+  assert.equal(skipped.skipped, true)
+  release()
+  const result = await first
+  assert.equal(result.triggerKind, 'manual')
+  assert.equal(calls, 1)
+  const status = scheduler.getStatus()
+  assert.equal(status.runs, 1)
+  assert.equal(status.skipped, 1)
+  assert.equal(status.started, false)
+
+  let ticks = 0
+  const periodic = createSensorCycleScheduler({
+    intervalMs: 20,
+    logger: { error() {} },
+    runCycle: async () => {
+      ticks += 1
+      return { failed: false }
+    }
+  })
+  periodic.start()
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 80))
+  } finally {
+    periodic.stop()
+  }
+  assert.ok(ticks >= 1, 'the scheduler ran at least one tick')
+  assert.equal(periodic.getStatus().started, false)
+
+  let failures = 0
+  const failing = createSensorCycleScheduler({
+    intervalMs: 0,
+    logger: { error() { failures += 1 } },
+    runCycle: async () => ({ failed: true, error: 'cycle boom' })
+  })
+  await failing.runNow()
+  assert.equal(failures, 1)
+  assert.equal(failing.getStatus().failures, 1)
+  assert.equal(failing.getStatus().lastError, 'cycle boom')
+})
+
+test('cycle and suggestion routes expose ideas, promotions, and validation', async () => {
+  const cycleDirectory = await mkdtemp(join(tmpdir(), 'workspace-cycle-routes-'))
+  const cycleDatabase = createDatabase(join(cycleDirectory, 'routes.sqlite'))
+  const app = createApp(cycleDatabase, { models: [] })
+  const cycleServer = app.listen(0, '127.0.0.1')
+  await new Promise((resolve, reject) => {
+    cycleServer.once('listening', resolve)
+    cycleServer.once('error', reject)
+  })
+  const cycleUrl = `http://127.0.0.1:${cycleServer.address().port}`
+  const cyclePost = (path, body) => fetch(`${cycleUrl}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  })
+
+  try {
+    cycleDatabase.createTask({
+      title: 'Cycle route blocked without reason',
+      status: 'blocked',
+      priority: 'high'
+    })
+
+    const catalog = await (await fetch(`${cycleUrl}/api/sensors/catalog`)).json()
+    assert.equal(catalog.ideas.length, SENSOR_IDEAS.length)
+    assert.ok(catalog.autoPromotePolicies.includes('off'))
+    assert.ok(catalog.thresholds.metadataStaleHours >= 1)
+
+    const scan = await (await cyclePost('/api/sensors/scan')).json()
+    assert.equal(scan.run.triggerKind, 'api')
+    assert.equal(scan.run.promoted, 0)
+
+    for (const body of [
+      { auto_promote: 'sometimes' },
+      { task_type: 'nope' },
+      { project: '   ' },
+      { auto_promote: 1 }
+    ]) {
+      const invalid = await cyclePost('/api/sensors/cycles', body)
+      assert.equal(invalid.status, 400, `expected 400 for ${JSON.stringify(body)}`)
+    }
+
+    const cycleResponse = await cyclePost('/api/sensors/cycles', {
+      auto_promote: 'high',
+      project: 'quality',
+      task_type: 'bug'
+    })
+    assert.equal(cycleResponse.status, 200)
+    const cycle = await cycleResponse.json()
+    assert.equal(cycle.run.triggerKind, 'api')
+    assert.equal(cycle.run.promoted, cycle.promotions.length)
+    assert.ok(cycle.promotions.length >= 1)
+    assert.equal(cycle.promotions[0].task.project, 'quality')
+    assert.equal(cycle.promotions[0].task.task_type, 'bug')
+    assert.ok(cycle.summary.total >= 1)
+
+    cycleDatabase.applySensorScan([{
+      key: 'idea:route-test',
+      sensorId: 'meta.sensor_suggestion',
+      severity: 'medium',
+      title: 'Route idea',
+      summary: 'A suggested sensor',
+      entity: { type: 'sensor_idea', id: 'route-test' },
+      details: { suggestedSensor: { id: 'route-test' } }
+    }])
+
+    const suggestionsResponse = await fetch(`${cycleUrl}/api/sensors/suggestions`)
+    assert.equal(suggestionsResponse.status, 200)
+    const suggestions = await suggestionsResponse.json()
+    assert.ok(suggestions.suggestions.some((finding) => finding.key === 'idea:route-test'))
+    assert.equal(suggestions.ideas.length, SENSOR_IDEAS.length)
+
+    const dismissed = await (
+      await fetch(`${cycleUrl}/api/sensors/suggestions?state=dismissed`)
+    ).json()
+    assert.equal(dismissed.suggestions.length, 0)
+    const badState = await fetch(`${cycleUrl}/api/sensors/suggestions?state=nope`)
+    assert.equal(badState.status, 400)
+    const badLimit = await fetch(`${cycleUrl}/api/sensors/suggestions?limit=9999`)
+    assert.equal(badLimit.status, 400)
+  } finally {
+    await new Promise((resolve) => cycleServer.close(resolve))
+    cycleDatabase.close()
+    await rm(cycleDirectory, { recursive: true, force: true })
+  }
+})
+
+function structuralClone(value) {
+  return JSON.parse(JSON.stringify(value))
+}

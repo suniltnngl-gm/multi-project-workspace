@@ -1,6 +1,6 @@
-// Objective: Persist deterministic sensor findings, their lifecycle events, and scan-run audits.
-// Requirements: Upsert by stable key, keep dismissed findings muted, auto-resolve active findings that disappear, reopen a resolved finding that reappears, and record every state change with an event.
-// Decisions: The store owns lifecycle rules so the routes and CLI cannot drift; state transitions are explicit transactions with conflict errors; scans resolve only open/acknowledged findings, because a dismissed finding is an intentional mute and a resolved one has already been closed.
+// Objective: Persist deterministic sensor findings, their lifecycle events, atomic improvement cycles, and scan-run audits.
+// Requirements: Upsert by stable key, keep dismissed findings muted, auto-resolve active findings that disappear, reopen a resolved finding that reappears, and record every state change with an event; a cycle commits its run, findings, and promotions together.
+// Decisions: The store owns lifecycle rules so the routes and CLI cannot drift; state transitions are explicit transactions with conflict errors; scans resolve only open/acknowledged findings, because a dismissed finding is an intentional mute and a resolved one has already been closed; a failed promotion throws inside the cycle transaction so no partial run or task survives.
 // Relevant Files: apps/api/src/db/sensors.js, apps/api/src/workspaceSensors.js, apps/api/src/routes/sensors.js, apps/api/src/db/migrations.js, apps/api/src/database.js
 // Important Context: User file. Findings are separate from model-generated task proposals.
 export const SENSOR_STATES = Object.freeze(['open', 'acknowledged', 'dismissed', 'resolved'])
@@ -66,6 +66,7 @@ function toRun(row) {
   return {
     id: row.id,
     status: row.status,
+    triggerKind: row.trigger_kind ?? 'manual',
     sensors: row.sensors,
     detected: row.detected,
     created: row.created,
@@ -73,6 +74,7 @@ function toRun(row) {
     resolved: row.resolved,
     reopened: row.reopened,
     unchanged: row.unchanged,
+    promoted: row.promoted ?? 0,
     ...(row.error ? { error: row.error } : {}),
     startedAt: row.started_at,
     ...(row.finished_at !== null ? { finishedAt: row.finished_at } : {})
@@ -164,14 +166,15 @@ export function createSensorsStore(connection, { tasks, now = Date.now } = {}) {
   `)
 
   const insertRunStatement = connection.prepare(`
-    INSERT INTO sensor_runs (status, sensors, started_at)
-    VALUES ('running', ?, ?)
+    INSERT INTO sensor_runs (status, trigger_kind, sensors, started_at)
+    VALUES ('running', ?, ?, ?)
   `)
   const finishRunStatement = connection.prepare(`
     UPDATE sensor_runs
     SET status = @status, sensors = @sensors, detected = @detected, created = @created,
         updated = @updated, resolved = @resolved, reopened = @reopened,
-        unchanged = @unchanged, error = @error, finished_at = @finishedAt
+        unchanged = @unchanged, promoted = @promoted, error = @error,
+        finished_at = @finishedAt
     WHERE id = @id
   `)
   const failRunStatement = connection.prepare(`
@@ -407,9 +410,55 @@ export function createSensorsStore(connection, { tasks, now = Date.now } = {}) {
     return { finding: toFinding(getFindingStatement.get(id)), task }
   })
 
+  const applyCycle = connection.transaction(({
+    findings = [],
+    sensors = 0,
+    triggerKind = 'manual',
+    promoteSeverities = [],
+    promoteProject = 'workspace',
+    promoteTaskType = 'chore',
+    error = null,
+    at = now()
+  } = {}) => {
+    const inserted = insertRunStatement.run(triggerKind, sensors, at)
+    const runId = Number(inserted.lastInsertRowid)
+    const counts = applyScan(findings, { scanId: runId, at })
+    const promotions = []
+    const wanted = new Set(Array.isArray(promoteSeverities) ? promoteSeverities : [])
+    if (wanted.size > 0) {
+      for (const row of listFindingsByStateStatement.all('open')) {
+        if (!wanted.has(row.severity)) continue
+        const result = promote(row.id, {
+          project: promoteProject,
+          taskType: promoteTaskType,
+          at
+        })
+        if (result.error) {
+          throw new Error(result.error.body.error)
+        }
+        promotions.push(result)
+      }
+    }
+    finishRunStatement.run({
+      id: runId,
+      status: error ? 'failed' : 'completed',
+      sensors,
+      detected: findings.length,
+      ...counts,
+      promoted: promotions.length,
+      error: error ? String(error).slice(0, 2000) : null,
+      finishedAt: at
+    })
+    return {
+      run: toRun(getRunStatement.get(runId)),
+      counts,
+      promotions
+    }
+  })
+
   return {
-    createSensorRun({ sensors = 0, startedAt = now() } = {}) {
-      const result = insertRunStatement.run(sensors, startedAt)
+    createSensorRun({ sensors = 0, startedAt = now(), triggerKind = 'manual' } = {}) {
+      const result = insertRunStatement.run(triggerKind, sensors, startedAt)
       return toRun(getRunStatement.get(Number(result.lastInsertRowid)))
     },
     finishSensorRun(id, {
@@ -421,6 +470,7 @@ export function createSensorsStore(connection, { tasks, now = Date.now } = {}) {
       resolved = 0,
       reopened = 0,
       unchanged = 0,
+      promoted = 0,
       error = null,
       finishedAt = now()
     } = {}) {
@@ -434,6 +484,7 @@ export function createSensorsStore(connection, { tasks, now = Date.now } = {}) {
         resolved,
         reopened,
         unchanged,
+        promoted,
         error: error ?? null,
         finishedAt
       })
@@ -455,6 +506,9 @@ export function createSensorsStore(connection, { tasks, now = Date.now } = {}) {
     },
     applySensorScan(findings, options) {
       return applyScan(findings, options)
+    },
+    applySensorCycle(options) {
+      return applyCycle(options)
     },
     listSensorFindings({ state, sensorId, severity, limit = 100 } = {}) {
       const requested = Number(limit)

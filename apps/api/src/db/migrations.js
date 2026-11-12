@@ -433,6 +433,8 @@ export function runMigrations(connection, { rootDir } = {}) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       status TEXT NOT NULL DEFAULT 'running'
         CHECK(status IN ('running', 'completed', 'failed')),
+      trigger_kind TEXT NOT NULL DEFAULT 'manual'
+        CHECK(trigger_kind IN ('manual', 'api', 'cli', 'scheduled')),
       sensors INTEGER NOT NULL DEFAULT 0,
       detected INTEGER NOT NULL DEFAULT 0,
       created INTEGER NOT NULL DEFAULT 0,
@@ -440,6 +442,7 @@ export function runMigrations(connection, { rootDir } = {}) {
       resolved INTEGER NOT NULL DEFAULT 0,
       reopened INTEGER NOT NULL DEFAULT 0,
       unchanged INTEGER NOT NULL DEFAULT 0,
+      promoted INTEGER NOT NULL DEFAULT 0,
       error TEXT,
       started_at INTEGER NOT NULL,
       finished_at INTEGER
@@ -492,6 +495,22 @@ export function runMigrations(connection, { rootDir } = {}) {
     CREATE INDEX IF NOT EXISTS idx_sensor_finding_events_finding
       ON sensor_finding_events(finding_id, created_at DESC, id DESC);
   `)
+
+  // Sensor runs gained a trigger and promotion counter after the first sensor
+  // schema shipped. Add them in place so existing audit rows keep their ids.
+  const sensorRunColumns = new Set(
+    connection.prepare('PRAGMA table_info(sensor_runs)').all().map((column) => column.name)
+  )
+  if (!sensorRunColumns.has('trigger_kind')) {
+    connection.exec(
+      "ALTER TABLE sensor_runs ADD COLUMN trigger_kind TEXT NOT NULL DEFAULT 'manual'"
+    )
+  }
+  if (!sensorRunColumns.has('promoted')) {
+    connection.exec(
+      'ALTER TABLE sensor_runs ADD COLUMN promoted INTEGER NOT NULL DEFAULT 0'
+    )
+  }
 
   // Carry the legacy daily counters into the generalized quota table. The old
   // table is kept so an interrupted upgrade can be retried, and the copy is
