@@ -240,6 +240,7 @@ export function runMigrations(connection, { rootDir } = {}) {
       project TEXT NOT NULL DEFAULT 'workspace',
       rationale TEXT NOT NULL DEFAULT '',
       origin_job_id TEXT NOT NULL DEFAULT '',
+      origin_agent_run_id TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'proposed'
         CHECK(status IN ('proposed', 'approved', 'rejected', 'rolled_back')),
       created_task_id INTEGER,
@@ -250,6 +251,155 @@ export function runMigrations(connection, { rootDir } = {}) {
 
     CREATE INDEX IF NOT EXISTS idx_task_proposals_status
       ON task_proposals(status, created_at DESC, id DESC);
+
+    CREATE TABLE IF NOT EXISTS agent_runs (
+      id TEXT PRIMARY KEY,
+      task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+      state TEXT NOT NULL DEFAULT 'draft'
+        CHECK(state IN ('draft', 'planning', 'dispatching', 'running', 'reviewing', 'completed', 'failed', 'cancelled')),
+      primary_agent_id TEXT,
+      reviewer_agent_id TEXT,
+      model_plan TEXT NOT NULL DEFAULT '{}',
+      budget TEXT NOT NULL DEFAULT '{}',
+      plan TEXT NOT NULL DEFAULT '{}',
+      result TEXT,
+      error TEXT,
+      checkpoint TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      started_at INTEGER,
+      finished_at INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_agent_runs_task
+      ON agent_runs(task_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_agent_runs_state
+      ON agent_runs(state, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS agent_agents (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+      role TEXT NOT NULL CHECK(role IN ('parent', 'reviewer', 'worker')),
+      name TEXT NOT NULL,
+      model TEXT NOT NULL DEFAULT '',
+      backend TEXT NOT NULL DEFAULT '',
+      state TEXT NOT NULL DEFAULT 'idle'
+        CHECK(state IN ('idle', 'ready', 'running', 'waiting', 'done', 'failed', 'cancelled')),
+      token_hash TEXT NOT NULL,
+      lease_until INTEGER,
+      heartbeat_at INTEGER,
+      prompt_cache_key TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL,
+      finished_at INTEGER,
+      UNIQUE(run_id, name),
+      UNIQUE(token_hash)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_agent_agents_run
+      ON agent_agents(run_id, role, name);
+
+    CREATE TABLE IF NOT EXISTS agent_messages (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+      from_agent_id TEXT NOT NULL REFERENCES agent_agents(id) ON DELETE CASCADE,
+      to_agent_id TEXT NOT NULL REFERENCES agent_agents(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL
+        CHECK(kind IN ('assign', 'progress', 'question', 'result', 'error', 'cancel', 'verdict', 'handoff')),
+      correlation_id TEXT NOT NULL DEFAULT '',
+      seq INTEGER NOT NULL,
+      state TEXT NOT NULL DEFAULT 'queued'
+        CHECK(state IN ('queued', 'leased', 'delivered', 'acked', 'completed', 'failed', 'expired', 'dead_letter')),
+      payload TEXT NOT NULL DEFAULT '{}',
+      artifact_refs TEXT NOT NULL DEFAULT '[]',
+      idempotency_key TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL DEFAULT 3,
+      result TEXT,
+      error TEXT,
+      lease_owner TEXT,
+      lease_until INTEGER,
+      created_at INTEGER NOT NULL,
+      delivered_at INTEGER,
+      acked_at INTEGER,
+      expires_at INTEGER,
+      UNIQUE(run_id, idempotency_key),
+      UNIQUE(run_id, seq)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_agent_messages_run
+      ON agent_messages(run_id, seq);
+    CREATE INDEX IF NOT EXISTS idx_agent_messages_inbox
+      ON agent_messages(to_agent_id, state, seq);
+    CREATE INDEX IF NOT EXISTS idx_agent_messages_lease
+      ON agent_messages(state, lease_until);
+
+    CREATE TABLE IF NOT EXISTS agent_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+      agent_id TEXT REFERENCES agent_agents(id) ON DELETE SET NULL,
+      type TEXT NOT NULL,
+      data TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_agent_events_run
+      ON agent_events(run_id, created_at ASC, id ASC);
+
+    CREATE TABLE IF NOT EXISTS agent_task_ops (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+      agent_id TEXT REFERENCES agent_agents(id) ON DELETE SET NULL,
+      op_id TEXT NOT NULL,
+      op TEXT NOT NULL,
+      task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+      status TEXT NOT NULL,
+      result TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL,
+      UNIQUE(run_id, op_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_agent_task_ops_run
+      ON agent_task_ops(run_id, created_at ASC);
+
+    CREATE TABLE IF NOT EXISTS agent_model_evals (
+      id TEXT PRIMARY KEY,
+      model TEXT NOT NULL,
+      config_key TEXT NOT NULL,
+      eval_version TEXT NOT NULL,
+      score REAL NOT NULL,
+      passed INTEGER NOT NULL DEFAULT 0 CHECK(passed IN (0, 1)),
+      details TEXT NOT NULL DEFAULT '{}',
+      evaluated_at INTEGER NOT NULL,
+      UNIQUE(model, config_key, eval_version)
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_scripts (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      intent TEXT NOT NULL,
+      input_schema TEXT NOT NULL DEFAULT '{}',
+      output_schema TEXT NOT NULL DEFAULT '{}',
+      command TEXT NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1,
+      timeout_ms INTEGER NOT NULL DEFAULT 60000,
+      cost_class TEXT NOT NULL DEFAULT 'free',
+      verified_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_agent_scripts_intent
+      ON agent_scripts(intent, version DESC);
+
+    CREATE TABLE IF NOT EXISTS agent_artifacts (
+      content_hash TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      path TEXT NOT NULL DEFAULT '',
+      producer TEXT NOT NULL DEFAULT '',
+      bytes INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER
+    );
   `)
 
   // Carry the legacy daily counters into the generalized quota table. The old
@@ -504,6 +654,12 @@ export function runMigrations(connection, { rootDir } = {}) {
       connection.exec(`ALTER TABLE tasks ADD COLUMN ${column} ${definition}`)
     }
   }
+  connection.exec(`
+    CREATE INDEX IF NOT EXISTS idx_tasks_parent
+      ON tasks(parent_task_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_tasks_agent_run
+      ON tasks(agent_run_id, created_at DESC);
+  `)
   const jobColumns = new Set(
     connection.prepare('PRAGMA table_info(ai_jobs)').all().map((column) => column.name)
   )
@@ -518,9 +674,25 @@ export function runMigrations(connection, { rootDir } = {}) {
       'ALTER TABLE ai_jobs ADD COLUMN task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL'
     )
   }
+  if (!jobColumns.has('agent_run_id')) {
+    connection.exec('ALTER TABLE ai_jobs ADD COLUMN agent_run_id TEXT')
+  }
+  if (!jobColumns.has('agent_id')) {
+    connection.exec('ALTER TABLE ai_jobs ADD COLUMN agent_id TEXT')
+  }
+  const proposalColumns = new Set(
+    connection.prepare('PRAGMA table_info(task_proposals)').all().map((column) => column.name)
+  )
+  if (!proposalColumns.has('origin_agent_run_id')) {
+    connection.exec(
+      "ALTER TABLE task_proposals ADD COLUMN origin_agent_run_id TEXT NOT NULL DEFAULT ''"
+    )
+  }
   connection.exec(`
     CREATE INDEX IF NOT EXISTS idx_ai_jobs_task
       ON ai_jobs(task_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_ai_jobs_agent_run
+      ON ai_jobs(agent_run_id, created_at DESC);
   `)
   connection.exec(`
     UPDATE tasks SET status = 'done' WHERE completed = 1 AND status = 'todo';

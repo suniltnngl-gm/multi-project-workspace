@@ -22,6 +22,7 @@ apps/api/data/*.sqlite-shm
 apps/api/data/*.sqlite-wal
 apps/api/data/opencode-roster-cache.json
 apps/api/data/backups/
+apps/api/data/agent-artifacts/
 /kaggle-output/
 
 # Editor directories and files

@@ -23,8 +23,8 @@ export function createTaskProposalsStore(connection, { tasks } = {}) {
   `)
   const insertProposalStatement = connection.prepare(`
     INSERT INTO task_proposals
-      (title, description, priority, task_type, project, rationale, origin_job_id, status, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?)
+      (title, description, priority, task_type, project, rationale, origin_job_id, origin_agent_run_id, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?)
   `)
   const decideProposalStatement = connection.prepare(`
     UPDATE task_proposals
@@ -46,6 +46,7 @@ export function createTaskProposalsStore(connection, { tasks } = {}) {
       project: row.project,
       rationale: row.rationale,
       originJobId: row.origin_job_id,
+      ...(row.origin_agent_run_id ? { originAgentRunId: row.origin_agent_run_id } : {}),
       status: row.status,
       ...(row.created_task_id !== null ? { createdTaskId: row.created_task_id } : {}),
       createdAt: row.created_at,
@@ -67,7 +68,7 @@ export function createTaskProposalsStore(connection, { tasks } = {}) {
    * already has an undecided proposal are skipped so a re-run does not
    * duplicate pending work; titles that were decided may be proposed again.
    */
-  const createTaskProposals = connection.transaction(({ proposals = [], jobId = '' } = {}) => {
+  const createTaskProposals = connection.transaction(({ proposals = [], jobId = '', agentRunId = '' } = {}) => {
     const now = new Date().toISOString()
     const pending = new Set(
       listUndecidedByTitleStatement.all().map((row) => row.title.trim().toLowerCase())
@@ -90,6 +91,7 @@ export function createTaskProposalsStore(connection, { tasks } = {}) {
         typeof proposal.project === 'string' && proposal.project.trim() ? proposal.project.trim().slice(0, 100) : 'workspace',
         typeof proposal.rationale === 'string' ? proposal.rationale.slice(0, 2000) : '',
         typeof jobId === 'string' ? jobId : '',
+        typeof agentRunId === 'string' ? agentRunId : '',
         now,
         now
       )

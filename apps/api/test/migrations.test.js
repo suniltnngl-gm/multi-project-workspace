@@ -234,14 +234,25 @@ test('legacy tracking databases are migrated without losing data', () => {
   assert.ok(toolColumns.includes('failure_count'))
 
   const jobColumns = tableColumns(inspection, 'ai_jobs')
-  for (const added of ['retry_after', 'backend', 'task_id']) {
+  for (const added of ['retry_after', 'backend', 'task_id', 'agent_run_id', 'agent_id']) {
     assert.ok(jobColumns.includes(added), `ai_jobs is missing ${added}`)
   }
+  assert.ok(
+    tableColumns(inspection, 'task_proposals').includes('origin_agent_run_id'),
+    'task_proposals is missing origin_agent_run_id'
+  )
+  const taskColumns = tableColumns(inspection, 'tasks')
+  assert.ok(taskColumns.includes('parent_task_id'), 'tasks is missing parent_task_id')
+  assert.ok(taskColumns.includes('agent_run_id'), 'tasks is missing agent_run_id')
 
   const tables = inspection.prepare(
     "SELECT name FROM sqlite_master WHERE type = 'table'"
   ).all().map((row) => row.name)
-  for (const created of ['git_worktrees', 'environments', 'prompt_templates', 'ai_quota', 'user_file_events']) {
+  for (const created of [
+    'git_worktrees', 'environments', 'prompt_templates', 'ai_quota', 'user_file_events',
+    'agent_runs', 'agent_agents', 'agent_messages', 'agent_events', 'agent_task_ops',
+    'agent_model_evals', 'agent_scripts', 'agent_artifacts'
+  ]) {
     assert.ok(tables.includes(created), `missing table ${created}`)
   }
 

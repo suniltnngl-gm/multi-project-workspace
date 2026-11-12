@@ -23,12 +23,15 @@ import { createMcpCatalogStore } from './db/mcpCatalog.js'
 import { createAiSessionsStore } from './db/aiSessions.js'
 import { createPromptTemplatesStore } from './db/promptTemplates.js'
 import { createToolRunsStore } from './db/toolRuns.js'
+import { createAgentRunsStore } from './db/agentRuns.js'
+import { createAgentTaskOpsStore } from './db/agentTaskOps.js'
+import { createAgentScriptsStore } from './db/agentScripts.js'
 
 const defaultDatabasePath = fileURLToPath(new URL('../data/workspace.sqlite', import.meta.url))
 
 export function createDatabase(
   databasePath = process.env.DATABASE_PATH || defaultDatabasePath,
-  { rootDir } = {}
+  { rootDir, artifactDir } = {}
 ) {
   const resolvedPath = resolve(databasePath)
   mkdirSync(dirname(resolvedPath), { recursive: true })
@@ -41,13 +44,19 @@ export function createDatabase(
   const repositories = createRepositoriesStore(connection)
   const toolRuns = createToolRunsStore(connection)
   const tasks = createTasksStore(connection, { toolRuns })
+  const proposals = createTaskProposalsStore(connection, { tasks })
+  const agentRuns = createAgentRunsStore(connection)
+  const agentTaskOps = createAgentTaskOpsStore(connection, { tasks, proposals, agentRuns })
   return {
     ...tasks,
     ...createAiJobsStore(connection),
     ...createAiQuotaStore(connection),
     ...createUserFilesStore(connection, { toolRuns }),
     ...createFoldersStore(connection),
-    ...createTaskProposalsStore(connection, { tasks }),
+    ...proposals,
+    ...agentRuns,
+    ...agentTaskOps,
+    ...createAgentScriptsStore(connection, artifactDir ? { artifactDir } : {}),
     ...repositories,
     ...createGitWorktreesStore(connection, { repositories }),
     ...createToolsStore(connection),

@@ -15,6 +15,8 @@ function toJob(row) {
     createdAt: row.created_at,
     ...(row.backend !== null && row.backend !== undefined ? { backend: row.backend } : {}),
     ...(row.task_id !== null && row.task_id !== undefined ? { taskId: row.task_id } : {}),
+    ...(row.agent_run_id ? { agentRunId: row.agent_run_id } : {}),
+    ...(row.agent_id ? { agentId: row.agent_id } : {}),
     ...(row.started_at !== null ? { startedAt: row.started_at } : {}),
     ...(row.finished_at !== null ? { finishedAt: row.finished_at } : {}),
     ...(row.result !== null ? { result: JSON.parse(row.result) } : {}),

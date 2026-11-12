@@ -33,6 +33,8 @@ import { createAiDraftsRouter } from './routes/aiDrafts.js'
 import { createRunsRouter } from './routes/runs.js'
 import { createMcpRouter } from './routes/mcp.js'
 import { createProposalsRouter } from './routes/proposals.js'
+import { createAgentBus } from './agentBus.js'
+import { createAgentsRouter } from './routes/agents.js'
 
 const LOCAL_AI_MIN_LOAD = Number(process.env.LOCAL_AI_MIN_LOAD ?? 0.5)
 const LOCAL_AI_MAX_LOAD = Number(process.env.LOCAL_AI_MAX_LOAD ?? 1.0)
@@ -100,6 +102,7 @@ export function createApp(database, {
     getModelMetrics: modelMetrics.snapshot
   })
   const jobStore = createTaskJobStore({ repository: database })
+  const agentBus = createAgentBus({ database })
 
   // The local verifier resolves the repository root on first use, mirroring
   // the scan endpoints, so the API works from any cwd inside the repository.
@@ -187,6 +190,7 @@ export function createApp(database, {
   app.use(createAiSessionsRouter({ database }))
   app.use(createPromptTemplatesRouter({ database }))
   app.use(createRunsRouter({ database }))
+  app.use(createAgentsRouter({ database, bus: agentBus }))
 
   app.use((error, _request, response, _next) => {
     if (error instanceof SyntaxError && 'body' in error) {

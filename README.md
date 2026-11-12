@@ -76,6 +76,10 @@ Task execution can be isolated in a Git worktree: `./workspace task worktree cre
 
 Every draft is also recorded in `ai_jobs`, including synchronous local and serverless calls, so a task can retain its AI provenance after the transient progress indicator disappears. Jobs may carry a nullable `task_id`; drafts for a new task leave it unset and never save the task automatically. Unknown task ids are rejected before model selection. `GET /api/tasks/:id` returns at most `ai_limit` linked runs newest-first with the model, backend, state, phase, duration, error, and `retryAfter`. Deleting a task unlinks its AI runs instead of deleting them, so the run remains inspectable through the job API without referencing a missing task. Terminal jobs are pruned by count (`50` by default), which bounds the persisted history; queued or running jobs are never pruned.
 
+## Agent control plane
+
+One parent agent can coordinate up to six workers in a strict star topology: workers only address the parent, and the optional reviewer is parent-side only. Routing, leases, retries, cancellation, and task writes are deterministic code; models are called only at decision points. Raw agent tokens are returned once by `POST /api/agents/runs`, writes authenticate with `x-agent-token`, and messages are typed, idempotent, deadline-aware, and redacted before storage. Parent task writes use `POST /api/agents/runs/:id/task-ops` with optimistic concurrency; `done` is verifier-gated and opportunistic work becomes a proposal. Before repeating a known procedure, `POST /api/agents/scripts/resolve` returns `script`, `needs_input`, or `model`, and `POST /api/agents/artifacts` stores content-addressed summaries so workers can reference artifacts instead of pasting them into messages. Run history is available at `GET /api/agents/runs/:id`. See [docs/agent-protocol.md](docs/agent-protocol.md) for the message matrix, lifecycle, task-op schema, and configuration limits.
+
 ## Tracking domains
 
 The workspace tracks more than tasks:

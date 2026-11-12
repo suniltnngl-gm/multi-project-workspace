@@ -22,7 +22,9 @@ export const TASK_COLUMNS = {
   work_blocked: "TEXT NOT NULL DEFAULT ''",
   next_move: "TEXT NOT NULL DEFAULT ''",
   worktree_path: "TEXT NOT NULL DEFAULT ''",
-  origin_job_id: "TEXT NOT NULL DEFAULT ''"
+  origin_job_id: "TEXT NOT NULL DEFAULT ''",
+  parent_task_id: 'INTEGER REFERENCES tasks(id) ON DELETE SET NULL',
+  agent_run_id: 'TEXT REFERENCES agent_runs(id) ON DELETE SET NULL'
 }
 
 function toTask(row) {
@@ -49,7 +51,7 @@ export function createTasksStore(connection, { toolRuns } = {}) {
   // scripts, tests) keep run_id NULL.
   const currentRunId = () => toolRuns?.currentToolRunId() ?? null
 
-  const taskFields = 'id, title, description, completed, project, status, priority, task_type, acceptance_criteria, objectives, requirements, decisions, relevant_files, important_context, work_completed, work_active, work_blocked, next_move, worktree_path, origin_job_id, created_at, updated_at'
+  const taskFields = 'id, title, description, completed, project, status, priority, task_type, acceptance_criteria, objectives, requirements, decisions, relevant_files, important_context, work_completed, work_active, work_blocked, next_move, worktree_path, origin_job_id, parent_task_id, agent_run_id, created_at, updated_at'
   const taskOrder = "ORDER BY CASE status WHEN 'in_progress' THEN 0 WHEN 'todo' THEN 1 WHEN 'blocked' THEN 2 ELSE 3 END, CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, updated_at DESC"
   const getStatement = connection.prepare(
     `SELECT ${taskFields} FROM tasks WHERE id = ?`
@@ -66,6 +68,9 @@ export function createTasksStore(connection, { toolRuns } = {}) {
   )
   const updateTaskOriginStatement = connection.prepare(
     'UPDATE tasks SET origin_job_id = ?, updated_at = ? WHERE id = ?'
+  )
+  const updateTaskAgentLinkStatement = connection.prepare(
+    'UPDATE tasks SET parent_task_id = ?, agent_run_id = ?, updated_at = ? WHERE id = ?'
   )
   const listTaskEventsStatement = connection.prepare(`
     SELECT task_events.id, task_events.task_id, task_events.action, task_events.field,
@@ -224,6 +229,19 @@ export function createTasksStore(connection, { toolRuns } = {}) {
     return readTask(id)
   })
 
+  // Agent task ops need an optimistic concurrency check and the write in one
+  // transaction, or a human edit can be overwritten between the check and the
+  // update. Nested transactions use SQLite savepoints.
+  const applyTaskUpdateIfUnchanged = connection.transaction((id, expectedUpdatedAt, changes) => {
+    const current = readTask(id)
+    if (!current) return { ok: false, reason: 'missing' }
+    if (current.updated_at !== expectedUpdatedAt) {
+      return { ok: false, reason: 'conflict', task: current }
+    }
+    const task = applyTaskUpdate(id, changes)
+    return { ok: true, task }
+  })
+
   // The worktree link is owned by the lifecycle endpoints, never by generic
   // task edits, so its history is recorded as explicit link/unlink events.
   const applyTaskWorktreeUpdate = connection.transaction((id, path, action) => {
@@ -256,6 +274,25 @@ export function createTasksStore(connection, { toolRuns } = {}) {
       'origin_job_id',
       String(current.origin_job_id ?? ''),
       String(jobId),
+      updatedAt,
+      currentRunId()
+    )
+    return readTask(id)
+  })
+
+  // Agent provenance is written by the agent task-op executor only. It is
+  // kept separate from generic edits so a PATCH cannot reparent a task.
+  const applyTaskAgentLink = connection.transaction((id, runId, parentTaskId = null) => {
+    const current = readTask(id)
+    if (!current) return null
+    const updatedAt = new Date().toISOString()
+    updateTaskAgentLinkStatement.run(parentTaskId, runId, updatedAt, id)
+    insertTaskEventStatement.run(
+      id,
+      'agent_linked',
+      'agent_run_id',
+      String(current.agent_run_id ?? ''),
+      String(runId),
       updatedAt,
       currentRunId()
     )
@@ -353,6 +390,9 @@ export function createTasksStore(connection, { toolRuns } = {}) {
     updateTask(id, changes) {
       return applyTaskUpdate(id, changes)
     },
+    updateTaskIfUnchanged(id, expectedUpdatedAt, changes) {
+      return applyTaskUpdateIfUnchanged(id, expectedUpdatedAt, changes)
+    },
     linkTaskWorktree(id, path) {
       return applyTaskWorktreeUpdate(id, path, 'worktree_linked')
     },
@@ -361,6 +401,9 @@ export function createTasksStore(connection, { toolRuns } = {}) {
     },
     setTaskOrigin(id, jobId) {
       return applyTaskOriginUpdate(id, jobId)
+    },
+    linkTaskToAgentRun(id, runId, parentTaskId = null) {
+      return applyTaskAgentLink(id, runId, parentTaskId)
     },
     deleteTask(id) {
       return deleteTaskRecord(id)
