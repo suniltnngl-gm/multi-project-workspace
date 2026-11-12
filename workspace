@@ -198,6 +198,14 @@ print_help() {
   printf '  %-24s %s\n' 'mcp list' 'List tracked MCP servers and resources'
   printf '  %-24s %s\n' 'mcp check' 'Verify discovered MCP entries are tracked'
   printf '  %-24s %s\n' 'tracks' 'List available tracking domains'
+  printf '\n%sSensors%s\n' "$C_BOLD" "$C_RESET"
+  printf '  %-24s %s\n' 'sensors scan' 'Detect workspace gaps without spending quota'
+  printf '  %-24s %s\n' 'sensors list' 'List actionable sensor findings'
+  printf '  %-24s %s\n' 'sensors show <id>' 'Show one finding with its event trail'
+  printf '  %-24s %s\n' 'sensors runs' 'List recent sensor scan runs'
+  printf '  %-24s %s\n' 'sensors catalog' 'List registered sensor detectors'
+  printf '  %-24s %s\n' 'sensors ack|dismiss|resolve|reopen <id>' 'Change a finding lifecycle state'
+  printf '  %-24s %s\n' 'sensors promote <id>' 'Create a task from an open finding'
   printf '  %-24s %s\n' '--new-env "KEY=value"' 'Add or update one .env value'
   printf '  %-24s %s\n' 'env set KEY=value ...' 'Add or update .env values'
   printf '  %-24s %s\n' 'env get KEY' 'Read one .env value'
@@ -720,6 +728,21 @@ PY
     info 'Tracking domains:'
     printf '  tasks, repositories, user_files, folders, git_worktrees, tools, environments, mcp_servers, mcp_resources\n'
     info 'Use ./workspace <domain> scan|list|check for each domain.'
+    ;;
+  sensors)
+    subcommand="${2:-scan}"
+    case "$subcommand" in
+      scan|list|runs|catalog|show|ack|dismiss|resolve|reopen|promote)
+        require_npm
+        shift 2 || true
+        run_with_env node "$ROOT_DIR/scripts/sensors.mjs" "$subcommand" "$@"
+        ;;
+      *)
+        error "Unknown sensors subcommand: $subcommand"
+        printf 'Usage: ./workspace sensors [scan|list|show <id>|runs|catalog|ack|dismiss|resolve|reopen|promote] [options]\n' >&2
+        exit 2
+        ;;
+    esac
     ;;
   self-check)
     info 'Running deterministic workspace self-check...'

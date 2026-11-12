@@ -33,6 +33,7 @@ import { createAiDraftsRouter } from './routes/aiDrafts.js'
 import { createRunsRouter } from './routes/runs.js'
 import { createMcpRouter } from './routes/mcp.js'
 import { createProposalsRouter } from './routes/proposals.js'
+import { createSensorsRouter } from './routes/sensors.js'
 import { createAgentBus } from './agentBus.js'
 import { createAgentsRouter } from './routes/agents.js'
 
@@ -192,6 +193,7 @@ export function createApp(database, {
   app.use(createPromptTemplatesRouter({ database }))
   app.use(createRunsRouter({ database }))
   app.use(createAgentsRouter({ database, bus: agentBus }))
+  app.use(createSensorsRouter({ database, models, modelBudget }))
 
   app.use((error, _request, response, _next) => {
     if (error instanceof SyntaxError && 'body' in error) {

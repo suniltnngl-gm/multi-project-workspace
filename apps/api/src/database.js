@@ -26,6 +26,7 @@ import { createToolRunsStore } from './db/toolRuns.js'
 import { createAgentRunsStore } from './db/agentRuns.js'
 import { createAgentTaskOpsStore } from './db/agentTaskOps.js'
 import { createAgentScriptsStore } from './db/agentScripts.js'
+import { createSensorsStore } from './db/sensors.js'
 
 const defaultDatabasePath = fileURLToPath(new URL('../data/workspace.sqlite', import.meta.url))
 
@@ -57,6 +58,7 @@ export function createDatabase(
     ...agentRuns,
     ...agentTaskOps,
     ...createAgentScriptsStore(connection, artifactDir ? { artifactDir } : {}),
+    ...createSensorsStore(connection, { tasks }),
     ...repositories,
     ...createGitWorktreesStore(connection, { repositories }),
     ...createToolsStore(connection),

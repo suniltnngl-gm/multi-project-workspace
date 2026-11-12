@@ -251,7 +251,8 @@ test('legacy tracking databases are migrated without losing data', () => {
   for (const created of [
     'git_worktrees', 'environments', 'prompt_templates', 'ai_quota', 'user_file_events',
     'agent_runs', 'agent_agents', 'agent_messages', 'agent_events', 'agent_task_ops',
-    'agent_model_evals', 'agent_scripts', 'agent_artifacts', 'agent_run_usage'
+    'agent_model_evals', 'agent_scripts', 'agent_artifacts', 'agent_run_usage',
+    'sensor_runs', 'sensor_findings', 'sensor_finding_events'
   ]) {
     assert.ok(tables.includes(created), `missing table ${created}`)
   }

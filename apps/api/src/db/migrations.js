@@ -428,6 +428,69 @@ export function runMigrations(connection, { rootDir } = {}) {
 
     CREATE INDEX IF NOT EXISTS idx_agent_artifacts_expiry
       ON agent_artifacts(expires_at) WHERE expires_at IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS sensor_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      status TEXT NOT NULL DEFAULT 'running'
+        CHECK(status IN ('running', 'completed', 'failed')),
+      sensors INTEGER NOT NULL DEFAULT 0,
+      detected INTEGER NOT NULL DEFAULT 0,
+      created INTEGER NOT NULL DEFAULT 0,
+      updated INTEGER NOT NULL DEFAULT 0,
+      resolved INTEGER NOT NULL DEFAULT 0,
+      reopened INTEGER NOT NULL DEFAULT 0,
+      unchanged INTEGER NOT NULL DEFAULT 0,
+      error TEXT,
+      started_at INTEGER NOT NULL,
+      finished_at INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sensor_runs_started
+      ON sensor_runs(started_at DESC, id DESC);
+
+    CREATE TABLE IF NOT EXISTS sensor_findings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key TEXT NOT NULL UNIQUE,
+      sensor_id TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'open'
+        CHECK(state IN ('open', 'acknowledged', 'dismissed', 'resolved')),
+      severity TEXT NOT NULL DEFAULT 'medium'
+        CHECK(severity IN ('low', 'medium', 'high')),
+      title TEXT NOT NULL,
+      summary TEXT NOT NULL DEFAULT '',
+      entity_type TEXT NOT NULL DEFAULT '',
+      entity_id TEXT NOT NULL DEFAULT '',
+      details TEXT NOT NULL DEFAULT '{}',
+      first_seen_at INTEGER NOT NULL,
+      last_seen_at INTEGER NOT NULL,
+      last_scan_id INTEGER REFERENCES sensor_runs(id) ON DELETE SET NULL,
+      occurrences INTEGER NOT NULL DEFAULT 1,
+      ack_at INTEGER,
+      dismissed_at INTEGER,
+      resolved_at INTEGER,
+      note TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sensor_findings_state
+      ON sensor_findings(state, severity, last_seen_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_sensor_findings_sensor
+      ON sensor_findings(sensor_id, state, last_seen_at DESC);
+
+    CREATE TABLE IF NOT EXISTS sensor_finding_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      finding_id INTEGER NOT NULL REFERENCES sensor_findings(id) ON DELETE CASCADE,
+      action TEXT NOT NULL,
+      field TEXT,
+      old_value TEXT,
+      new_value TEXT,
+      note TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sensor_finding_events_finding
+      ON sensor_finding_events(finding_id, created_at DESC, id DESC);
   `)
 
   // Carry the legacy daily counters into the generalized quota table. The old
