@@ -214,3 +214,28 @@ test('create_task cannot attach to a task outside the run', () => {
   assert.equal(result.results[0].status, 'rejected')
   assert.match(result.results[0].error, /outside this agent run/)
 })
+
+test('create_task is capped per run', () => {
+  const parentTask = database.createTask({ title: 'Create cap parent' })
+  const { parent } = createRunForTask(parentTask.id)
+  const agent = bus.authenticate(parent.token)
+
+  for (let index = 1; index <= 5; index += 1) {
+    const result = database.applyTaskOps({
+      agent,
+      ops: [{ op_id: `cap-${index}`, op: 'create_task', title: `Cap child ${index}` }]
+    })
+    assert.equal(result.results[0].status, 'created')
+  }
+
+  const overflow = database.applyTaskOps({
+    agent,
+    ops: [{ op_id: 'cap-6', op: 'create_task', title: 'Cap child 6' }]
+  })
+  assert.equal(overflow.results[0].status, 'rejected')
+  assert.match(overflow.results[0].error, /at most 5/)
+  assert.equal(
+    database.listTasks().filter((task) => task.parent_task_id === parentTask.id).length,
+    5
+  )
+})

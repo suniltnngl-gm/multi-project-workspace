@@ -180,41 +180,47 @@ export function createAgentRunsStore(connection) {
     ) ORDER BY created_at ASC, id ASC
   `)
 
+  // Claiming is the hot path for every worker poll, so these statements are
+  // prepared once instead of on each call.
+  const expireMessagesStatement = connection.prepare(
+    `UPDATE agent_messages
+     SET state = 'expired', error = COALESCE(error, 'Message expired.'), lease_owner = NULL, lease_until = NULL
+     WHERE run_id = ? AND state IN ('queued', 'leased', 'delivered')
+       AND expires_at IS NOT NULL AND expires_at <= ?`
+  )
+  const requeueExpiredLeasesStatement = connection.prepare(
+    `UPDATE agent_messages
+     SET state = 'queued', lease_owner = NULL, lease_until = NULL
+     WHERE run_id = ? AND state IN ('leased', 'delivered')
+       AND lease_until IS NOT NULL AND lease_until <= ?`
+  )
+  const claimableMessagesStatement = connection.prepare(
+    `SELECT * FROM agent_messages
+     WHERE run_id = ? AND to_agent_id = ? AND state = 'queued'
+       AND (expires_at IS NULL OR expires_at > ?)
+     ORDER BY seq ASC
+     LIMIT ?`
+  )
+  const deliverMessageStatement = connection.prepare(
+    `UPDATE agent_messages
+     SET state = 'delivered', delivered_at = COALESCE(delivered_at, ?),
+         lease_owner = ?, lease_until = ?
+     WHERE id = ? AND state = 'queued'`
+  )
+
   const claimMessages = connection.transaction((runId, agentId, limit, nowMs, leaseMs) => {
     // Expired TTLs win over leases; a message whose deadline passed is not
     // delivered even if a worker was mid-lease.
-    const expired = connection.prepare(
-      `UPDATE agent_messages
-       SET state = 'expired', error = COALESCE(error, 'Message expired.'), lease_owner = NULL, lease_until = NULL
-       WHERE run_id = ? AND state IN ('queued', 'leased', 'delivered')
-         AND expires_at IS NOT NULL AND expires_at <= ?`
-    ).run(runId, nowMs).changes
+    const expired = expireMessagesStatement.run(runId, nowMs).changes
 
     // An expired lease returns the message to the queue. Attempts are counted
     // on failure, so a crashed worker does not silently consume the retry.
-    const requeued = connection.prepare(
-      `UPDATE agent_messages
-       SET state = 'queued', lease_owner = NULL, lease_until = NULL
-       WHERE run_id = ? AND state IN ('leased', 'delivered')
-         AND lease_until IS NOT NULL AND lease_until <= ?`
-    ).run(runId, nowMs).changes
+    const requeued = requeueExpiredLeasesStatement.run(runId, nowMs).changes
 
-    const rows = connection.prepare(
-      `SELECT * FROM agent_messages
-       WHERE run_id = ? AND to_agent_id = ? AND state = 'queued'
-         AND (expires_at IS NULL OR expires_at > ?)
-       ORDER BY seq ASC
-       LIMIT ?`
-    ).all(runId, agentId, nowMs, limit)
+    const rows = claimableMessagesStatement.all(runId, agentId, nowMs, limit)
 
     const leaseUntil = nowMs + leaseMs
-    const update = connection.prepare(
-      `UPDATE agent_messages
-       SET state = 'delivered', delivered_at = COALESCE(delivered_at, ?),
-           lease_owner = ?, lease_until = ?
-       WHERE id = ? AND state = 'queued'`
-    )
-    for (const row of rows) update.run(nowMs, agentId, leaseUntil, row.id)
+    for (const row of rows) deliverMessageStatement.run(nowMs, agentId, leaseUntil, row.id)
     // Re-read so callers see the delivered state, not the queued snapshot.
     return {
       messages: rows.map((row) => toMessage(getMessageStatement.get(row.id))),
@@ -395,16 +401,25 @@ export function createAgentRunsStore(connection) {
       return expireRunMessagesStatement.run(runId).changes
     },
     appendAgentEvent(runId, agentId, type, data, createdAt) {
+      const payload = data ?? {}
       const result = insertEventStatement.run(
         runId,
         agentId ?? null,
         type,
-        JSON.stringify(data ?? {}),
+        JSON.stringify(payload),
         createdAt
       )
-      return toEvent(
-        connection.prepare('SELECT * FROM agent_events WHERE id = ?').get(Number(result.lastInsertRowid))
-      )
+      // Build the row from the inputs instead of re-reading it; event
+      // appends are on the hot message path and callers do not need a
+      // database round-trip for fields they just wrote.
+      return {
+        id: Number(result.lastInsertRowid),
+        runId,
+        ...(agentId ? { agentId } : {}),
+        type,
+        data: payload,
+        createdAt
+      }
     },
     listAgentEvents(runId, { limit = 200 } = {}) {
       return listEventsStatement.all(runId, limit).map(toEvent)

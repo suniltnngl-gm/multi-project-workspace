@@ -75,6 +75,10 @@ export function createAgentTaskOpsStore(connection, {
   const listOpsStatement = connection.prepare(
     'SELECT * FROM agent_task_ops WHERE run_id = ? ORDER BY created_at ASC, id ASC'
   )
+  const countCreatedTasksStatement = connection.prepare(
+    `SELECT COUNT(*) AS count FROM agent_task_ops
+     WHERE run_id = ? AND op = 'create_task' AND status = 'created'`
+  )
 
   function readOp(row) {
     if (!row) return null
@@ -139,9 +143,7 @@ export function createAgentTaskOpsStore(connection, {
       return { status: 'rejected', error: 'Parent task is outside this agent run.' }
     }
 
-    const creates = listOps(run.id).filter(
-      (entry) => entry.op === 'create_task' && entry.status === 'created'
-    ).length
+    const creates = countCreatedTasksStatement.get(run.id).count
     if (creates >= MAX_TASK_OPS_CREATES_PER_RUN) {
       return {
         status: 'rejected',

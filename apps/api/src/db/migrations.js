@@ -332,6 +332,10 @@ export function runMigrations(connection, { rootDir } = {}) {
       ON agent_messages(to_agent_id, state, seq);
     CREATE INDEX IF NOT EXISTS idx_agent_messages_lease
       ON agent_messages(state, lease_until);
+    CREATE INDEX IF NOT EXISTS idx_agent_messages_expiry
+      ON agent_messages(run_id, state, expires_at);
+    CREATE INDEX IF NOT EXISTS idx_agent_messages_requeue
+      ON agent_messages(run_id, state, lease_until);
 
     CREATE TABLE IF NOT EXISTS agent_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -360,6 +364,8 @@ export function runMigrations(connection, { rootDir } = {}) {
 
     CREATE INDEX IF NOT EXISTS idx_agent_task_ops_run
       ON agent_task_ops(run_id, created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_agent_task_ops_creates
+      ON agent_task_ops(run_id, op, status);
 
     CREATE TABLE IF NOT EXISTS agent_model_evals (
       id TEXT PRIMARY KEY,
@@ -400,6 +406,9 @@ export function runMigrations(connection, { rootDir } = {}) {
       created_at INTEGER NOT NULL,
       expires_at INTEGER
     );
+
+    CREATE INDEX IF NOT EXISTS idx_agent_artifacts_expiry
+      ON agent_artifacts(expires_at) WHERE expires_at IS NOT NULL;
   `)
 
   // Carry the legacy daily counters into the generalized quota table. The old

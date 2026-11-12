@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { existsSync, unlinkSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -155,6 +155,16 @@ test('artifacts are deduplicated by content and pruned when expired', () => {
 
   const stored = database.getAgentArtifact(first.contentHash, { includeContent: true })
   assert.equal(stored.content, '{"files":["README.md"]}')
+  assert.ok(existsSync(join(artifactDirectory, first.contentHash)))
+
+  // A missing byte file self-heals instead of returning metadata with no content.
+  unlinkSync(join(artifactDirectory, first.contentHash))
+  const healed = database.saveAgentArtifact({
+    kind: 'summary',
+    producer: 'worker-b',
+    content: '{"files":["README.md"]}'
+  })
+  assert.equal(healed.contentHash, first.contentHash)
   assert.ok(existsSync(join(artifactDirectory, first.contentHash)))
 
   const other = database.saveAgentArtifact({

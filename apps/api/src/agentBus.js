@@ -361,12 +361,13 @@ export function createAgentBus({
       return errorResult(400, 'Lease must be between 1000 and 300000 milliseconds.')
     }
 
+    const at = now()
     const claimed = database.claimAgentMessages(runId, agent.id, {
       limit: requestedLimit,
-      nowMs: now(),
+      nowMs: at,
       leaseMs: requestedLease
     })
-    database.updateAgent(agent.id, { state: 'running', heartbeatAt: now(), leaseUntil: now() + requestedLease })
+    database.updateAgent(agent.id, { state: 'running', heartbeatAt: at, leaseUntil: at + requestedLease })
     if (claimed.expired > 0) appendEvent(runId, agent.id, 'messages_expired', { count: claimed.expired })
     if (claimed.requeued > 0) appendEvent(runId, agent.id, 'messages_requeued', { count: claimed.requeued })
     for (const message of claimed.messages) {

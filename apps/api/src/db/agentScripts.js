@@ -178,14 +178,15 @@ export function createAgentScriptsStore(connection, {
       const buffer = Buffer.isBuffer(content) ? content : Buffer.from(String(content ?? ''), 'utf8')
       const contentHash = createHash('sha256').update(buffer).digest('hex')
       const at = now()
+      const file = artifactPath(contentHash)
       const existing = getArtifactStatement.get(contentHash)
-      if (existing && (existing.expires_at === null || existing.expires_at > at)) {
+      if (existing && (existing.expires_at === null || existing.expires_at > at) && existsSync(file)) {
         return toArtifact(existing)
       }
       if (existing) deleteArtifactStatement.run(contentHash)
 
-      mkdirSync(dirname(artifactPath(contentHash)), { recursive: true })
-      writeFileSync(artifactPath(contentHash), buffer)
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(file, buffer)
       insertArtifactStatement.run({
         contentHash,
         kind,
