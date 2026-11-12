@@ -628,9 +628,14 @@ export function createModelClient({
   function promptCacheKey(model, request) {
     // Worktree and task are part of the prompt's effective input for the CLI
     // backends, so two otherwise-identical requests must not share a cache
-    // entry across repositories or task payloads.
+    // entry across repositories or task payloads. The effective CLI model and
+    // agent also belong in the key: changing OPENCODE_AI_MODEL mid-session
+    // invalidates the provider's prompt cache, and the local cache must not
+    // serve a reply produced by the previous model.
     return createHash('sha256')
       .update(model.id)
+      .update(model.cli?.model ?? '')
+      .update(model.cli?.agent ?? '')
       .update(JSON.stringify(request.messages ?? []))
       .update(String(request.maxTokens ?? ''))
       .update(JSON.stringify(request.task ?? null))

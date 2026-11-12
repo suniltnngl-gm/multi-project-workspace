@@ -425,6 +425,39 @@ test('prompt cache is per client instance', async () => {
   assert.equal(calls, 2, 'a new client starts with an empty cache')
 })
 
+test('prompt cache key includes the effective CLI model and agent', async () => {
+  let calls = 0
+  const runCommand = async () => {
+    calls += 1
+    return {
+      stdout: JSON.stringify({ type: 'text', part: { text: `reply ${calls}` } }),
+      stderr: ''
+    }
+  }
+  const client = createClient({
+    runCommand,
+    scriptsDir: SCRIPTS,
+    promptCache: { enabled: true }
+  })
+
+  const first = opencodeModel()
+  assert.equal(await client.complete(first, REQUEST), 'reply 1')
+  assert.equal(await client.complete(first, REQUEST), 'reply 1')
+  assert.equal(calls, 1)
+
+  const nextModel = opencodeModel({
+    cli: { ...first.cli, model: 'console-groq/openai/gpt-oss-120b' }
+  })
+  assert.equal(await client.complete(nextModel, REQUEST), 'reply 2')
+  assert.equal(calls, 2, 'a model switch must not reuse the previous model reply')
+
+  const nextAgent = opencodeModel({
+    cli: { ...first.cli, agent: 'build' }
+  })
+  assert.equal(await client.complete(nextAgent, REQUEST), 'reply 3')
+  assert.equal(calls, 3, 'an agent switch must not reuse the previous agent reply')
+})
+
 test('OpenCode reports empty CLI output as a model error', async () => {
   const client = createClient({
     runCommand: async () => ({ stdout: '\n\n', stderr: '' }),
