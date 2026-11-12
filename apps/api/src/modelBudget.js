@@ -4,13 +4,16 @@
  * A model can carry several limiters at once (for example per-minute requests
  * plus a daily token pool). A limiter describes shape only:
  *   - unit:   requests | tokens | compute_seconds
- *   - window: minute | hour | session | day | week | month | none
+ *   - window: second | minute | hour | session | day | week | month | none
  *   - reset:  rolling (in-memory sliding window)
  *             fixed   (persisted bucket aligned to a clock boundary)
  *             pool    (persisted depleting bucket, no automatic reset)
  *
  * Values come from AI_QUOTA_PROFILES or the legacy *_MAX_REQUESTS_PER_DAY
  * variables. No vendor table lives in source, and HTTP 429 stays authoritative.
+ * A model's billing category (free, pay-as-you-go, or monthly subscription)
+ * never bypasses these limiters: TPS/TPM, RPM/RPD, and session/daily/weekly
+ * resets apply the same way regardless of how the provider bills.
  *
  * Observation layers a separate ledger on top for models whose limits are not
  * configured: every request counts into an observed-requests day bucket, and a
@@ -24,9 +27,11 @@ const HOUR = 60 * MINUTE
 const DAY = 24 * HOUR
 const WEEK = 7 * DAY
 const RETENTION_MS = 400 * DAY
-const WINDOW_MS = { minute: MINUTE, hour: HOUR, day: DAY, week: WEEK }
+const WINDOW_MS = { second: 1000, minute: MINUTE, hour: HOUR, day: DAY, week: WEEK }
 const UNIT_NAMES = new Set(['requests', 'tokens', 'compute_seconds'])
-const WINDOW_NAMES = new Set(['minute', 'hour', 'session', 'day', 'week', 'month', 'none'])
+const WINDOW_NAMES = new Set([
+  'second', 'minute', 'hour', 'session', 'day', 'week', 'month', 'none'
+])
 const RESET_NAMES = new Set(['rolling', 'fixed', 'pool'])
 // Observation ledger policies live in the same ai_quota rows but under their
 // own names, so learned behavior can never collide with configured profiles.
@@ -114,6 +119,7 @@ function zonedEpoch(year, month, day, timeZone) {
 }
 
 function startOfFixedWindow(at, limit) {
+  if (limit.window === 'second') return Math.floor(at / 1000) * 1000
   if (limit.window === 'hour') {
     const offset = zoneOffset(at, limit.timezone)
     return Math.floor((at + offset) / HOUR) * HOUR - offset
@@ -140,6 +146,7 @@ function startOfFixedWindow(at, limit) {
 
 function nextFixedBoundary(bucket, limit) {
   if (limit.window === 'session') return bucket + limit.windowMs
+  if (limit.window === 'second') return bucket + 1000
   if (limit.window === 'hour') return bucket + HOUR
   const parts = partsInZone(bucket, limit.timezone)
   if (limit.window === 'month') {
@@ -171,7 +178,7 @@ function normalizeLimits(id, raw) {
     if (!WINDOW_NAMES.has(window)) {
       throw new Error(`Quota limiter ${index} for ${id} has an unknown window.`)
     }
-    if (reset === 'rolling' && !['minute', 'hour'].includes(window)) {
+    if (reset === 'rolling' && !['second', 'minute', 'hour'].includes(window)) {
       throw new Error(
         `Quota limiter ${index} for ${id} cannot roll a ${window} window; use a fixed reset.`
       )

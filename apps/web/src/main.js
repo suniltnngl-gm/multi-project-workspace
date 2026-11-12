@@ -4,6 +4,7 @@ import {
   buildDraftInput,
   buildTaskQuery,
   formatAiRun,
+  formatBillingCategory,
   formatBusyMessage,
   formatJobProgress,
   formatModelMeta,
@@ -280,6 +281,12 @@ function renderModelRoster(models) {
     item.className = 'model-item'
     const name = document.createElement('strong')
     name.textContent = model.label
+    const billing = document.createElement('span')
+    if (model.billingCategory) {
+      billing.className = `model-billing model-billing-${model.billingCategory}`
+      billing.textContent = formatBillingCategory(model.billingCategory)
+      billing.title = 'Billing category; rate and reset quotas still apply'
+    }
     const state = document.createElement('span')
     const stateName = model.state || model.execution
     state.className = `model-state model-state-${stateName}`
@@ -287,7 +294,7 @@ function renderModelRoster(models) {
     const note = document.createElement('small')
     const selection = model.autoSelect === false ? ' · explicit selection only' : ''
     note.textContent = (model.notes || `${model.provider} · ${model.execution}`) + selection
-    item.append(name, state, note)
+    item.append(name, ...(model.billingCategory ? [billing] : []), state, note)
 
     const metaText = formatModelMeta(model)
     if (metaText) {

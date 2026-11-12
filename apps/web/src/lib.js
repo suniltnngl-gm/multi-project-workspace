@@ -84,6 +84,13 @@ export function formatTaskActivity(event) {
   return `${label}: ${formatActivityValue(event.oldValue)} → ${formatActivityValue(event.newValue)}`
 }
 
+export function formatBillingCategory(category) {
+  if (category === 'free') return 'free'
+  if (category === 'payg') return 'pay as you go'
+  if (category === 'subscription') return 'monthly subscription'
+  return category || ''
+}
+
 export function formatBudget(budget) {
   if (!budget) return ''
   const used = budget.used ?? 0

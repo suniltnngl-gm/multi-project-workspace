@@ -3,6 +3,7 @@ import {
   buildDraftInput,
   buildTaskQuery,
   formatAiRun,
+  formatBillingCategory,
   formatBudget,
   formatBusyMessage,
   formatDuration,
@@ -104,6 +105,19 @@ describe('formatModelMeta', () => {
   })
 })
 
+describe('formatBillingCategory', () => {
+  it('labels each billing category', () => {
+    expect(formatBillingCategory('free')).toBe('free')
+    expect(formatBillingCategory('payg')).toBe('pay as you go')
+    expect(formatBillingCategory('subscription')).toBe('monthly subscription')
+  })
+
+  it('passes through unknown or missing values', () => {
+    expect(formatBillingCategory('credits')).toBe('credits')
+    expect(formatBillingCategory(undefined)).toBe('')
+  })
+})
+
 describe('formatBudget', () => {
   it('labels daily limits as today', () => {
     expect(formatBudget({ used: 2, limit: 10, window: 'day', unit: 'requests' }))
@@ -129,6 +143,20 @@ describe('formatLimiter', () => {
       unit: 'requests', window: 'minute', reset: 'rolling',
       limit: 3, used: 2, ok: false, resetsInSeconds: 45
     })).toBe('2/3 requests per minute (rolling), resets in 45s')
+  })
+
+  it('labels tokens-per-second windows', () => {
+    expect(formatLimiter({
+      unit: 'tokens', window: 'second', reset: 'rolling',
+      limit: 1000, used: 900, ok: true, resetsInSeconds: 0
+    })).toBe('900/1000 tokens per second (rolling)')
+  })
+
+  it('labels five-hour session windows', () => {
+    expect(formatLimiter({
+      unit: 'requests', window: 'session', reset: 'fixed',
+      limit: 300, used: 120, ok: true, resetsInSeconds: 0
+    })).toBe('120/300 requests per session (fixed)')
   })
 
   it('labels fixed windows', () => {

@@ -109,6 +109,7 @@ const models = [
     execution: 'live',
     callable: true,
     autoSelect: true,
+    billingCategory: 'free',
     requests: 3,
     failures: 1,
     lastDurationMs: 1500
@@ -119,7 +120,8 @@ const models = [
     provider: 'local',
     execution: 'live',
     callable: true,
-    autoSelect: true
+    autoSelect: true,
+    billingCategory: 'free'
   },
   {
     id: 'colab-3b',
@@ -128,6 +130,7 @@ const models = [
     execution: 'live',
     callable: true,
     autoSelect: false,
+    billingCategory: 'payg',
     notes: 'Calls a reusable Colab session through the colab CLI.',
     sessionState: 'absent',
     budget: {
@@ -155,6 +158,7 @@ const models = [
     execution: 'batch',
     callable: true,
     autoSelect: false,
+    billingCategory: 'subscription',
     notes: 'Submits a private Kaggle notebook through the kaggle CLI.',
     budget: {
       ok: false,
@@ -318,6 +322,15 @@ describe('development board', () => {
         'Calls a reusable Colab session through the colab CLI. · explicit selection only',
         'Submits a private Kaggle notebook through the kaggle CLI. · explicit selection only'
       ])
+  })
+
+  it('shows each model billing category without hiding quota limits', async () => {
+    await vi.waitFor(() => {
+      expect(document.querySelectorAll('.model-billing')).toHaveLength(4)
+    })
+
+    expect([...document.querySelectorAll('.model-billing')].map((node) => node.textContent))
+      .toEqual(['free', 'free', 'pay as you go', 'monthly subscription'])
   })
 
   it('shows budget, session, and usage details', async () => {

@@ -17,6 +17,7 @@ export const LOCAL_MODEL_DEFINITIONS = Object.freeze([
     remote: false,
     launchKey: '0.5b',
     priority: 10,
+    billingCategory: 'free',
     defaultPort: 8080,
     portEnv: 'LOCAL_AI_0_5B_PORT',
     urlEnv: 'LOCAL_AI_0_5B_URL',
@@ -38,6 +39,7 @@ export const LOCAL_MODEL_DEFINITIONS = Object.freeze([
     remote: false,
     launchKey: '1.5b',
     priority: 20,
+    billingCategory: 'free',
     defaultPort: 8081,
     portEnv: 'LOCAL_AI_1_5B_PORT',
     urlEnv: 'LOCAL_AI_1_5B_URL',
@@ -52,6 +54,77 @@ export const LOCAL_MODEL_DEFINITIONS = Object.freeze([
 
 const SERVERLESS_SLOTS_ENV = 'SERVERLESS_AI_SLOTS'
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+/**
+ * Billing is metadata about how a provider charges, not permission to skip
+ * quota. Every model still enforces its configured or observed rate/reset
+ * limiters; a free, metered, or subscription category only changes the label.
+ */
+export const BILLING_CATEGORIES = Object.freeze(['free', 'payg', 'subscription'])
+export const BILLING_CATEGORY_LABELS = Object.freeze({
+  free: 'free',
+  payg: 'pay-as-you-go',
+  subscription: 'monthly subscription'
+})
+const BILLING_ALIASES = new Map([
+  ['free', 'free'],
+  ['free-tier', 'free'],
+  ['freetier', 'free'],
+  ['payg', 'payg'],
+  ['pay-as-you-go', 'payg'],
+  ['payasyougo', 'payg'],
+  ['metered', 'payg'],
+  ['subscription', 'subscription'],
+  ['monthly', 'subscription'],
+  ['monthly-subscription', 'subscription'],
+  ['plan', 'subscription']
+])
+
+export function normalizeBillingCategory(value, label = 'billing') {
+  if (value === undefined || value === null || value === '') return undefined
+  if (typeof value !== 'string') {
+    throw new Error(`${label} must be one of free, payg, or subscription.`)
+  }
+  const key = value.trim().toLowerCase().replace(/[\s_]+/g, '-')
+  const category = BILLING_ALIASES.get(key)
+  if (!category) {
+    throw new Error(`${label} must be one of free, payg, or subscription.`)
+  }
+  return category
+}
+
+function parseBillingCategories(env) {
+  const raw = env.AI_BILLING_CATEGORIES
+  if (raw === undefined || raw === '') return new Map()
+
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error('AI_BILLING_CATEGORIES must be valid JSON.')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('AI_BILLING_CATEGORIES must be a JSON object keyed by model id.')
+  }
+
+  const categories = new Map()
+  for (const [id, value] of Object.entries(parsed)) {
+    categories.set(id, normalizeBillingCategory(value, `AI_BILLING_CATEGORIES.${id}`))
+  }
+  return categories
+}
+
+function resolveBillingCategory({ env, categories, id, definition, explicit, label }) {
+  if (explicit !== undefined && explicit !== null && explicit !== '') {
+    return normalizeBillingCategory(explicit, label)
+  }
+  if (categories.has(id)) return categories.get(id)
+  const configured = definition.billingEnv ? env[definition.billingEnv] : undefined
+  if (configured !== undefined && configured !== '') {
+    return normalizeBillingCategory(configured, definition.billingEnv)
+  }
+  return definition.billingCategory
+}
 
 /**
  * A provider-agnostic OpenAI-compatible slot. The provider slug and endpoint
@@ -71,6 +144,8 @@ export const SERVERLESS_MODEL_DEFINITION = Object.freeze({
   urlEnv: 'SERVERLESS_AI_URL',
   apiKeyEnv: 'SERVERLESS_AI_API_KEY',
   apiModelEnv: 'SERVERLESS_AI_MODEL',
+  billingEnv: 'SERVERLESS_AI_BILLING',
+  billingCategory: 'payg',
   timeoutEnv: 'SERVERLESS_AI_TIMEOUT_MS',
   autoSelectEnv: 'SERVERLESS_AI_AUTO_SELECT',
   jsonModeEnv: 'SERVERLESS_AI_SUPPORTS_JSON_MODE',
@@ -95,6 +170,8 @@ export const EXTERNAL_MODEL_DEFINITIONS = Object.freeze([
     callable: true,
     remote: true,
     priority: 8,
+    billingEnv: 'COLAB_AI_BILLING',
+    billingCategory: 'free',
     urlEnv: 'COLAB_AI_URL',
     apiKeyEnv: 'COLAB_AI_API_KEY',
     timeoutEnv: 'COLAB_AI_TIMEOUT_MS',
@@ -112,6 +189,8 @@ export const EXTERNAL_MODEL_DEFINITIONS = Object.freeze([
     callable: true,
     remote: true,
     priority: 7,
+    billingEnv: 'KAGGLE_AI_BILLING',
+    billingCategory: 'free',
     urlEnv: 'KAGGLE_AI_URL',
     apiKeyEnv: 'KAGGLE_AI_API_KEY',
     timeoutEnv: 'KAGGLE_AI_TIMEOUT_MS',
@@ -129,6 +208,8 @@ export const EXTERNAL_MODEL_DEFINITIONS = Object.freeze([
     callable: true,
     remote: true,
     priority: 6,
+    billingEnv: 'OPENCODE_AI_BILLING',
+    billingCategory: 'free',
     urlEnv: 'OPENCODE_AI_URL',
     apiKeyEnv: 'OPENCODE_AI_API_KEY',
     timeoutEnv: 'OPENCODE_AI_TIMEOUT_MS',
@@ -309,6 +390,7 @@ function buildServerlessModel(definition, config) {
     callable: true,
     remote: true,
     priority: config.priority,
+    billingCategory: config.billingCategory,
     url: config.url,
     // An explicitly configured serverless endpoint is still opt-in: a missing
     // model does not silently spend a third-party quota.
@@ -328,7 +410,7 @@ function buildServerlessModel(definition, config) {
   }
 }
 
-function createOllamaModel(env) {
+function createOllamaModel(env, billingCategories) {
   const url = readUrl(env, 'OLLAMA_AI_URL') || (env.OLLAMA_API_BASE ? trimUrl(env.OLLAMA_API_BASE) : null)
   // A key alone is only a credential; the model registers on explicit URL or
   // model opt-in so a stale key cannot fail availability checks.
@@ -346,6 +428,13 @@ function createOllamaModel(env) {
     callable: true,
     remote: true,
     priority: 6,
+    billingCategory: resolveBillingCategory({
+      env,
+      categories: billingCategories,
+      id: 'ollama',
+      definition: { billingEnv: 'OLLAMA_AI_BILLING', billingCategory: 'payg' },
+      label: 'OLLAMA_AI_BILLING'
+    }),
     autoSelect: readBoolean(env, 'OLLAMA_AI_AUTO_SELECT', false),
     timeoutMs: readNumber(env, 'OLLAMA_AI_TIMEOUT_MS', 120000),
     minAvailableMemoryMb: 0,
@@ -358,7 +447,7 @@ function createOllamaModel(env) {
   }
 }
 
-function createServerlessModel(env) {
+function createServerlessModel(env, billingCategories) {
   const definition = SERVERLESS_MODEL_DEFINITION
   const url = readUrl(env, definition.urlEnv)
   if (!url) return null
@@ -367,6 +456,13 @@ function createServerlessModel(env) {
     id: definition.id,
     label: definition.label,
     priority: definition.priority,
+    billingCategory: resolveBillingCategory({
+      env,
+      categories: billingCategories,
+      id: definition.id,
+      definition,
+      label: definition.billingEnv
+    }),
     url,
     apiModel: readText(env, definition.apiModelEnv, ''),
     apiKey: env[definition.apiKeyEnv],
@@ -379,7 +475,7 @@ function createServerlessModel(env) {
   })
 }
 
-function createServerlessSlots(env) {
+function createServerlessSlots(env, billingCategories) {
   const raw = env[SERVERLESS_SLOTS_ENV]
   if (raw === undefined || raw === '') return []
 
@@ -425,6 +521,14 @@ function createServerlessSlots(env) {
       id,
       label: readSlotText(entry.label, `${at}.label`) ?? `Serverless ${id}`,
       priority: readSlotNumber(entry.priority, `${at}.priority`, SERVERLESS_MODEL_DEFINITION.priority),
+      billingCategory: resolveBillingCategory({
+        env,
+        categories: billingCategories,
+        id,
+        definition: SERVERLESS_MODEL_DEFINITION,
+        explicit: entry.billing ?? entry.billingCategory,
+        label: `${at}.billing`
+      }),
       url: readSlotUrl(entry.url, `${at}.url`),
       apiModel: readSlotText(entry.apiModel, `${at}.apiModel`),
       apiKey: apiKey || undefined,
@@ -459,6 +563,7 @@ function createServerlessSlots(env) {
  */
 export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
   const cli = createCliConfig(env)
+  const billingCategories = parseBillingCategories(env)
   const localModels = LOCAL_MODEL_DEFINITIONS.map((definition) => {
     const explicitPort = readNumber(env, definition.portEnv, undefined)
     const assumedPort = explicitPort ?? definition.defaultPort
@@ -474,6 +579,13 @@ export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
       backend: 'http',
       callable: true,
       autoSelect: true,
+      billingCategory: resolveBillingCategory({
+        env,
+        categories: billingCategories,
+        id: definition.id,
+        definition,
+        label: `AI_BILLING_CATEGORIES.${definition.id}`
+      }),
       port: resolvePort(definition, env, url),
       url,
       timeoutMs: readNumber(env, definition.timeoutEnv, definition.defaultTimeoutMs),
@@ -494,6 +606,13 @@ export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
       execution: url ? 'live' : definition.execution,
       backend,
       callable: true,
+      billingCategory: resolveBillingCategory({
+        env,
+        categories: billingCategories,
+        id: definition.id,
+        definition,
+        label: definition.billingEnv
+      }),
       // CLI-backed models opt out of implicit selection so a request without
       // a model does not unexpectedly spend Colab/Kaggle quota. A configured
       // HTTP endpoint is treated like any other live endpoint.
@@ -510,12 +629,12 @@ export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
     return model
   })
 
-  const legacyServerless = createServerlessModel(env)
+  const legacyServerless = createServerlessModel(env, billingCategories)
   const serverlessModels = [
     ...(legacyServerless ? [legacyServerless] : []),
-    ...createServerlessSlots(env)
+    ...createServerlessSlots(env, billingCategories)
   ]
-  const ollamaModel = createOllamaModel(env)
+  const ollamaModel = createOllamaModel(env, billingCategories)
   const models = [
     ...localModels,
     ...serverlessModels,
@@ -605,6 +724,12 @@ export function publicModelDefinition(model) {
     callable: model.callable,
     autoSelect: model.autoSelect ?? true,
     priority: model.priority,
+    ...(model.billingCategory
+      ? {
+        billingCategory: model.billingCategory,
+        billingLabel: BILLING_CATEGORY_LABELS[model.billingCategory] ?? model.billingCategory
+      }
+      : {}),
     ...(model.minAvailableMemoryMb !== undefined
       ? { minAvailableMemoryMb: model.minAvailableMemoryMb }
       : {}),

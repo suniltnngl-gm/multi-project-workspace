@@ -153,6 +153,76 @@ test('fixed week windows reset on Monday in UTC', () => {
   assert.equal(budget.check('api').ok, true)
 })
 
+test('tokens-per-second and tokens-per-minute limiters roll independently', () => {
+  const clock = clockAt('2026-01-15T10:00:00Z')
+  const budget = createModelBudget({
+    profiles: {
+      api: [
+        { policy: 'tps', unit: 'tokens', limit: 1000, window: 'second', reset: 'rolling' },
+        { policy: 'tpm', unit: 'tokens', limit: 5000, window: 'minute', reset: 'rolling' },
+        { policy: 'rpm', unit: 'requests', limit: 3, window: 'minute', reset: 'rolling' }
+      ]
+    },
+    now: clock.now
+  })
+
+  budget.record('api')
+  budget.recordUsage('api', { totalTokens: 800 })
+  budget.record('api')
+  budget.recordUsage('api', { totalTokens: 300 })
+
+  const blocked = budget.check('api')
+  assert.equal(blocked.ok, false)
+  assert.equal(blocked.budget.limiters.find((limiter) => limiter.policy === 'tps').used, 1100)
+  assert.equal(blocked.budget.limiters.find((limiter) => limiter.policy === 'tpm').used, 1100)
+  assert.equal(blocked.budget.limiters.find((limiter) => limiter.policy === 'rpm').used, 2)
+  assert.equal(blocked.retryAfter, 1)
+
+  clock.advance(1000)
+  const refilled = budget.snapshot('api')
+  assert.equal(refilled.limiters.find((limiter) => limiter.policy === 'tps').used, 0)
+  assert.equal(refilled.limiters.find((limiter) => limiter.policy === 'tpm').used, 1100)
+  assert.equal(budget.check('api').ok, true)
+})
+
+test('session, daily, and weekly resets compose for every billing category', () => {
+  const clock = clockAt('2026-01-15T22:00:00Z')
+  const budget = createModelBudget({
+    profiles: {
+      api: [
+        { policy: 'rpd', unit: 'requests', limit: 1, window: 'day', reset: 'fixed' },
+        { policy: 'session', unit: 'requests', limit: 1, window: 'session', reset: 'fixed', hours: 5 },
+        { policy: 'weekly', unit: 'requests', limit: 1, window: 'week', reset: 'fixed' }
+      ]
+    },
+    now: clock.now
+  })
+
+  budget.record('api')
+  assert.equal(budget.check('api').ok, false)
+
+  // Five hours later the session and UTC day have reset, but the weekly cap
+  // still applies: billing category never turns a quota into unlimited use.
+  clock.advance(5 * HOUR + 1000)
+  const weeklyBlocked = budget.check('api')
+  assert.equal(weeklyBlocked.ok, false)
+  assert.equal(
+    weeklyBlocked.budget.limiters.find((limiter) => limiter.policy === 'session').used,
+    0
+  )
+  assert.equal(
+    weeklyBlocked.budget.limiters.find((limiter) => limiter.policy === 'rpd').used,
+    0
+  )
+  assert.equal(
+    weeklyBlocked.budget.limiters.find((limiter) => limiter.policy === 'weekly').used,
+    1
+  )
+
+  clock.set('2026-01-19T00:00:01Z') // Monday in UTC
+  assert.equal(budget.check('api').ok, true)
+})
+
 test('depleting pools never reset on their own', () => {
   const clock = clockAt('2026-01-15T10:00:00Z')
   const budget = createModelBudget({

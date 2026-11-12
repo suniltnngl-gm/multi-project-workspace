@@ -84,6 +84,30 @@ test('quota diagnostics honor AI_QUOTA_PROFILES and describe pools', () => {
   )
 })
 
+test('quota diagnostics name billing without treating it as unlimited', () => {
+  const checks = checkQuotaConfiguration([
+    {
+      id: 'slot-a',
+      label: 'Slot A',
+      remote: true,
+      billingCategory: 'subscription',
+      quotaLimits: [{ unit: 'requests', limit: 5, window: 'minute', reset: 'rolling' }]
+    },
+    {
+      id: 'slot-b',
+      label: 'Slot B',
+      remote: true,
+      billingCategory: 'payg'
+    }
+  ], { env: {} })
+
+  assert.equal(checks[0].level, 'ok')
+  assert.match(checks[0].message, /5 requests per rolling minute/)
+  assert.match(checks[0].message, /Billing: subscription; quotas still apply/)
+  assert.equal(checks[1].level, 'warn')
+  assert.match(checks[1].message, /Billing: payg; quotas still apply/)
+})
+
 test('quota diagnostics report invalid profiles as errors', () => {
   const checks = checkQuotaConfiguration([
     {

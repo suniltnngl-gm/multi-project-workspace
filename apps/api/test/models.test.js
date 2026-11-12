@@ -20,6 +20,7 @@ const MODELS = [
     provider: 'local',
     execution: 'live',
     priority: 10,
+    billingCategory: 'free',
     minAvailableMemoryMb: 1024,
     url: 'http://small.test'
   },
@@ -38,6 +39,7 @@ const MODELS = [
     provider: 'colab',
     execution: 'manual',
     priority: 0,
+    billingCategory: 'subscription',
     notes: 'Run the Colab notebook.'
   },
   {
@@ -46,6 +48,7 @@ const MODELS = [
     provider: 'kaggle',
     execution: 'batch',
     priority: 0,
+    billingCategory: 'payg',
     notes: 'Submit a Kaggle batch run.'
   }
 ]
@@ -187,6 +190,63 @@ test('external models become live when a URL is configured', () => {
   )
 })
 
+test('models expose billing categories without changing quota enforcement', () => {
+  const defaults = createModelRegistry({ env: {} })
+  assert.deepEqual(
+    defaults.map((model) => [model.id, model.billingCategory]),
+    [
+      ['local-0.5b', 'free'],
+      ['local-1.5b', 'free'],
+      ['colab-3b', 'free'],
+      ['kaggle-3b', 'free'],
+      ['opencode', 'free']
+    ]
+  )
+
+  const limits = [{ unit: 'requests', limit: 5, window: 'minute', reset: 'rolling' }]
+  const configured = createModelRegistry({
+    env: {
+      AI_BILLING_CATEGORIES: JSON.stringify({
+        opencode: 'subscription',
+        'slot-a': 'pay-as-you-go'
+      }),
+      COLAB_AI_BILLING: 'payg',
+      SERVERLESS_AI_SLOTS: JSON.stringify([
+        { id: 'slot-a', url: 'https://a.example', limits },
+        { id: 'slot-b', url: 'https://b.example', billing: 'free' }
+      ])
+    }
+  })
+
+  assert.equal(configured.find((model) => model.id === 'opencode').billingCategory, 'subscription')
+  assert.equal(configured.find((model) => model.id === 'colab-3b').billingCategory, 'payg')
+  const slotA = configured.find((model) => model.id === 'slot-a')
+  assert.equal(slotA.billingCategory, 'payg')
+  assert.deepEqual(slotA.quotaLimits, limits)
+  assert.equal(configured.find((model) => model.id === 'slot-b').billingCategory, 'free')
+
+  assert.throws(
+    () => createModelRegistry({ env: { AI_BILLING_CATEGORIES: '{not json' } }),
+    /AI_BILLING_CATEGORIES must be valid JSON/
+  )
+  assert.throws(
+    () => createModelRegistry({
+      env: { AI_BILLING_CATEGORIES: JSON.stringify({ opencode: 'enterprise' }) }
+    }),
+    /AI_BILLING_CATEGORIES\.opencode must be one of free, payg, or subscription/
+  )
+  assert.throws(
+    () => createModelRegistry({
+      env: {
+        SERVERLESS_AI_SLOTS: JSON.stringify([
+          { id: 'slot-a', url: 'https://a.example', billing: 'credits' }
+        ])
+      }
+    }),
+    /billing must be one of free, payg, or subscription/
+  )
+})
+
 test('serverless slot is registered only when an endpoint is configured', () => {
   assert.equal(
     createModelRegistry({ env: {} }).some((model) => model.id === 'serverless'),
@@ -233,6 +293,7 @@ test('serverless defaults avoid implicit selection and JSON mode', () => {
 
   assert.equal(serverless.autoSelect, false)
   assert.equal(serverless.supportsJsonMode, false)
+  assert.equal(serverless.billingCategory, 'payg')
   assert.equal(serverless.apiModel, undefined)
   assert.equal(serverless.apiKey, undefined)
   assert.equal(serverless.timeoutMs, 60000)
@@ -451,6 +512,15 @@ test('models endpoint returns the registry without live state', async () => {
       'local-small', 'local-large', 'colab', 'kaggle'
     ])
     assert.equal(models.every((model) => !('state' in model)), true)
+    assert.deepEqual(
+      models.map((model) => [model.billingCategory, model.billingLabel]),
+      [
+        ['free', 'free'],
+        [undefined, undefined],
+        ['subscription', 'monthly subscription'],
+        ['payg', 'pay-as-you-go']
+      ]
+    )
   })
 })
 

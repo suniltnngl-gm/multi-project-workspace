@@ -168,6 +168,30 @@ h2 {
   font-size: 0.75rem;
 }
 
+.model-billing {
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 0.68rem;
+  letter-spacing: 0.03em;
+  background: rgba(148, 163, 184, 0.15);
+  color: #cbd5e1;
+}
+
+.model-billing-free {
+  background: rgba(34, 197, 94, 0.14);
+  color: #86efac;
+}
+
+.model-billing-payg {
+  background: rgba(56, 189, 248, 0.16);
+  color: #7dd3fc;
+}
+
+.model-billing-subscription {
+  background: rgba(192, 132, 252, 0.16);
+  color: #d8b4fe;
+}
+
 .model-state {
   margin-left: auto;
   border-radius: 999px;

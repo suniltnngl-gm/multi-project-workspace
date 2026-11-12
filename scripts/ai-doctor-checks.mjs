@@ -49,18 +49,21 @@ export function checkQuotaConfiguration(models, { env = process.env } = {}) {
   const checks = []
   for (const model of models.filter((entry) => entry.remote)) {
     const limits = profiles.get(model.id)
+    const billing = model.billingCategory
+      ? ` Billing: ${model.billingCategory}; quotas still apply.`
+      : ''
     if (!limits || limits.length === 0) {
       checks.push({
         level: 'warn',
         area: 'quota',
-        message: `${model.label} has no quota profile or daily request limit configured.`
+        message: `${model.label} has no quota profile or daily request limit configured.${billing}`
       })
       continue
     }
     checks.push({
       level: 'ok',
       area: 'quota',
-      message: `${model.label}: ${limits.map(describeQuotaLimiter).join('; ')}.`
+      message: `${model.label}: ${limits.map(describeQuotaLimiter).join('; ')}.${billing}`
     })
   }
   return checks

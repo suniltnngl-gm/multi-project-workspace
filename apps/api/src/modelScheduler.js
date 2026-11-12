@@ -39,6 +39,7 @@ function modelStatus(model, extra = {}) {
     callable: model.callable,
     autoSelect: model.autoSelect ?? true,
     priority: model.priority,
+    ...(model.billingCategory ? { billingCategory: model.billingCategory } : {}),
     ...(model.minAvailableMemoryMb !== undefined
       ? { minAvailableMemoryMb: model.minAvailableMemoryMb }
       : {}),
