@@ -1,13 +1,13 @@
 // Objective: Own the AI drafting routes: refine-task, background jobs, complete, and improve, with their shared model selection and runner logic.
 // Requirements: One attempt per selected model with budget, cooldown, and provenance recorded; drafts parse into task shape; complete and improve run as jobs like any other model call; improve suggestions persist as proposals that never become tasks without approval.
-// Decisions: Draft validation, prompt building, and runner helpers stay in one group because refine-task, jobs, complete, and improve share them; env-based AI limits load at module top after the workspace env file; the improve route hands parsed suggestions to the proposals store so the board, not the model, decides what becomes a task.
+// Decisions: Draft validation, prompt building, and runner helpers stay in one group because refine-task, jobs, complete, and improve share them; the shared env module is imported before the module-level AI limits are read; the improve route hands parsed suggestions to the proposals store so the board, not the model, decides what becomes a task.
 // Relevant Files: apps/api/src/routes/aiDrafts.js, apps/api/src/routes/util.js, apps/api/src/taskJobStore.js, apps/api/src/localAiPrompt.js
 // Important Context: User file. Route group for /api/local-ai/* and /api/ai/*.
-// Work State: Completed: Extracted from app.js as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
+// Work State: Completed: Extracted from app.js as task #45; env loading uses the shared env module as task #63; Active: None; Blocked: None; Next Move: Maintain as needed.
+import '../env.js'
 import { Router } from 'express'
 import { existsSync } from 'node:fs'
 import { buildTaskPrompt } from '../localAiPrompt.js'
-import { loadWorkspaceEnv } from '../../../../scripts/env.mjs'
 import {
   isValidText,
   MAX_TITLE_LENGTH,
@@ -16,8 +16,6 @@ import {
   TASK_TEXT_LABELS,
   TASK_TYPES
 } from './util.js'
-
-loadWorkspaceEnv()
 
 const MAX_AI_INPUT_LENGTH = 2000
 const AI_MESSAGE_MAX_LENGTH = 20000

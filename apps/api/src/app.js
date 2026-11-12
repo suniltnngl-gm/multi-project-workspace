@@ -3,7 +3,8 @@
 // Decisions: The shared context (scheduler, job store, metrics, budget) is built here and handed to each group; the repository scope is built once and shared by repositories, files, and folders so scoping cannot drift; the JSON error handler stays with the app because it is cross-group; the request-run middleware scopes an AsyncLocalStorage context with run() (never enterWith()) so events written by async handlers stamp their own request without one request overwriting another's run, and finishes the run on response finish or close; MCP discovery resolves the repository root once and passes it as the CLI cwd because the catalog is scoped to the working directory.
 // Relevant Files: apps/api/src/app.js, apps/api/src/routes/tasks.js, apps/api/src/routes/aiDrafts.js, apps/api/src/routes/repositories.js, apps/api/src/routes/runs.js, apps/api/src/routes/mcp.js
 // Important Context: User file. The composition entry for the API server and the tests.
-// Work State: Completed: Split into routes/ group modules as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
+// Work State: Completed: Split into routes/ group modules as task #45; env loading moved to the first import as task #63; Active: None; Blocked: None; Next Move: Maintain as needed.
+import './env.js'
 import express from 'express'
 import { execFileSync } from 'node:child_process'
 import { createResourceMonitor } from './resourceMonitor.js'
@@ -17,7 +18,6 @@ import { createModelBudget } from './modelBudget.js'
 import { createLocalVerifier } from './localVerifier.js'
 import { createTaskWorktrees } from './taskWorktrees.js'
 import { discoverMcpCatalog } from './mcpDiscovery.js'
-import { loadWorkspaceEnv } from '../../../scripts/env.mjs'
 import { createVerifyRouter } from './routes/verify.js'
 import { createTasksRouter } from './routes/tasks.js'
 import { createRepositoryScope, createRepositoriesRouter } from './routes/repositories.js'
@@ -33,8 +33,6 @@ import { createAiDraftsRouter } from './routes/aiDrafts.js'
 import { createRunsRouter } from './routes/runs.js'
 import { createMcpRouter } from './routes/mcp.js'
 import { createProposalsRouter } from './routes/proposals.js'
-
-loadWorkspaceEnv()
 
 const LOCAL_AI_MIN_LOAD = Number(process.env.LOCAL_AI_MIN_LOAD ?? 0.5)
 const LOCAL_AI_MAX_LOAD = Number(process.env.LOCAL_AI_MAX_LOAD ?? 1.0)

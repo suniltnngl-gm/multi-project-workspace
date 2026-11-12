@@ -1,12 +1,10 @@
 // Objective: Share request validators, text limits, and id parsing across route groups.
 // Requirements: Validate the same fields with the same messages as the pre-split app.js; read env-based limits after the workspace env file loads.
-// Decisions: One util module because task, file, and folder validators share the limit tables; loadWorkspaceEnv runs at module top so MAX_TASK_* env overrides apply even though route modules load before app.js.
+// Decisions: One util module because task, file, and folder validators share the limit tables; the shared env module is imported before the constants read process.env, so MAX_TASK_* overrides apply without every route loading the file.
 // Relevant Files: apps/api/src/routes/util.js, apps/api/src/routes/tasks.js, apps/api/src/routes/files.js, apps/api/src/routes/folders.js, apps/api/src/routes/aiDrafts.js
 // Important Context: User file. Imported by every route group that validates request bodies.
-// Work State: Completed: Extracted from app.js as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
-import { loadWorkspaceEnv } from '../../../../scripts/env.mjs'
-
-loadWorkspaceEnv()
+// Work State: Completed: Extracted from app.js as task #45; env loading uses the shared env module as task #63; Active: None; Blocked: None; Next Move: Maintain as needed.
+import '../env.js'
 
 export const MAX_TITLE_LENGTH = Number(process.env.MAX_TASK_TITLE_LENGTH ?? 200)
 const MAX_DESCRIPTION_LENGTH = Number(process.env.MAX_TASK_DESCRIPTION_LENGTH ?? 2000)
