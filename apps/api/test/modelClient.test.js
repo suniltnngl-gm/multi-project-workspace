@@ -8,6 +8,14 @@ import { createModelClient, ModelCallError } from '../src/modelClient.js'
 const SCRIPTS = '/workspace/scripts'
 const RESULT_SENTINEL = '__WORKSPACE_MODEL_RESULT__'
 
+// Tests run through scripts/with-env.mjs under self-check, so the workspace
+// .env can enable the prompt cache. An identical second request would then
+// return the first reply and hide the behavior under test, so every client
+// starts with the cache off; the cache-specific test opts back in.
+function createClient(options = {}) {
+  return createModelClient({ promptCache: { enabled: false }, ...options })
+}
+
 function colabModel(overrides = {}) {
   return {
     id: 'colab-3b',
@@ -112,7 +120,7 @@ test('Colab creates a missing session, bootstraps once, and reuses it', async ()
     throw new Error(`unexpected ${command} ${args.join(' ')}`)
   }
 
-  const client = createModelClient({ runCommand, scriptsDir: SCRIPTS })
+  const client = createClient({ runCommand, scriptsDir: SCRIPTS })
   const model = colabModel()
 
   const first = await client.complete(model, REQUEST)
@@ -162,7 +170,7 @@ test('Colab reuses an existing session without creating a new one', async () => 
     }
   }
 
-  const client = createModelClient({ runCommand, scriptsDir: SCRIPTS })
+  const client = createClient({ runCommand, scriptsDir: SCRIPTS })
   await client.complete(colabModel(), REQUEST)
   assert.deepEqual(calls.map((args) => args[0]), ['exec', 'exec'])
   assert.equal(calls.some((args) => args[0] === 'new'), false)
@@ -170,7 +178,7 @@ test('Colab reuses an existing session without creating a new one', async () => 
 
 test('Colab surfaces bootstrap failures without creating a session', async () => {
   const calls = []
-  const client = createModelClient({
+  const client = createClient({
     runCommand: async (command, args) => {
       calls.push(args)
       throw new ModelCallError('pip install failed', 502)
@@ -190,7 +198,7 @@ test('Colab reports missing or invalid sentinel output', async () => {
     if (args.includes(join(SCRIPTS, 'colab_model_server.py'))) return { stdout: '', stderr: '' }
     return { stdout: 'no result here', stderr: '' }
   }
-  const client = createModelClient({ runCommand, scriptsDir: SCRIPTS })
+  const client = createClient({ runCommand, scriptsDir: SCRIPTS })
   await assert.rejects(
     () => client.complete(colabModel(), REQUEST),
     (error) => error instanceof ModelCallError && error.status === 502 && /no model output/.test(error.message)
@@ -200,7 +208,7 @@ test('Colab reports missing or invalid sentinel output', async () => {
     if (args.includes(join(SCRIPTS, 'colab_model_server.py'))) return { stdout: '', stderr: '' }
     return { stdout: `${RESULT_SENTINEL}{not-json`, stderr: '' }
   }
-  const invalidClient = createModelClient({ runCommand: invalidRunCommand, scriptsDir: SCRIPTS })
+  const invalidClient = createClient({ runCommand: invalidRunCommand, scriptsDir: SCRIPTS })
   await assert.rejects(
     () => invalidClient.complete(colabModel(), REQUEST),
     (error) => error instanceof ModelCallError && /invalid output/.test(error.message)
@@ -225,7 +233,7 @@ test('Colab re-bootstraps after a failed completion call', async () => {
     }
   }
 
-  const client = createModelClient({ runCommand, scriptsDir: SCRIPTS })
+  const client = createClient({ runCommand, scriptsDir: SCRIPTS })
   await assert.rejects(() => client.complete(colabModel(), REQUEST), /session expired/)
   await client.complete(colabModel(), REQUEST)
   assert.deepEqual(calls.map((args) => args[0]), ['exec', 'exec', 'exec', 'exec'])
@@ -246,7 +254,7 @@ test('Colab writes optional request and response audit files', async () => {
   }
 
   try {
-    const client = createModelClient({ runCommand, scriptsDir: SCRIPTS })
+    const client = createClient({ runCommand, scriptsDir: SCRIPTS })
     const model = colabModel({
       cli: { ...colabModel().cli, auditDir: directory }
     })
@@ -277,7 +285,7 @@ test('Colab audits failed completions without breaking the error', async () => {
   }
 
   try {
-    const client = createModelClient({ runCommand, scriptsDir: SCRIPTS })
+    const client = createClient({ runCommand, scriptsDir: SCRIPTS })
     const model = colabModel({
       cli: { ...colabModel().cli, auditDir: directory }
     })
@@ -314,7 +322,7 @@ test('Kaggle writes the task, runs the batch runner, and reads its response', as
     return { stdout: '', stderr: '' }
   }
 
-  const client = createModelClient({ runCommand, scriptsDir: SCRIPTS })
+  const client = createClient({ runCommand, scriptsDir: SCRIPTS })
   const result = await client.complete(kaggleModel(), REQUEST)
 
   assert.equal(invocation.command, 'python3')
@@ -332,7 +340,7 @@ test('Kaggle writes the task, runs the batch runner, and reads its response', as
 
 test('Kaggle rejects requests without task fields and invalid outputs', async () => {
   let called = false
-  const client = createModelClient({
+  const client = createClient({
     runCommand: async () => {
       called = true
       return { stdout: '', stderr: '' }
@@ -346,7 +354,7 @@ test('Kaggle rejects requests without task fields and invalid outputs', async ()
   )
   assert.equal(called, false)
 
-  const invalidClient = createModelClient({
+  const invalidClient = createClient({
     runCommand: async (command, args) => {
       await writeFile(args[args.indexOf('--output') + 1], JSON.stringify({ description: 'only' }), 'utf8')
       return { stdout: '', stderr: '' }
@@ -373,7 +381,7 @@ test('OpenCode joins the prompt with newlines and parses text events', async () 
       stderr: ''
     }
   }
-  const client = createModelClient({ runCommand, scriptsDir: SCRIPTS })
+  const client = createClient({ runCommand, scriptsDir: SCRIPTS })
   const request = {
     messages: [
       { role: 'system', content: 'Be brief.' },
@@ -407,18 +415,18 @@ test('prompt cache is per client instance', async () => {
     }
   }
   const options = { runCommand, scriptsDir: SCRIPTS, promptCache: { enabled: true } }
-  const first = createModelClient(options)
+  const first = createClient(options)
   assert.equal(await first.complete(opencodeModel(), REQUEST), 'reply 1')
   assert.equal(await first.complete(opencodeModel(), REQUEST), 'reply 1')
   assert.equal(calls, 1, 'the same client reuses its cached completion')
 
-  const second = createModelClient(options)
+  const second = createClient(options)
   assert.equal(await second.complete(opencodeModel(), REQUEST), 'reply 2')
   assert.equal(calls, 2, 'a new client starts with an empty cache')
 })
 
 test('OpenCode reports empty CLI output as a model error', async () => {
-  const client = createModelClient({
+  const client = createClient({
     runCommand: async () => ({ stdout: '\n\n', stderr: '' }),
     scriptsDir: SCRIPTS
   })
@@ -431,7 +439,7 @@ test('OpenCode reports empty CLI output as a model error', async () => {
 })
 
 test('OpenCode surfaces CLI error events with status and retry delay', async () => {
-  const client = createModelClient({
+  const client = createClient({
     runCommand: async () => ({
       stdout: [
         JSON.stringify({ type: 'step_start', part: { id: 'prt_1' } }),
@@ -459,7 +467,7 @@ test('OpenCode surfaces CLI error events with status and retry delay', async () 
 })
 
 test('OpenCode error events honor numeric retry fields and default the status', async () => {
-  const rated = createModelClient({
+  const rated = createClient({
     runCommand: async () => ({
       stdout: JSON.stringify({
         type: 'error',
@@ -474,7 +482,7 @@ test('OpenCode error events honor numeric retry fields and default the status', 
     (error) => error instanceof ModelCallError && error.status === 429 && error.retryAfter === 42
   )
 
-  const statusless = createModelClient({
+  const statusless = createClient({
     runCommand: async () => ({
       stdout: JSON.stringify({ type: 'error', error: { message: 'Something failed.' } }),
       stderr: ''
@@ -491,7 +499,7 @@ test('OpenCode error events honor numeric retry fields and default the status', 
 })
 
 test('OpenCode text output wins over an accompanying error event', async () => {
-  const client = createModelClient({
+  const client = createClient({
     runCommand: async () => ({
       stdout: [
         JSON.stringify({
@@ -510,7 +518,7 @@ test('OpenCode text output wins over an accompanying error event', async () => {
 
 test('CLI probes are cached per command', async () => {
   const calls = []
-  const client = createModelClient({
+  const client = createClient({
     runCommand: async (command, args) => {
       calls.push({ command, args })
       return { stdout: '', stderr: '' }
@@ -535,7 +543,7 @@ test('CLI probes are cached per command', async () => {
 })
 
 test('Colab probes report a missing reusable session', async () => {
-  const client = createModelClient({
+  const client = createClient({
     runCommand: async (command, args) => {
       if (command === 'colab' && args[0] === 'status') {
         return { stdout: "[colab] Session 'workspace-qwen' not found.\n", stderr: '' }
@@ -552,7 +560,7 @@ test('Colab probes report a missing reusable session', async () => {
 })
 
 test('CLI probe failures report the missing CLI', async () => {
-  const client = createModelClient({
+  const client = createClient({
     runCommand: async () => {
       throw new Error('not installed')
     },
@@ -566,7 +574,7 @@ test('CLI probe failures report the missing CLI', async () => {
 
 test('HTTP probes accept /v1/models and only forward the matching bearer key', async () => {
   const requests = []
-  const client = createModelClient({
+  const client = createClient({
     apiKey: 'local-secret',
     fetchImpl: async (url, options) => {
       requests.push({ url, headers: options.headers })
@@ -631,7 +639,7 @@ test('Colab falls back through configured GPU shapes after capacity errors', asy
       retryBackoffMs: 0
     }
   })
-  const client = createModelClient({ runCommand, scriptsDir: SCRIPTS })
+  const client = createClient({ runCommand, scriptsDir: SCRIPTS })
   assert.equal(await client.complete(model, REQUEST), 'draft')
   assert.deepEqual(calls.map((args) => args.slice(0, 2)), [
     ['exec', '-s'],
@@ -663,7 +671,7 @@ test('Colab reports capacity failures with a retry delay', async () => {
       retryBackoffMs: 30000
     }
   })
-  const client = createModelClient({ runCommand, scriptsDir: SCRIPTS })
+  const client = createClient({ runCommand, scriptsDir: SCRIPTS })
   await assert.rejects(
     () => client.complete(model, REQUEST),
     (error) => (
@@ -699,7 +707,7 @@ test('Colab does not retry an accelerator the account cannot use', async () => {
       retryBackoffMs: 0
     }
   })
-  const client = createModelClient({ runCommand, scriptsDir: SCRIPTS })
+  const client = createClient({ runCommand, scriptsDir: SCRIPTS })
   await assert.rejects(
     () => client.complete(model, REQUEST),
     (error) => error instanceof ModelCallError && error.status === 503
@@ -709,7 +717,7 @@ test('Colab does not retry an accelerator the account cannot use', async () => {
 
 test('model clients report job phases', async () => {
   const phases = []
-  const client = createModelClient({
+  const client = createClient({
     fetchImpl: async () => Response.json({
       choices: [{ message: { content: 'draft' } }]
     })
@@ -721,7 +729,7 @@ test('model clients report job phases', async () => {
   assert.deepEqual(phases, ['generating'])
 
   const colabPhases = []
-  const colabClient = createModelClient({
+  const colabClient = createClient({
     runCommand: async (command, args) => {
       if (args.includes(join(SCRIPTS, 'colab_model_server.py'))) {
         return { stdout: '', stderr: '' }
@@ -742,7 +750,7 @@ test('model clients report job phases', async () => {
   assert.deepEqual(colabPhases, ['bootstrapping', 'generating'])
 
   const kagglePhases = []
-  const kaggleClient = createModelClient({
+  const kaggleClient = createClient({
     runCommand: async (command, args) => {
       await writeFile(
         args[args.indexOf('--output') + 1],
@@ -762,7 +770,7 @@ test('model clients report job phases', async () => {
 
 test('HTTP completions honour a caller abort signal', async () => {
   const controller = new AbortController()
-  const client = createModelClient({
+  const client = createClient({
     fetchImpl: async (_url, options) => new Promise((resolve, reject) => {
       options.signal.addEventListener('abort', () => {
         reject(new DOMException('Aborted', 'AbortError'))
@@ -782,7 +790,7 @@ test('HTTP completions honour a caller abort signal', async () => {
 })
 
 test('HTTP completions report timeouts and rejection statuses', async () => {
-  const timeoutClient = createModelClient({
+  const timeoutClient = createClient({
     fetchImpl: async () => {
       const error = new Error('timed out')
       error.name = 'TimeoutError'
@@ -794,7 +802,7 @@ test('HTTP completions report timeouts and rejection statuses', async () => {
     (error) => error instanceof ModelCallError && error.status === 504
   )
 
-  const rejectedClient = createModelClient({
+  const rejectedClient = createClient({
     fetchImpl: async () => new Response('nope', { status: 500 })
   })
   await assert.rejects(
@@ -806,7 +814,7 @@ test('HTTP completions report timeouts and rejection statuses', async () => {
 test('HTTP completions send the provider model and gate JSON mode', async () => {
   const bodies = []
   const urls = []
-  const client = createModelClient({
+  const client = createClient({
     fetchImpl: async (url, options) => {
       urls.push(url)
       bodies.push(JSON.parse(options.body))
@@ -852,7 +860,7 @@ test('HTTP completions send the provider model and gate JSON mode', async () => 
 })
 
 test('HTTP 429 responses expose a numeric Retry-After', async () => {
-  const client = createModelClient({
+  const client = createClient({
     fetchImpl: async () => new Response('', {
       status: 429,
       headers: { 'Retry-After': '17' }
@@ -872,7 +880,7 @@ test('HTTP 429 responses expose a numeric Retry-After', async () => {
 })
 
 test('HTTP 429 responses parse an HTTP-date Retry-After', async () => {
-  const client = createModelClient({
+  const client = createClient({
     fetchImpl: async () => new Response('', {
       status: 429,
       headers: { 'Retry-After': new Date(Date.now() + 30000).toUTCString() }
@@ -893,7 +901,7 @@ test('HTTP 429 responses parse an HTTP-date Retry-After', async () => {
 
 test('HTTP probes honour a configured health path', async () => {
   const urls = []
-  const client = createModelClient({
+  const client = createClient({
     fetchImpl: async (url) => {
       urls.push(url)
       return new Response('', { status: url.endsWith('/models') ? 200 : 404 })
@@ -914,7 +922,7 @@ test('HTTP probes honour a configured health path', async () => {
 
 test('HTTP completions report token usage to the caller', async () => {
   const usages = []
-  const client = createModelClient({
+  const client = createClient({
     fetchImpl: async () => Response.json({
       choices: [{ message: { content: 'draft' } }],
       usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }
@@ -933,7 +941,7 @@ test('HTTP completions report token usage to the caller', async () => {
 
 test('HTTP completions report missing usage instead of guessing', async () => {
   const usages = []
-  const client = createModelClient({
+  const client = createClient({
     fetchImpl: async () => Response.json({
       choices: [{ message: { content: 'draft' } }]
     })
