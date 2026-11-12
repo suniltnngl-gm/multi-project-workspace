@@ -370,6 +370,22 @@ test('observed cooldowns and learned caps survive restarts', async () => {
   }
 })
 
+test('observed cooldowns are scoped to the effective CLI model', () => {
+  const clock = clockAt('2026-01-15T10:00:00Z')
+  const budget = createModelBudget({ env: {}, now: clock.now })
+
+  budget.record('opencode', 1, 'model-a')
+  budget.observe429('opencode', { retryAfter: 3600, scope: 'model-a' })
+
+  const blocked = budget.check('opencode', 'model-a')
+  assert.equal(blocked.ok, false)
+  assert.ok(blocked.budget.cooldownSeconds > 0)
+
+  // Switching the configured OpenCode model must not inherit the previous
+  // provider's 429 cooldown or learned request cap.
+  assert.equal(budget.check('opencode', 'model-b').ok, true)
+})
+
 test('observation never overwrites configured profiles', () => {
   const clock = clockAt('2026-01-15T10:00:00Z')
   const budget = createModelBudget({

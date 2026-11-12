@@ -772,6 +772,37 @@ test('model responses include a persisted daily budget when configured', async (
   })
 })
 
+test('status and registry budgets are scoped to the effective CLI model', async () => {
+  const modelBudget = createModelBudget({ env: {} })
+  modelBudget.observe429('opencode', { retryAfter: 3600, scope: 'model-old' })
+  const opencode = {
+    id: 'opencode',
+    label: 'OpenCode headless',
+    provider: 'opencode',
+    execution: 'live',
+    backend: 'opencode-cli',
+    callable: true,
+    remote: true,
+    autoSelect: true,
+    priority: 6,
+    minAvailableMemoryMb: 0,
+    cli: { command: 'opencode', model: 'model-new' }
+  }
+
+  await withApp({
+    models: [opencode],
+    modelBudget,
+    getResourceMetrics: async () => idleMetrics(),
+    modelClient: { probe: async () => ({ ok: true }) }
+  }, async (url) => {
+    const registry = await (await fetch(`${url}/api/models`)).json()
+    assert.equal(registry[0].budget, undefined)
+
+    const status = await (await fetch(`${url}/api/local-ai/status`)).json()
+    assert.equal(status.models[0].budget, undefined)
+  })
+})
+
 test('serverless requests use the same persisted daily budget', () => {
   const modelBudget = createModelBudget({
     env: { SERVERLESS_AI_MAX_REQUESTS_PER_DAY: '2' }

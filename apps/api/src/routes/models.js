@@ -17,8 +17,8 @@ export function createModelsRouter({
 }) {
   const router = Router()
 
-  function withBudget(status) {
-    const budget = modelBudget.snapshot(status.id)
+  function withBudget(status, model = models.find((entry) => entry.id === status.id)) {
+    const budget = modelBudget.snapshot(status.id, model?.cli?.model)
     return budget ? { ...status, budget } : status
   }
 
@@ -26,7 +26,7 @@ export function createModelsRouter({
     response.json(models.map((model) => withBudget({
       ...publicModelDefinition(model),
       ...(modelMetrics.snapshot(model.id) || {})
-    })))
+    }, model)))
   })
 
   // The OpenCode roster is discovered from the local CLI on demand and cached;
@@ -71,7 +71,7 @@ export function createModelsRouter({
       const status = await scheduler.status()
       return response.json({
         ...status,
-        models: status.models.map(withBudget)
+        models: status.models.map((status) => withBudget(status))
       })
     } catch (error) {
       console.error('Local AI status failed:', error)

@@ -463,15 +463,16 @@ export function createModelBudget({
     return Math.max(0, Math.ceil((retryAt - at) / 1000))
   }
 
-  function snapshot(id) {
+  function snapshot(id, scope) {
     const limits = configs.get(id)
+    const observedId = scope ? `${id}@${scope}` : id
     const at = now()
     const dayBucket = startOfFixedWindow(at, OBSERVED_DAY)
-    const observedRequests = readBucket(id, OBSERVED_REQUESTS_POLICY, dayBucket)
-    const cap = observedCap(id, at)
+    const observedRequests = readBucket(observedId, OBSERVED_REQUESTS_POLICY, dayBucket)
+    const cap = observedCap(observedId, at)
     const hasObserved = observedRequests > 0 || cap !== null
     if ((!limits || limits.length === 0) && !hasObserved) return undefined
-    const cooldownUntil = cooldowns.get(id) ?? 0
+    const cooldownUntil = cooldowns.get(observedId) ?? 0
     const limiters = (limits ?? []).map((limit) => {
       const used = usedFor(id, limit, at)
       const bucket = limit.reset === 'rolling' || limit.reset === 'pool'
@@ -570,14 +571,14 @@ export function createModelBudget({
     }
   }
 
-  function check(id) {
-    const budget = snapshot(id)
+  function check(id, scope) {
+    const budget = snapshot(id, scope)
     if (!budget) return { ok: true }
     if (budget.ok) return { ok: true, budget }
     return { ok: false, budget, retryAfter: budget.retryAfter }
   }
 
-  function record(id, amount = 1) {
+  function record(id, amount = 1, scope) {
     const at = now()
     const count = Number(amount)
     if (!Number.isFinite(count) || count <= 0) return
@@ -585,8 +586,15 @@ export function createModelBudget({
     for (const limit of limits ?? []) {
       if (limit.unit === 'requests') addAmount(id, limit, count, at)
     }
-    // Observation counts every real request, profiled or not.
-    addBucket(id, OBSERVED_REQUESTS_POLICY, startOfFixedWindow(at, OBSERVED_DAY), count)
+    // Observation counts every real request, profiled or not. A scope keeps
+    // free-tier cooldowns and learned caps separate when a CLI backend such as
+    // OpenCode switches its effective provider model.
+    addBucket(
+      scope ? `${id}@${scope}` : id,
+      OBSERVED_REQUESTS_POLICY,
+      startOfFixedWindow(at, OBSERVED_DAY),
+      count
+    )
   }
 
   function recordUsage(id, usage) {
@@ -632,28 +640,30 @@ export function createModelBudget({
     }
   }
 
-  function cooldown(id, seconds) {
+  function cooldown(id, seconds, scope) {
     const value = Number(seconds)
     if (!Number.isFinite(value) || value <= 0) return
-    cooldowns.set(id, now() + value * 1000)
+    const observedId = scope ? `${id}@${scope}` : id
+    cooldowns.set(observedId, now() + value * 1000)
   }
 
   // Learn from a live 429 without touching configured profiles: a marker
   // (bucket = when it struck, used = observed requests so far today) feeds
   // the learned cap, and a cooldown row survives restarts.
-  function observe429(id, { retryAfter } = {}) {
+  function observe429(id, { retryAfter, scope } = {}) {
     const seconds = Math.ceil(Number(retryAfter))
     if (!Number.isFinite(seconds) || seconds <= 0) return
+    const observedId = scope ? `${id}@${scope}` : id
     const at = now()
     const requests = readBucket(
-      id,
+      observedId,
       OBSERVED_REQUESTS_POLICY,
       startOfFixedWindow(at, OBSERVED_DAY)
     )
-    addBucket(id, OBSERVED_429_POLICY, at, requests)
+    addBucket(observedId, OBSERVED_429_POLICY, at, requests)
     const until = at + seconds * 1000
-    addBucket(id, OBSERVED_COOLDOWN_POLICY, until, seconds)
-    cooldowns.set(id, Math.max(cooldowns.get(id) ?? 0, until))
+    addBucket(observedId, OBSERVED_COOLDOWN_POLICY, until, seconds)
+    cooldowns.set(observedId, Math.max(cooldowns.get(observedId) ?? 0, until))
   }
 
   function restoreObservedCooldowns() {

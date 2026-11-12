@@ -291,11 +291,12 @@ function quotaErrorMessage(model, budget) {
 
 function applyCooldown(modelBudget, model, error) {
   if (error?.status !== 429 || error.retryAfter === undefined) return
+  const scope = model.cli?.model
   if (typeof modelBudget.observe429 === 'function') {
-    modelBudget.observe429(model.id, { retryAfter: error.retryAfter })
+    modelBudget.observe429(model.id, { retryAfter: error.retryAfter, scope })
     return
   }
-  modelBudget.cooldown?.(model.id, error.retryAfter)
+  modelBudget.cooldown?.(model.id, error.retryAfter, scope)
 }
 
 export function createAiDraftsRouter({
@@ -324,7 +325,7 @@ export function createAiDraftsRouter({
     if (selection.error) return { error: selection.error }
 
     const model = selection.model
-    const budget = modelBudget.check(model.id)
+    const budget = modelBudget.check(model.id, model.cli?.model)
     if (!budget.ok) {
       selection.release({ inferenceStarted: false })
       return {
@@ -346,7 +347,7 @@ export function createAiDraftsRouter({
       ? String(database.getAiSession(input.session_id)?.summary ?? '')
       : ''
     const prompt = buildTaskPrompt(task, { sessionSummary })
-    modelBudget.record(model.id)
+    modelBudget.record(model.id, 1, model.cli?.model)
 
     const runner = async ({ signal, onPhase }) => {
       let inferenceStarted = false
@@ -538,7 +539,7 @@ export function createAiDraftsRouter({
       ? body.prompt.trim().slice(0, 80)
       : 'AI chat'
 
-    modelBudget.record(model.id)
+    modelBudget.record(model.id, 1, model.cli?.model)
 
     const runner = async ({ signal, onPhase }) => {
       let inferenceStarted = false
@@ -652,7 +653,7 @@ export function createAiDraftsRouter({
       return response.status(selected.error.status).json(selected.error.body)
     }
     const { model, selection } = selected
-    modelBudget.record(model.id)
+    modelBudget.record(model.id, 1, model.cli?.model)
 
     // The improvement run is a job like any other model call, so it records
     // model provenance, honors budget and cooldown, and can be inspected or
