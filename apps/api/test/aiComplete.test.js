@@ -39,12 +39,13 @@ after(async () => {
   if (directory) await rm(directory, { recursive: true, force: true })
 })
 
-async function withApp({ respond = async () => 'A direct reply.' } = {}, run) {
+async function withApp({ respond = async () => 'A direct reply.', modelBudget } = {}, run) {
   const calls = []
   const app = createApp(database, {
     models: [LOCAL_MODEL],
     getResourceMetrics: idleMetrics,
     turnCooldownMs: 0,
+    ...(modelBudget ? { modelBudget } : {}),
     modelClient: {
       probe: async () => ({ ok: true }),
       complete: async (model, request) => {
@@ -111,6 +112,38 @@ test('direct AI completion returns content and records provenance', async () => 
     const detail = await (await fetch(`${url}/api/tasks/${task.id}`)).json()
     assert.equal(detail.aiRuns.length, 1)
     assert.equal(detail.aiRuns[0].id, body.jobId)
+  })
+})
+
+test('direct AI completion reports a cooldown without undefined fields', async () => {
+  const cooldown = {
+    ok: false,
+    retryAfter: 90,
+    budget: {
+      ok: false,
+      limiters: [],
+      observed: { requests: 1 },
+      cooldownSeconds: 90,
+      retryAfter: 90
+    }
+  }
+  const modelBudget = {
+    check: () => cooldown,
+    record: () => {},
+    recordUsage: () => {}
+  }
+  await withApp({ modelBudget }, async (url, calls) => {
+    const response = await post(url, '/api/ai/complete', {
+      model: 'local-0.5b',
+      prompt: 'Say hi'
+    })
+    assert.equal(response.status, 429)
+    assert.equal(calls.length, 0)
+    const body = await response.json()
+    assert.equal(body.retryAfter, 90)
+    assert.match(body.error, /cooling down after a provider rate limit/)
+    assert.match(body.error, /retry in 90 seconds/)
+    assert.doesNotMatch(body.error, /undefined/)
   })
 })
 

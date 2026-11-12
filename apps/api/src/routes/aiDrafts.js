@@ -260,7 +260,7 @@ function buildCompleteMessages(body, template, session) {
 
 function quotaLimitLabel(budget) {
   const limiter = budget?.budget
-  if (!limiter) return 'configured quota'
+  if (!limiter || !limiter.unit || !limiter.window) return 'configured quota'
   const learned = limiter.unit === 'requests' && limiter.window === 'day' &&
     limiter.observed?.cap !== undefined &&
     limiter.limit === limiter.observed.cap &&
@@ -271,6 +271,22 @@ function quotaLimitLabel(budget) {
   }
   const unit = limiter.unit === 'compute_seconds' ? 'compute' : limiter.unit
   return `${limiter.window} ${unit} limit`
+}
+
+function quotaErrorMessage(model, budget) {
+  const limiter = budget?.budget
+  const hasLimit = Boolean(limiter?.unit && limiter?.window)
+  // A cooldown-only snapshot has no configured limiter. Reporting
+  // "undefined undefined limit" on a live 429 is worse than naming the wait.
+  if (!hasLimit && budget?.retryAfter !== undefined) {
+    return `${model.label} is cooling down after a provider rate limit; retry in ${budget.retryAfter} seconds.`
+  }
+  const usage = limiter &&
+    Number.isFinite(limiter.used) &&
+    Number.isFinite(limiter.limit)
+    ? ` (${limiter.used}/${limiter.limit})`
+    : ''
+  return `${model.label} reached its ${quotaLimitLabel(budget)}${usage}.`
 }
 
 function applyCooldown(modelBudget, model, error) {
@@ -315,7 +331,7 @@ export function createAiDraftsRouter({
         error: {
           status: 429,
           body: {
-            error: `${model.label} reached its ${quotaLimitLabel(budget)} (${budget.budget.used}/${budget.budget.limit}).`,
+            error: quotaErrorMessage(model, budget),
             ...budget
           }
         }
