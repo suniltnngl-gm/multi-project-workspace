@@ -4,7 +4,7 @@ This workspace contains a Vite frontend, an Express/Node.js API, a Python analyt
 
 ## Run locally
 
-Prerequisites: Node.js 22 or newer (see `.nvmrc`), [uv](https://docs.astral.sh/uv/), and Git. On Windows, use PowerShell or CMD and call `.\workspace.cmd`; on Linux and macOS use `./workspace`.
+Prerequisites: Node.js 22 or newer (see `.nvmrc`), [uv](https://docs.astral.sh/uv/), and Git. Linux and WSL are the primary target; macOS and native Windows are supported on a best-effort basis. On native Windows, use PowerShell or CMD and call `.\workspace.cmd`; on Linux, WSL, and macOS use `./workspace`.
 
 ```sh
 ./workspace install
@@ -19,7 +19,7 @@ Install scripts are disabled in `.npmrc` so `npm install` works without a C++ to
 
 ## Portability and reuse
 
-The checkout is designed to be cloned or moved anywhere on Linux, macOS, or native Windows:
+The checkout is designed to be cloned or moved anywhere. Linux and WSL are the primary target; macOS and native Windows are supported on a best-effort basis:
 
 - **One launcher.** `./workspace` is a small POSIX shim and `.\workspace.cmd` is the Windows shim; both run `scripts/workspace-cli.mjs`. Process spawning, port checks, HTTP calls, and file operations are implemented in Node, so no command depends on bash, `curl`, `fuser`, `lsof`, or `/dev/tcp`.
 - **Relocatable database.** The default SQLite file lives inside the checkout. A relative `DATABASE_PATH` is anchored to the workspace root, never to the caller's directory. When a workspace-local database is opened after the checkout moved, the primary repository row (`id 1`) is adopted for the new root and its Git worktree and environment paths are rewritten, so tracking history survives the move without manual SQL. A missing *external* database path is still reported as an error.
@@ -32,7 +32,7 @@ To copy the workspace to another machine or directory:
 ```sh
 git clone <remote> workspace
 cd workspace
-./workspace install    # .\workspace.cmd install on Windows
+./workspace install    # .\workspace.cmd install on native Windows (optional)
 cp .env.example .env   # then set credentials and overrides
 ./workspace status
 ./workspace check
@@ -228,7 +228,7 @@ Allowed shapes are: interactive notebook execution with manual or cell-triggered
 
 Run `./workspace ai doctor` before filing an AI issue. It checks Node and SQLite writability, probes each configured endpoint or CLI, reports Colab session state and the actual accelerator, validates quota profiles and serverless slot configuration (model slug, key environment variable, chat/health paths, and JSON mode), and warns about quota-spending or destructive options. It summarizes which capability lanes (live or batch) can serve now and flags a CPU-backed Colab runtime as an unavailable live lane. It never starts a model, bootstraps a Colab session, or submits a Kaggle kernel. Add `--json` for machine-readable output; `--strict` exits nonzero when an error is found (for example when a remote CLI or endpoint is unavailable). The default advisory mode exits zero so it is safe to run while local models are stopped. Pass `--offline` (or `--no-probe`) to skip every endpoint and CLI probe — useful in CI, preflight checks, or environments without network access. Offline mode still runs the registry, quota-profile, serverless-slot, selection, and safety checks, and reports probing as skipped (an `[info] probing` entry in text output, a `probing: "skipped"` field in JSON) rather than claiming reachability or failures.
 
-GitHub Actions runs lint, the full frontend/Node/Python test suite, the production build, and the workspace self-check on Linux, macOS, and Windows for pushes to `master` and on pull requests (`.github/workflows/ci.yml`).
+GitHub Actions runs lint, the full frontend/Node/Python test suite, the production build, and the workspace self-check on Linux and macOS for pushes to `master` and on pull requests; a native Windows leg runs without blocking the workflow (`.github/workflows/ci.yml`).
 
 ## Python satellite
 
