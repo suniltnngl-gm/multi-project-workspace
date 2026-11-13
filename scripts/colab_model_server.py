@@ -37,7 +37,7 @@ def install_dependencies():
             "pip",
             "install",
             "-q",
-            "transformers>=4.45,<5",
+            "transformers>=4.56,<5",
             "accelerate",
             "bitsandbytes",
         ]
@@ -59,7 +59,7 @@ def load_model():
         MODEL_ID,
         quantization_config=quantization,
         device_map={"": 0},
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
         attn_implementation="sdpa",
     )
     model.eval()

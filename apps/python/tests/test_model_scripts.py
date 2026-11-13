@@ -533,7 +533,7 @@ class ModelScriptTests(unittest.TestCase):
     def test_server_uses_fp16_4bit_and_warms_up(self):
         source = SERVER_PATH.read_text(encoding="utf-8")
         self.assertIn("bnb_4bit_compute_dtype=torch.float16", source)
-        self.assertIn("torch_dtype=torch.float16", source)
+        self.assertIn("dtype=torch.float16", source)
         self.assertIn("model.eval()", source)
         self.assertIn("max_new_tokens=1", source)
         self.assertIn("apply_chat_template", source)
