@@ -200,9 +200,52 @@ async function checkModelProbing(models, modelClient, record) {
       continue
     }
 
+    // `colab status` reports what the runtime actually is. A session can exist
+    // with the requested name and still be CPU-backed, which cannot load the
+    // GPU-only server; report that instead of claiming the lane is usable.
+    if (model.backend === 'colab-cli' && result.accelerator?.gpu === false) {
+      const hardware = result.accelerator.hardware || 'CPU'
+      const variant = result.accelerator.variant || 'unknown'
+      const required = model.cli?.requireGpu !== false
+      record(
+        required ? 'warn' : 'info',
+        model.id,
+        required
+          ? `${model.label} is allocated ${hardware} (${variant}); its GPU-only server cannot start until Colab grants a GPU runtime.`
+          : `${model.label} is allocated ${hardware} (${variant}); COLAB_AI_REQUIRE_GPU is off, so the CPU runtime will be used.`
+      )
+      continue
+    }
+
     const endpoint = model.url ? ` at ${model.url}` : ''
     const session = result.sessionState ? ` (session ${result.sessionState})` : ''
-    record('ok', model.id, `${model.label} is reachable${endpoint}${session}.`)
+    const accelerator = result.accelerator?.gpu
+      ? `, ${result.accelerator.hardware || 'GPU'} ${result.accelerator.variant || ''}`.trimEnd()
+      : ''
+    record('ok', model.id, `${model.label} is reachable${endpoint}${session}${accelerator}.`)
+  }
+
+  // Summarize which capability lanes can serve right now. This is derived
+  // from the same probe results, so it never bootstraps a session or spends
+  // quota just to answer "what can run?".
+  const eligible = []
+  const blocked = []
+  for (const { model, result } of probes) {
+    if (!result.ok) {
+      blocked.push(`${model.id} (${model.execution})`)
+      continue
+    }
+    if (model.backend === 'colab-cli' && result.accelerator?.gpu === false) {
+      blocked.push(`${model.id} (needs a GPU)`)
+      continue
+    }
+    eligible.push(`${model.id} (${model.execution})`)
+  }
+  if (eligible.length > 0) {
+    record('info', 'lanes', `Eligible lanes: ${eligible.join(', ')}.`)
+  }
+  if (blocked.length > 0) {
+    record('warn', 'lanes', `Lanes that cannot serve now: ${blocked.join(', ')}.`)
   }
 }
 

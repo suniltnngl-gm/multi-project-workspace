@@ -250,6 +250,91 @@ test('default doctor still probes every registered model', async () => {
   }
 })
 
+test('doctor reports a CPU Colab runtime as an unavailable live lane', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'workspace-doctor-'))
+  try {
+    const probed = []
+    const modelClient = {
+      probe: async (model) => {
+        probed.push(model.id)
+        if (model.backend === 'colab-cli') {
+          return {
+            ok: true,
+            sessionState: 'present',
+            accelerator: { hardware: 'CPU', variant: 'DEFAULT', gpu: false }
+          }
+        }
+        return { ok: true }
+      }
+    }
+
+    const { checks } = await runDoctorChecks({
+      env: {},
+      databasePath: join(directory, 'doctor.sqlite'),
+      modelClient
+    })
+
+    const colab = checks.find((check) => check.area === 'colab-3b')
+    assert.ok(colab)
+    assert.equal(colab.level, 'warn')
+    assert.match(colab.message, /CPU \(DEFAULT\)/)
+    assert.match(colab.message, /cannot start until Colab grants a GPU/)
+
+    const eligible = checks.filter(
+      (check) => check.area === 'lanes' && check.level === 'info'
+    )
+    assert.equal(eligible.length, 1)
+    assert.match(eligible[0].message, /kaggle-3b \(batch\)/)
+    assert.doesNotMatch(eligible[0].message, /colab-3b/)
+
+    const blocked = checks.filter(
+      (check) => check.area === 'lanes' && check.level === 'warn'
+    )
+    assert.equal(blocked.length, 1)
+    assert.match(blocked[0].message, /colab-3b \(needs a GPU\)/)
+    assert.ok(probed.includes('colab-3b'))
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('doctor reports a GPU Colab runtime as an eligible lane', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'workspace-doctor-'))
+  try {
+    const modelClient = {
+      probe: async (model) => {
+        if (model.backend === 'colab-cli') {
+          return {
+            ok: true,
+            sessionState: 'present',
+            accelerator: { hardware: 'T4', variant: 'GPU', gpu: true }
+          }
+        }
+        return { ok: true }
+      }
+    }
+
+    const { checks } = await runDoctorChecks({
+      env: {},
+      databasePath: join(directory, 'doctor.sqlite'),
+      modelClient
+    })
+
+    const colab = checks.find((check) => check.area === 'colab-3b')
+    assert.equal(colab.level, 'ok')
+    assert.match(colab.message, /T4/)
+    const eligible = checks.find(
+      (check) => check.area === 'lanes' && check.level === 'info'
+    )
+    assert.match(eligible.message, /colab-3b \(live\)/)
+    assert.ok(
+      !checks.some((check) => check.area === 'lanes' && check.level === 'warn')
+    )
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('doctor skips probing serverless slots without credentials', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'workspace-doctor-'))
   try {
