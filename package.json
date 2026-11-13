@@ -9,11 +9,15 @@
     "dev": "concurrently --kill-others \"npm run dev --workspace apps/web\" \"npm run dev --workspace apps/api\" \"npm run dev:python\"",
     "dev:web": "npm run dev --workspace apps/web",
     "dev:api": "npm run dev --workspace apps/api",
-    "dev:python": "${UV:-uv} run --project apps/python python apps/python/src/server.py",
+    "dev:python": "node scripts/run-python.mjs apps/python/src/server.py",
     "build": "npm run build --workspace apps/web",
-    "test": "npm test --workspace apps/web && npm test --workspace apps/api && PYTHONPATH=apps/python/src ${UV:-uv} run --project apps/python python -m unittest discover -s apps/python/tests",
+    "test": "npm test --workspace apps/web && npm test --workspace apps/api && node scripts/run-python.mjs -m unittest discover -s apps/python/tests",
+    "test:python": "node scripts/run-python.mjs -m unittest discover -s apps/python/tests",
     "lint": "npm run lint --workspace apps/web",
     "start:api": "npm run start --workspace apps/api"
+  },
+  "engines": {
+    "node": ">=22"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

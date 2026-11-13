@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 // Objective: Rotate the OpenCode CLI model daily so one exhausted free tier does not block the workspace.
 // Requirements: Change OPENCODE_AI_MODEL only when the UTC day changes; alternate providers; never rotate a key into the database or git.
-// Decisions: Rotation state lives in /tmp/opencode because it is local scheduling state, not workspace data; .env is the only sink so the server sees the model after restart.
+// Decisions: Rotation state lives in the OS temp directory (WORKSPACE_TMP_DIR override) because it is local scheduling state, not workspace data; .env is the only sink so the server sees the model after restart.
 // Relevant Files: scripts/rotate-model.mjs, scripts/model-study.mjs, workspace, .env
 // Important Context: User file. .env is gitignored; only free-tier model ids are listed here.
 // Work State: Completed: Added with the ai model rotate command; Active: None; Blocked: None; Next Move: Maintain as needed.
-import { readFileSync, writeFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { workspaceTmpDir } from './env.mjs'
 
 const providers = {
   'console-openrouter': [
@@ -31,7 +33,9 @@ const providers = {
   ]
 }
 
-const stateFile = '/tmp/opencode/rotation-state.json'
+const tmpDir = workspaceTmpDir()
+mkdirSync(tmpDir, { recursive: true })
+const stateFile = join(tmpDir, 'rotation-state.json')
 let state = { day: 0, openrouterIndex: 0, googleIndex: 0 }
 try { 
   const content = readFileSync(stateFile, 'utf8')
@@ -52,7 +56,7 @@ const model = useOpenRouter
   ? providers['console-openrouter'][state.openrouterIndex]
   : providers['console-google'][state.googleIndex]
 
-const envPath = resolve('/home/sunilkr/Code/.env')
+const envPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', '.env')
 let env = readFileSync(envPath, 'utf8')
 if (env.includes('OPENCODE_AI_MODEL=')) {
   env = env.replace(/^OPENCODE_AI_MODEL=.*/m, `OPENCODE_AI_MODEL=${model}`)

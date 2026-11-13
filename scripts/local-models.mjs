@@ -6,7 +6,12 @@ import path from 'node:path'
 import { EXTERNAL_MODEL_DEFINITIONS, planLocalModelLaunches } from '../apps/api/src/modelRegistry.js'
 
 async function getAvailableMemoryMb() {
-  if (process.platform !== 'linux') return Infinity
+  if (process.platform !== 'linux') {
+    // freemem() is available on macOS and Windows. It is conservative on
+    // macOS, which only means a model may be skipped rather than overcommitted.
+    const bytes = os.freemem()
+    return Number.isFinite(bytes) && bytes > 0 ? bytes / (1024 * 1024) : Infinity
+  }
   try {
     const contents = await readFile('/proc/meminfo', 'utf8')
     const match = contents.match(/^MemAvailable:\s+(\d+)\s+kB$/m)
@@ -14,6 +19,28 @@ async function getAvailableMemoryMb() {
   } catch {
     return Infinity
   }
+}
+
+// Resolve a command against PATH so llama-server works from any install
+// location, including a PATH entry on Windows with an .exe suffix.
+function resolveExecutable(command) {
+  if (!command) return null
+  if (command.includes('/') || command.includes('\\')) {
+    return existsSync(command) ? command : null
+  }
+  const extensions =
+    process.platform === 'win32'
+      ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
+      : ['']
+  for (const directory of (process.env.PATH || '').split(path.delimiter)) {
+    const cleanDirectory = directory.replace(/^"|"$/g, '')
+    if (!cleanDirectory) continue
+    for (const extension of extensions) {
+      const candidate = path.join(cleanDirectory, `${command}${extension}`)
+      if (existsSync(candidate)) return candidate
+    }
+  }
+  return null
 }
 
 function readIntegerEnv(name, fallback) {
@@ -29,7 +56,7 @@ function readIntegerEnv(name, fallback) {
 const requested = process.argv[2] ?? 'all'
 const availableMemoryMb = await getAvailableMemoryMb()
 const plans = planLocalModelLaunches({ requested, availableMemoryMb })
-const llamaServer = process.env.LLAMA_SERVER || path.join(os.homedir(), '.local/bin/llama-server')
+const llamaServer = resolveExecutable(process.env.LLAMA_SERVER || 'llama-server')
 const context = readIntegerEnv('LOCAL_AI_CONTEXT', 1024)
 const threads = readIntegerEnv('LOCAL_AI_THREADS', 2)
 
@@ -50,8 +77,10 @@ if (startable.length === 0) {
   process.exit(1)
 }
 
-if (!existsSync(llamaServer)) {
-  console.error(`llama-server is not executable: ${llamaServer}`)
+if (!llamaServer) {
+  console.error(
+    'llama-server was not found. Add llama.cpp to PATH or set LLAMA_SERVER to its full path.'
+  )
   process.exit(1)
 }
 

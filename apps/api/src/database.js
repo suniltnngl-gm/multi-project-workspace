@@ -34,13 +34,15 @@ export function createDatabase(
   databasePath = process.env.DATABASE_PATH || defaultDatabasePath,
   { rootDir, artifactDir } = {}
 ) {
-  const resolvedPath = resolve(databasePath)
+  const resolvedPath = rootDir !== undefined
+    ? resolve(String(rootDir), databasePath)
+    : resolve(databasePath)
   mkdirSync(dirname(resolvedPath), { recursive: true })
 
   const connection = new Database(resolvedPath)
   connection.pragma('journal_mode = WAL')
   connection.pragma('foreign_keys = ON')
-  runMigrations(connection, { rootDir })
+  runMigrations(connection, { rootDir, databasePath: resolvedPath, defaultDatabasePath })
 
   const repositories = createRepositoriesStore(connection)
   const toolRuns = createToolRunsStore(connection)

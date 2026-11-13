@@ -5,10 +5,11 @@
 # Relevant Files: scripts/hooks/post-commit, scripts/scan-user-files.mjs, workspace
 # Important Context: User file. Installed by ./workspace install into the repository hooks directory.
 # Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
+# Marker: workspace files scan (used by ./workspace install to recognize its own hook).
 set -uo pipefail
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 [ -n "$ROOT" ] || exit 0
-[ -x "$ROOT/workspace" ] || exit 0
+command -v node >/dev/null 2>&1 || exit 0
 
-"$ROOT/workspace" files scan --quiet >/dev/null 2>&1 || true
+node "$ROOT/scripts/workspace-cli.mjs" files scan --quiet >/dev/null 2>&1 || true

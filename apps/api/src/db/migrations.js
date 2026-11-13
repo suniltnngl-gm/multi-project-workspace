@@ -4,10 +4,11 @@
 // Relevant Files: apps/api/src/db/migrations.js, apps/api/src/database.js, apps/api/src/db/tasks.js, apps/api/src/db/toolRuns.js
 // Important Context: User file. Runs on every createDatabase call before any store builds its statements.
 // Work State: Completed: Extracted from database.js as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
+import { existsSync } from 'node:fs'
 import { basename, resolve } from 'node:path'
 import { TASK_COLUMNS } from './tasks.js'
 
-export function runMigrations(connection, { rootDir } = {}) {
+export function runMigrations(connection, { rootDir, databasePath, defaultDatabasePath } = {}) {
   connection.exec(`
     CREATE TABLE IF NOT EXISTS repositories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -632,16 +633,57 @@ export function runMigrations(connection, { rootDir } = {}) {
     ).get(primaryRoot)
     if (!registered) {
       const now = new Date().toISOString()
-      const baseName = basename(primaryRoot) || 'repository'
-      let name = baseName
-      let suffix = 2
-      while (connection.prepare('SELECT 1 FROM repositories WHERE name = ?').get(name)) {
-        name = `${baseName}-${suffix}`
-        suffix += 1
+      const primary = connection.prepare(
+        'SELECT id, name, root_path FROM repositories WHERE id = 1'
+      ).get()
+      // A workspace-local database that travels with the checkout is
+      // evidence the workspace moved rather than a second repository being
+      // added. Adopt the primary row when its old root no longer exists so
+      // tracked files, folders, and worktrees keep pointing at real paths.
+      const workspaceLocal =
+        databasePath === undefined ||
+        defaultDatabasePath === undefined ||
+        resolve(String(databasePath)) === resolve(String(defaultDatabasePath))
+      const relocate =
+        primary !== undefined &&
+        workspaceLocal &&
+        primary.root_path !== primaryRoot &&
+        !existsSync(primary.root_path)
+      if (relocate) {
+        connection.transaction(() => {
+          connection.prepare(
+            'UPDATE repositories SET root_path = ?, updated_at = ? WHERE id = ?'
+          ).run(primaryRoot, now, primary.id)
+          if (primary.name === basename(primary.root_path)) {
+            connection.prepare('UPDATE repositories SET name = ? WHERE id = ?').run(
+              basename(primaryRoot) || 'repository',
+              primary.id
+            )
+          }
+          connection.prepare(
+            `UPDATE git_worktrees
+             SET repository_root = ?,
+                 worktree_path = CASE WHEN worktree_path = ? THEN ? ELSE worktree_path END,
+                 updated_at = ?
+             WHERE repository_root = ?`
+          ).run(primaryRoot, primary.root_path, primaryRoot, now, primary.root_path)
+          connection.prepare(
+            `UPDATE environments SET value = ?, checked_at = ?
+             WHERE name = 'cwd' AND value = ?`
+          ).run(primaryRoot, now, primary.root_path)
+        })()
+      } else {
+        const baseName = basename(primaryRoot) || 'repository'
+        let name = baseName
+        let suffix = 2
+        while (connection.prepare('SELECT 1 FROM repositories WHERE name = ?').get(name)) {
+          name = `${baseName}-${suffix}`
+          suffix += 1
+        }
+        connection.prepare(
+          'INSERT INTO repositories (name, root_path, created_at, updated_at) VALUES (?, ?, ?, ?)'
+        ).run(name, primaryRoot, now, now)
       }
-      connection.prepare(
-        'INSERT INTO repositories (name, root_path, created_at, updated_at) VALUES (?, ?, ?, ?)'
-      ).run(name, primaryRoot, now, now)
     }
   }
 

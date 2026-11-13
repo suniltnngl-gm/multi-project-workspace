@@ -6,6 +6,7 @@
 // Work State: Completed: Extracted from app.js as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { Router } from 'express'
 import { execFileSync } from 'node:child_process'
+import { findExecutable, resolvePythonCommand } from '../executables.js'
 
 export function createToolsRouter({ database }) {
   const router = Router()
@@ -19,20 +20,14 @@ export function createToolsRouter({ database }) {
       { name: 'node', command: 'node' },
       { name: 'npm', command: 'npm' },
       { name: 'uv', command: 'uv' },
-      { name: 'python', command: 'python3' },
+      { name: 'python', command: resolvePythonCommand() },
       { name: 'git', command: 'git' },
       { name: 'colab', command: 'colab' },
       { name: 'kaggle', command: 'kaggle' }
     ]
     const entries = commands.map((item) => {
-      let available = false
+      const available = Boolean(findExecutable(item.command))
       let version = ''
-      try {
-        execFileSync('sh', ['-c', `command -v ${item.command}`], { stdio: 'ignore' })
-        available = true
-      } catch {
-        available = false
-      }
       if (available) {
         try {
           version = execFileSync(item.command, ['--version'], {

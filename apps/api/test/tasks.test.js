@@ -336,6 +336,7 @@ test('resource monitor averages physical disk busy time over five seconds', asyn
     readDirectory: async () => ['sda', 'loop0', 'dm-0'],
     getLoadAverage: () => 0.1,
     getTime: () => now,
+    platform: 'linux',
     wait: async (milliseconds) => {
       waits += 1
       now += milliseconds

@@ -34,8 +34,10 @@ export function createResourceMonitor({
   readText = readFile,
   readDirectory = readdir,
   getLoadAverage = () => os.loadavg()[0],
+  getFreeMemoryMb = () => os.freemem() / (1024 * 1024),
   getTime = () => performance.now(),
-  wait = delay
+  wait = delay,
+  platform = process.platform
 } = {}) {
   let previousDiskSample
   let diskBusyPercent
@@ -55,8 +57,15 @@ export function createResourceMonitor({
   }
 
   return async function getResourceMetrics() {
-    if (process.platform !== 'linux') {
-      throw new Error('Local AI resource monitoring currently requires Linux.')
+    // macOS and Windows expose free memory and load average through Node but
+    // no equivalent of /proc/diskstats. Memory and CPU still gate generation;
+    // disk busy time is reported as 0 because it cannot be measured there.
+    if (platform !== 'linux') {
+      return {
+        loadAverage: getLoadAverage(),
+        availableMemoryMb: getFreeMemoryMb(),
+        diskBusyPercent: 0
+      }
     }
 
     let current = await readSnapshot()

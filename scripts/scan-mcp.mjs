@@ -8,7 +8,7 @@
 import { resolve } from 'node:path'
 import { createDatabase } from '../apps/api/src/database.js'
 import { discoverMcpCatalog } from '../apps/api/src/mcpDiscovery.js'
-import { loadWorkspaceEnv, ROOT_DIR } from './env.mjs'
+import { loadWorkspaceEnv, resolveDatabasePath, ROOT_DIR } from './env.mjs'
 
 const COMMANDS = new Set(['scan', 'list', 'check'])
 const arguments_ = process.argv.slice(2)
@@ -19,9 +19,9 @@ const databaseFlag = databaseFlagIndex >= 0 ? arguments_[databaseFlagIndex + 1] 
 
 loadWorkspaceEnv()
 
-const databasePath = resolve(
-  databaseFlag || process.env.DATABASE_PATH || `${ROOT_DIR}/apps/api/data/workspace.sqlite`
-)
+const databasePath = databaseFlag
+  ? resolve(databaseFlag)
+  : resolveDatabasePath({ rootDir: ROOT_DIR })
 
 function usage() {
   console.error('Usage: scan-mcp.mjs [scan|list|check] [--database PATH] [--quiet]')

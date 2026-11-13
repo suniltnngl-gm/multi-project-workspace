@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Objective: Study OpenCode provider and model availability daily with a minimal prompt.
 // Requirements: Test one model at a time; default to free models; never spend real task quota just to measure a model; treat a live 429 as authoritative and record its retry hint.
-// Decisions: The study shell calls `opencode run` directly instead of the API so it can vary the model id per test; results persist under /tmp/opencode so study output never enters the repository; free-model filtering keeps the daily run bounded.
+// Decisions: The study shell calls `opencode run` directly instead of the API so it can vary the model id per test; results persist under the OS temp directory (WORKSPACE_TMP_DIR override) so study output never enters the repository; free-model filtering keeps the daily run bounded.
 // Relevant Files: scripts/model-study.mjs, scripts/opencode-console.mjs, scripts/rotate-model.mjs, apps/api/src/modelClient.js
 // Important Context: User file. Run only alongside a main task in scope, not as idle quota burn.
 // Work State: Completed: Added for daily free-model study; Active: None; Blocked: None; Next Move: Maintain as needed.
@@ -10,15 +10,17 @@
  * Records latency, response quality, errors, and quota status without burning quota on main tasks.
  * Run daily to build a model capability matrix.
  */
-import { loadWorkspaceEnv } from './env.mjs'
+import { join } from 'node:path'
+import { loadWorkspaceEnv, workspaceTmpDir } from './env.mjs'
 import { spawn } from 'node:child_process'
 
 loadWorkspaceEnv()
 
 const TEST_PROMPT = 'hi'
 const TIMEOUT_MS = 30000
-const STATE_FILE = '/tmp/opencode/model-study.json'
-const RESULTS_DIR = '/tmp/opencode/model-study-results'
+const TMP_DIR = workspaceTmpDir()
+const STATE_FILE = join(TMP_DIR, 'model-study.json')
+const RESULTS_DIR = join(TMP_DIR, 'model-study-results')
 
 async function getAvailableModels() {
   return new Promise((resolve, reject) => {

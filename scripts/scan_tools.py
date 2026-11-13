@@ -6,20 +6,19 @@
 # Important Context: User file. Vendor and transient artifacts are excluded from tracking.
 # Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
 import argparse
-import os
+import shutil
 import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_DB = ROOT_DIR / "apps" / "api" / "data" / "workspace.sqlite"
+from paths import resolve_database_path
 
 TOOLS = [
     ("node", "node"),
     ("npm", "npm"),
     ("uv", "uv"),
-    ("python", "python3"),
+    ("python", next((candidate for candidate in ("python3", "python") if shutil.which(candidate)), sys.executable)),
     ("git", "git"),
     ("colab", "colab"),
     ("kaggle", "kaggle"),
@@ -50,9 +49,7 @@ def connect(database):
 
 
 def tool_version(command):
-    try:
-        subprocess.check_call(["sh", "-c", f"command -v {command}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except subprocess.CalledProcessError:
+    if shutil.which(command) is None:
         return False, ""
     try:
         output = subprocess.check_output([command, "--version"], text=True, stderr=subprocess.STDOUT)
@@ -88,10 +85,10 @@ def scan(connection):
 def main():
     parser = argparse.ArgumentParser(description="Track workflow tools")
     parser.add_argument("command", choices=("scan", "list", "check"))
-    parser.add_argument("--database", default=os.environ.get("DATABASE_PATH", str(DEFAULT_DB)))
+    parser.add_argument("--database", default=None)
     args = parser.parse_args()
 
-    connection = connect(args.database)
+    connection = connect(resolve_database_path(args.database))
 
     if args.command == "scan":
         count = scan(connection)

@@ -8,14 +8,14 @@
 import { existsSync, statSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
 import { createDatabase } from '../apps/api/src/database.js'
-import { loadWorkspaceEnv, ROOT_DIR } from './env.mjs'
+import { loadWorkspaceEnv, resolveDatabasePath, ROOT_DIR } from './env.mjs'
 
 const arguments_ = process.argv.slice(2)
 const command = arguments_[0] ?? 'list'
 
 loadWorkspaceEnv()
 
-const databasePath = resolve(process.env.DATABASE_PATH || `${ROOT_DIR}/apps/api/data/workspace.sqlite`)
+const databasePath = resolveDatabasePath({ rootDir: ROOT_DIR })
 
 function usage() {
   console.error('Usage: repos.mjs list | repos.mjs add <path> [--name NAME]')

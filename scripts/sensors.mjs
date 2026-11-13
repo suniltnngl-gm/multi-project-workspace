@@ -10,7 +10,7 @@ import { createModelRegistry, modelQuotaProfiles } from '../apps/api/src/modelRe
 import { createModelBudget } from '../apps/api/src/modelBudget.js'
 import { AUTO_PROMOTE_POLICIES, runSensorCycle } from '../apps/api/src/sensorCycles.js'
 import { SENSOR_CATALOG, SENSOR_IDEAS } from '../apps/api/src/workspaceSensors.js'
-import { loadWorkspaceEnv, ROOT_DIR } from './env.mjs'
+import { loadWorkspaceEnv, resolveDatabasePath, ROOT_DIR } from './env.mjs'
 
 const COMMANDS = new Set([
   'scan', 'list', 'show', 'runs', 'catalog', 'suggestions', 'cycle',
@@ -54,9 +54,9 @@ function ensureFlag(name) {
 const json = arguments_.includes('--json')
 const databaseFlag = flag('database')
 const note = flag('note') ?? ''
-const databasePath = resolve(
-  databaseFlag || process.env.DATABASE_PATH || `${ROOT_DIR}/apps/api/data/workspace.sqlite`
-)
+const databasePath = databaseFlag
+  ? resolve(databaseFlag)
+  : resolveDatabasePath({ rootDir: ROOT_DIR })
 
 function usage() {
   console.error(

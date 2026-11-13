@@ -1,6 +1,13 @@
 import { existsSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { resolvePythonCommand } from './executables.js'
+
+// Machine-local scratch space shared with scripts/env.mjs and scripts/paths.py.
+export function workspaceTempDir(env = process.env) {
+  const configured = env.WORKSPACE_TMP_DIR
+  return configured ? path.resolve(configured) : path.join(os.tmpdir(), 'opencode')
+}
 
 /**
  * Local model definitions. Each local model runs as its own llama.cpp server,
@@ -318,7 +325,7 @@ function createCliConfig(env) {
     kaggle: {
       command: 'kaggle',
       probeArgs: ['config', 'view'],
-      python: readText(env, 'KAGGLE_AI_PYTHON', 'python3'),
+      python: readText(env, 'KAGGLE_AI_PYTHON', resolvePythonCommand({ env })),
       pollIntervalSeconds: readNumber(env, 'KAGGLE_AI_POLL_INTERVAL_SECONDS', 30),
       cancelFallback: readText(env, 'KAGGLE_AI_CANCEL_FALLBACK', 'none'),
       // In-flight kernels are recorded here so a re-queued run resumes polling
@@ -326,7 +333,7 @@ function createCliConfig(env) {
       manifestDir: readText(
         env,
         'KAGGLE_AI_MANIFEST_DIR',
-        path.join(os.tmpdir(), 'workspace-kaggle-runs')
+        path.join(workspaceTempDir(env), 'workspace-kaggle-runs')
       )
     },
     opencode: {
@@ -696,6 +703,11 @@ export function planLocalModelLaunches({
   }
 
   let reservedMemoryMb = 0
+  const modelDir = readText(
+    env,
+    'LOCAL_AI_MODEL_DIR',
+    path.join(homeDir, '.local', 'share', 'llama.cpp', 'models')
+  )
   return selected.map((definition) => {
     const configuredUrl = (definition.urlEnv && env[definition.urlEnv])
       || (definition.fallbackUrlEnv && env[definition.fallbackUrlEnv])
@@ -703,7 +715,7 @@ export function planLocalModelLaunches({
     const modelPath = readText(
       env,
       definition.modelFileEnv,
-      path.join(homeDir, '.local/share/llama.cpp/models', definition.defaultModelFile)
+      path.join(modelDir, definition.defaultModelFile)
     )
     const minAvailableMemoryMb = readNumber(
       env,

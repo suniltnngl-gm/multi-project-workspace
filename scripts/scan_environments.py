@@ -13,8 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_DB = ROOT_DIR / "apps" / "api" / "data" / "workspace.sqlite"
+from paths import resolve_database_path
 
 
 def connect(database):
@@ -81,10 +80,10 @@ def scan(connection, entries):
 def main():
     parser = argparse.ArgumentParser(description="Track runtime environment")
     parser.add_argument("command", choices=("scan", "list", "check"))
-    parser.add_argument("--database", default=os.environ.get("DATABASE_PATH", str(DEFAULT_DB)))
+    parser.add_argument("--database", default=None)
     args = parser.parse_args()
 
-    connection = connect(args.database)
+    connection = connect(resolve_database_path(args.database))
     entries = collect_entries()
 
     if args.command == "scan":
