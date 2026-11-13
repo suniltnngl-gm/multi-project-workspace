@@ -3,7 +3,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { createModelClient, ModelCallError } from '../src/modelClient.js'
+import { createModelClient, ModelCallError, parseColabStatus } from '../src/modelClient.js'
 
 const SCRIPTS = '/workspace/scripts'
 const RESULT_SENTINEL = '__WORKSPACE_MODEL_RESULT__'
@@ -153,6 +153,106 @@ test('Colab creates a missing session, bootstraps once, and reuses it', async ()
   ])
   assert.equal(bootstraps, 2)
   assert.equal(completions, 2)
+})
+
+test('Colab fails fast when the runtime is CPU-backed and a GPU is required', async () => {
+  const calls = []
+  const client = createClient({
+    runCommand: async (command, args) => {
+      calls.push(args)
+      if (args[0] === 'status') {
+        return {
+          stdout: '[workspace-qwen] m-s-x | Hardware: CPU | Shape: Standard | Variant: DEFAULT | Status: IDLE',
+          stderr: ''
+        }
+      }
+      throw new Error(`unexpected ${args.join(' ')}`)
+    },
+    scriptsDir: SCRIPTS
+  })
+  const model = colabModel({ cli: { ...colabModel().cli, requireGpu: true } })
+
+  await assert.rejects(
+    () => client.complete(model, REQUEST),
+    (error) => error instanceof ModelCallError
+      && error.status === 503
+      && error.code === 'gpu_unavailable'
+      && error.retryAfter === 15
+      && error.details.hardware === 'CPU'
+      && /cannot load on CPU/.test(error.message)
+  )
+  // No bootstrap, no model download: the failure is decided by `status`.
+  assert.deepEqual(calls, [['status', '-s', 'workspace-qwen']])
+})
+
+test('Colab verifies the GPU allocation after creating a session', async () => {
+  const calls = []
+  let statusCalls = 0
+  const runCommand = async (command, args) => {
+    calls.push(args)
+    if (args[0] === 'status') {
+      statusCalls += 1
+      return {
+        stdout: statusCalls === 1
+          ? "[colab] Session 'workspace-qwen' not found."
+          : '[workspace-qwen] m-s-x | Hardware: T4 | Shape: Standard | Variant: GPU | Status: IDLE',
+        stderr: ''
+      }
+    }
+    if (args[0] === 'new') return { stdout: '', stderr: '' }
+    if (args.includes(join(SCRIPTS, 'colab_model_server.py'))) {
+      return { stdout: 'WORKSPACE_COLAB_READY\n', stderr: '' }
+    }
+    return {
+      stdout: `${RESULT_SENTINEL}${JSON.stringify({
+        choices: [{ message: { content: 'draft' } }]
+      })}`,
+      stderr: ''
+    }
+  }
+
+  const client = createClient({ runCommand, scriptsDir: SCRIPTS })
+  const model = colabModel({ cli: { ...colabModel().cli, requireGpu: true } })
+  assert.equal(await client.complete(model, REQUEST), 'draft')
+  assert.deepEqual(calls.map((args) => args[0]), ['status', 'new', 'status', 'exec', 'exec'])
+})
+
+test('Colab rejects a silent CPU allocation after creating a session', async () => {
+  const calls = []
+  let statusCalls = 0
+  const client = createClient({
+    runCommand: async (command, args) => {
+      calls.push(args)
+      if (args[0] === 'status') {
+        statusCalls += 1
+        return {
+          stdout: statusCalls === 1
+            ? "[colab] Session 'workspace-qwen' not found."
+            : '[workspace-qwen] m-s-x | Hardware: CPU | Shape: Standard | Variant: DEFAULT | Status: IDLE',
+          stderr: ''
+        }
+      }
+      return { stdout: '', stderr: '' }
+    },
+    scriptsDir: SCRIPTS
+  })
+  const model = colabModel({ cli: { ...colabModel().cli, requireGpu: true } })
+
+  await assert.rejects(
+    () => client.complete(model, REQUEST),
+    (error) => error instanceof ModelCallError
+      && error.code === 'gpu_unavailable'
+      && /requires a GPU/.test(error.message)
+  )
+  assert.deepEqual(calls.map((args) => args[0]), ['status', 'new', 'status'])
+})
+
+test('parseColabStatus distinguishes CPU, GPU, and missing hardware data', () => {
+  assert.equal(parseColabStatus('Hardware: CPU | Variant: DEFAULT').gpu, false)
+  assert.equal(parseColabStatus('Hardware: T4 | Variant: GPU').gpu, true)
+  assert.equal(parseColabStatus('Hardware: L4 | Variant: DEFAULT').gpu, true)
+  assert.equal(parseColabStatus('').gpu, null)
+  assert.equal(parseColabStatus("[colab] Session 'x' not found.").absent, true)
 })
 
 test('Colab reuses an existing session without creating a new one', async () => {

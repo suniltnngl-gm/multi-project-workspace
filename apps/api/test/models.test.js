@@ -133,9 +133,12 @@ test('registry contains two callable local models and three CLI-backed remote mo
   assert.deepEqual(models[2].cli.gpus, ['T4'])
   assert.equal(models[2].cli.newRetries, 1)
   assert.equal(models[2].cli.retryBackoffMs, 15000)
+  assert.equal(models[2].cli.requireGpu, true)
+  assert.equal(models[2].cli.gpuProbeTimeoutMs, 30000)
   assert.equal(models[3].cli.command, 'kaggle')
   assert.deepEqual(models[3].cli.probeArgs, ['config', 'view'])
   assert.equal(models[3].cli.cancelFallback, 'none')
+  assert.match(models[3].cli.manifestDir, /workspace-kaggle-runs$/)
 
   const accelerated = createModelRegistry({
     env: {

@@ -17,12 +17,40 @@ const DEFAULT_KAGGLE_TIMEOUT_MS = 3600000
 const SCRIPTS_DIR = fileURLToPath(new URL('../../../scripts', import.meta.url))
 
 export class ModelCallError extends Error {
-  constructor(message, status = 502, { retryAfter } = {}) {
+  constructor(message, status = 502, { retryAfter, code, details } = {}) {
     super(message)
     this.name = 'ModelCallError'
     this.status = status
     if (Number.isFinite(retryAfter)) this.retryAfter = Math.max(0, Math.ceil(retryAfter))
+    if (code) this.code = code
+    if (details) this.details = details
   }
+}
+
+function stripAnsi(value) {
+  return String(value ?? '').replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+}
+
+// `colab status -s NAME` is the only authoritative source for what the
+// runtime actually is: `colab sessions` lists a session by its requested name,
+// so a session called gpu-t4-* can still be backed by a CPU runtime.
+export function parseColabStatus(output) {
+  const text = stripAnsi(output)
+  const absent = /session .*not found|no active sessions?|not running/i.test(text)
+  const field = (label) => {
+    const match = text.match(new RegExp(`${label}:\\s*([^|\\n]+)`, 'i'))
+    return match ? match[1].trim() : ''
+  }
+  const hardware = field('Hardware')
+  const variant = field('Variant')
+  const status = field('Status')
+  // null means the CLI did not report enough to decide; false is positive
+  // evidence of a CPU runtime, which the GPU-only model server cannot use.
+  let gpu = null
+  if (variant && variant.toUpperCase() !== 'DEFAULT') gpu = true
+  else if (hardware && hardware.toUpperCase() !== 'CPU') gpu = true
+  else if (hardware || variant) gpu = false
+  return { absent, hardware, variant, status, gpu }
 }
 
 function sleep(ms) {
@@ -231,19 +259,51 @@ export function createModelClient({
     return false
   }
 
-  async function probeColabSession(model) {
+  async function readColabStatus(model, { signal, timeoutMs } = {}) {
     try {
-      const { stdout } = await runCommand(
+      const { stdout, stderr } = await runCommand(
         model.cli.command,
         ['status', '-s', model.cli.session],
-        { timeoutMs: 15000 }
+        {
+          timeoutMs: timeoutMs
+            ?? (Number.isFinite(model.cli.gpuProbeTimeoutMs)
+              ? model.cli.gpuProbeTimeoutMs
+              : 30000),
+          signal
+        }
       )
-      return /not found|no active session|not running/i.test(stdout)
-        ? 'absent'
-        : 'present'
-    } catch {
-      return 'unknown'
+      return parseColabStatus(`${stdout}\n${stderr}`)
+    } catch (error) {
+      return { absent: false, hardware: '', variant: '', status: '', gpu: null, error }
     }
+  }
+
+  function colabRequiresGpu(model) {
+    return model.cli?.requireGpu === true
+  }
+
+  function colabRetryAfterSeconds(model) {
+    const backoff = Number(model.cli?.retryBackoffMs)
+    return Math.max(5, Math.ceil((Number.isFinite(backoff) ? backoff : 15000) / 1000))
+  }
+
+  function colabGpuError(model, status) {
+    const hardware = status.hardware || 'unknown'
+    const variant = status.variant || 'unknown'
+    return new ModelCallError(
+      `${model.label} requires a GPU, but Colab reported ${hardware} (${variant}). `
+        + 'The server cannot load on CPU; stop the runtime and request a GPU session.',
+      503,
+      {
+        retryAfter: colabRetryAfterSeconds(model),
+        code: 'gpu_unavailable',
+        details: {
+          session: model.cli.session,
+          hardware: status.hardware || null,
+          variant: status.variant || null
+        }
+      }
+    )
   }
 
   async function probeCli(model) {
@@ -262,7 +322,17 @@ export function createModelClient({
       await runCommand(command, args, { timeoutMs: 20000 })
       value = { ok: true }
       if (command === 'colab') {
-        value.sessionState = await probeColabSession(model)
+        const status = await readColabStatus(model, { timeoutMs: 15000 })
+        value.sessionState = status.error
+          ? 'unknown'
+          : status.absent ? 'absent' : 'present'
+        if (!status.error && !status.absent && (status.hardware || status.variant)) {
+          value.accelerator = {
+            hardware: status.hardware || null,
+            variant: status.variant || null,
+            gpu: status.gpu
+          }
+        }
       }
     } catch {
       value = { ok: false }
@@ -383,7 +453,9 @@ export function createModelClient({
     const candidates = gpus?.length ? gpus : [gpu || 'T4']
     const retries = Number.isFinite(newRetries) ? Math.max(0, newRetries) : 0
     const backoff = Number.isFinite(retryBackoffMs) ? Math.max(0, retryBackoffMs) : 0
+    const requireGpu = colabRequiresGpu(model)
     const attempts = []
+    let lastCpuStatus = null
 
     for (const accelerator of candidates) {
       for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -392,6 +464,18 @@ export function createModelClient({
             timeoutMs: 300000,
             signal
           })
+          if (requireGpu) {
+            // `colab new --gpu` can succeed and still hand back a CPU runtime.
+            // Verify the allocation before downloading multi-gigabyte weights.
+            const status = await readColabStatus(model, { signal })
+            if (status.gpu === false) {
+              lastCpuStatus = status
+              attempts.push(
+                `${accelerator}: allocated ${status.hardware || 'unknown'} (${status.variant || 'unknown'})`
+              )
+              continue
+            }
+          }
           return accelerator
         } catch (error) {
           if (signal?.aborted) throw error
@@ -404,15 +488,12 @@ export function createModelClient({
       }
     }
 
-    const retryAfterSeconds = Math.max(
-      5,
-      Math.ceil((Number.isFinite(retryBackoffMs) ? retryBackoffMs : 15000) / 1000)
-    )
+    if (lastCpuStatus) throw colabGpuError(model, lastCpuStatus)
     throw new ModelCallError(
       `Colab could not allocate a GPU (${attempts.at(-1) || 'no accelerator available'}). `
         + 'Try again later or set COLAB_AI_GPUS to an accelerator your account can use.',
       503,
-      { retryAfter: retryAfterSeconds }
+      { retryAfter: colabRetryAfterSeconds(model), code: 'gpu_unavailable' }
     )
   }
 
@@ -420,7 +501,21 @@ export function createModelClient({
     const state = colabState(model)
     if (state.ready) return
 
-    const { command, session } = model.cli
+    if (colabRequiresGpu(model)) {
+      // Verify before bootstrap so a CPU runtime fails in seconds instead of
+      // after a model download. A missing session is created and verified by
+      // createColabSession; an unreadable status falls through to the normal
+      // bootstrap path rather than blocking a request we cannot judge.
+      const status = await readColabStatus(model, { signal })
+      if (status.absent) {
+        await createColabSession(model, signal)
+        await bootstrapColab(model, signal)
+        state.ready = true
+        return
+      }
+      if (status.gpu === false) throw colabGpuError(model, status)
+    }
+
     try {
       // `colab status` exits successfully even when the session is missing, so
       // probe by bootstrapping and create a session only for that specific

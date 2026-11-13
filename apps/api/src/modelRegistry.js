@@ -307,6 +307,10 @@ function createCliConfig(env) {
       gpus: colabGpus.length > 0 ? colabGpus : ['T4'],
       newRetries: readNumber(env, 'COLAB_AI_NEW_RETRIES', 1),
       retryBackoffMs: readNumber(env, 'COLAB_AI_RETRY_BACKOFF_MS', 15000),
+      // The bundled server loads a 4-bit model onto `cuda:0`; a CPU runtime
+      // cannot serve it, so the allocation is verified before bootstrap.
+      requireGpu: readBoolean(env, 'COLAB_AI_REQUIRE_GPU', true),
+      gpuProbeTimeoutMs: readNumber(env, 'COLAB_AI_GPU_PROBE_TIMEOUT_MS', 30000),
       port: readNumber(env, 'COLAB_AI_PORT', 8765),
       modelId: readText(env, 'COLAB_AI_MODEL', 'Qwen/Qwen2.5-Coder-3B-Instruct'),
       bootstrapTimeoutMs: readNumber(env, 'COLAB_AI_BOOTSTRAP_TIMEOUT_MS', 1800000)
@@ -316,7 +320,14 @@ function createCliConfig(env) {
       probeArgs: ['config', 'view'],
       python: readText(env, 'KAGGLE_AI_PYTHON', 'python3'),
       pollIntervalSeconds: readNumber(env, 'KAGGLE_AI_POLL_INTERVAL_SECONDS', 30),
-      cancelFallback: readText(env, 'KAGGLE_AI_CANCEL_FALLBACK', 'none')
+      cancelFallback: readText(env, 'KAGGLE_AI_CANCEL_FALLBACK', 'none'),
+      // In-flight kernels are recorded here so a re-queued run resumes polling
+      // or downloads the completed output instead of submitting a new kernel.
+      manifestDir: readText(
+        env,
+        'KAGGLE_AI_MANIFEST_DIR',
+        path.join(os.tmpdir(), 'workspace-kaggle-runs')
+      )
     },
     opencode: {
       command: 'opencode',
