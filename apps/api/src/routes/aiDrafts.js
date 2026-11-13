@@ -9,6 +9,12 @@ import { Router } from 'express'
 import { existsSync } from 'node:fs'
 import { buildTaskPrompt } from '../localAiPrompt.js'
 import {
+  describeFallback,
+  fallbackAllowed,
+  fallbackCandidates,
+  isFallbackEligible
+} from '../modelFallback.js'
+import {
   isValidText,
   MAX_TITLE_LENGTH,
   MAX_PROJECT_LENGTH,
@@ -338,7 +344,9 @@ export function createAiDraftsRouter({
   scheduler,
   modelClient,
   modelMetrics,
-  modelBudget
+  modelBudget,
+  fallbackChain = [],
+  fallbackAllowSessions = false
 }) {
   const router = Router()
 
@@ -375,6 +383,120 @@ export function createAiDraftsRouter({
     return { selection, model, gate }
   }
 
+  async function selectFallbackModel(id) {
+    try {
+      const selection = await scheduler.select(id)
+      if (selection.error) return null
+      const gate = gateModelBudget(modelBudget, selection.model)
+      if (!gate.ok) {
+        releaseModelBudget(modelBudget, gate)
+        selection.release({ inferenceStarted: false })
+        return null
+      }
+      return { model: selection.model, selection, gate }
+    } catch (error) {
+      console.error(`Fallback model selection failed for ${id}:`, error)
+      return null
+    }
+  }
+
+  async function runAttempt({ model, selection, gate, buildRequest, signal, onPhase }) {
+    let startedAt
+    try {
+      startedAt = Date.now()
+      modelMetrics.recordStart(model.id)
+      const content = await modelClient.complete(model, {
+        ...buildRequest(),
+        signal,
+        onPhase,
+        onUsage: budgetUsageSink(gate)
+      })
+      modelMetrics.recordSuccess(model.id, { durationMs: Date.now() - startedAt })
+      return content
+    } catch (error) {
+      applyCooldown(modelBudget, model, error)
+      modelMetrics.recordError(model.id, error, {
+        durationMs: startedAt === undefined ? undefined : Date.now() - startedAt
+      })
+      throw error
+    } finally {
+      settleModelBudget(modelBudget, model, gate)
+      selection.release({ inferenceStarted: true })
+    }
+  }
+
+  /**
+   * Run the selected model, then walk the opt-in fallback chain only for
+   * capacity, rate-limit, timeout, or GPU-hardware failures. Each attempt gets
+   * its own scheduler selection and budget reservation; the job is retargeted
+   * so its provenance names the model that actually answered.
+   */
+  async function runWithFallback({
+    primary,
+    sessionBound,
+    buildRequest,
+    signal,
+    onPhase,
+    retarget
+  }) {
+    const candidates = fallbackAllowed({
+      chain: fallbackChain,
+      sessionBound,
+      allowSessions: fallbackAllowSessions
+    })
+      ? fallbackCandidates(fallbackChain, primary.model.id)
+      : []
+
+    let attempt = primary
+    let fallbackFrom
+    let fallbackReason
+    let index = 0
+    const attempted = new Set([primary.model.id])
+
+    while (true) {
+      try {
+        const content = await runAttempt({
+          ...attempt,
+          buildRequest,
+          signal,
+          onPhase
+        })
+        return { content, model: attempt.model, fallbackFrom, fallbackReason }
+      } catch (error) {
+        if (candidates.length === 0 || !isFallbackEligible(error)) {
+          if (fallbackFrom) {
+            error.fallbackFrom = fallbackFrom
+            error.fallbackReason = fallbackReason
+          }
+          throw error
+        }
+
+        fallbackFrom = fallbackFrom ?? attempt.model.id
+        fallbackReason = describeFallback(error)
+        let next = null
+        while (index < candidates.length) {
+          const id = candidates[index++]
+          if (attempted.has(id)) continue
+          attempted.add(id)
+          next = await selectFallbackModel(id)
+          if (next) break
+        }
+        if (!next) {
+          error.fallbackFrom = fallbackFrom
+          error.fallbackReason = fallbackReason
+          throw error
+        }
+        retarget?.({
+          model: next.model.id,
+          backend: next.model.backend,
+          fallbackFrom,
+          fallbackReason
+        })
+        attempt = next
+      }
+    }
+  }
+
   function submitDraftJob(input, model, selection, gate) {
     const task = taskFromRefineInput(input)
     const sessionSummary = input.session_id !== undefined
@@ -382,44 +504,28 @@ export function createAiDraftsRouter({
       : ''
     const prompt = buildTaskPrompt(task, { sessionSummary })
 
-    const runner = async ({ signal, onPhase }) => {
-      let inferenceStarted = false
-      let startedAt
-      try {
-        inferenceStarted = true
-        startedAt = Date.now()
-        modelMetrics.recordStart(model.id)
-        let content
-        try {
-          content = await modelClient.complete(model, {
-            messages: prompt.messages,
-            maxTokens: prompt.maxTokens,
-            task,
-            signal,
-            onPhase,
-            onUsage: budgetUsageSink(gate)
-          })
-          modelMetrics.recordSuccess(model.id, { durationMs: Date.now() - startedAt })
-        } catch (error) {
-          applyCooldown(modelBudget, model, error)
-          modelMetrics.recordError(model.id, error, {
-            durationMs: startedAt === undefined ? undefined : Date.now() - startedAt
-          })
-          throw error
-        }
+    const runner = async ({ signal, onPhase, retarget }) => {
+      const result = await runWithFallback({
+        primary: { model, selection, gate },
+        sessionBound: input.session_id !== undefined,
+        buildRequest: () => ({
+          messages: prompt.messages,
+          maxTokens: prompt.maxTokens,
+          task
+        }),
+        signal,
+        onPhase,
+        retarget
+      })
 
-        try {
-          return parseAssistantDraft(content)
-        } catch (error) {
-          console.error('Could not parse local AI response:', error)
-          throw Object.assign(
-            new Error('The local model returned an invalid task draft. Please retry.'),
-            { status: 502 }
-          )
-        }
-      } finally {
-        settleModelBudget(modelBudget, model, gate)
-        selection.release({ inferenceStarted })
+      try {
+        return parseAssistantDraft(result.content)
+      } catch (error) {
+        console.error('Could not parse local AI response:', error)
+        throw Object.assign(
+          new Error('The local model returned an invalid task draft. Please retry.'),
+          { status: 502 }
+        )
       }
     }
 
@@ -578,44 +684,38 @@ export function createAiDraftsRouter({
       ? body.prompt.trim().slice(0, 80)
       : 'AI chat'
 
-    const runner = async ({ signal, onPhase }) => {
-      let inferenceStarted = false
-      let startedAt
-      try {
-        inferenceStarted = true
-        startedAt = Date.now()
-        modelMetrics.recordStart(model.id)
-        let content
-        try {
-          content = await modelClient.complete(model, {
-            messages,
-            maxTokens,
-            task: { title: jobTitle, project: 'workspace', task_type: 'chore' },
-            ...(worktreePath ? { worktreePath } : {}),
-            signal,
-            onPhase,
-            onUsage: budgetUsageSink(gate)
-          })
-          modelMetrics.recordSuccess(model.id, { durationMs: Date.now() - startedAt })
-        } catch (error) {
-          applyCooldown(modelBudget, model, error)
-          modelMetrics.recordError(model.id, error, {
-            durationMs: startedAt === undefined ? undefined : Date.now() - startedAt
-          })
-          throw error
-        }
-        if (session) {
-          for (const message of newMessages) {
-            if (message.role === 'user' || message.role === 'assistant') {
-              database.addAiMessage(session.id, message)
-            }
+    const runner = async ({ signal, onPhase, retarget }) => {
+      const result = await runWithFallback({
+        primary: { model, selection, gate },
+        sessionBound: Boolean(session),
+        buildRequest: () => ({
+          messages,
+          maxTokens,
+          task: { title: jobTitle, project: 'workspace', task_type: 'chore' },
+          ...(worktreePath ? { worktreePath } : {})
+        }),
+        signal,
+        onPhase,
+        retarget
+      })
+      if (session) {
+        for (const message of newMessages) {
+          if (message.role === 'user' || message.role === 'assistant') {
+            database.addAiMessage(session.id, message)
           }
-          database.addAiMessage(session.id, { role: 'assistant', content })
         }
-        return { content }
-      } finally {
-        settleModelBudget(modelBudget, model, gate)
-        selection.release({ inferenceStarted })
+        database.addAiMessage(session.id, { role: 'assistant', content: result.content })
+      }
+      return {
+        content: result.content,
+        model: result.model.id,
+        backend: result.model.backend,
+        ...(result.fallbackFrom
+          ? {
+              fallbackFrom: result.fallbackFrom,
+              fallbackReason: result.fallbackReason
+            }
+          : {})
       }
     }
 
@@ -636,11 +736,18 @@ export function createAiDraftsRouter({
 
     const finished = await jobStore.wait(job.id)
     if (finished.state === 'done') {
+      const result = finished.result ?? {}
       return response.json({
-        content: finished.result.content,
-        model: model.id,
-        backend: model.backend,
+        content: result.content,
+        model: result.model ?? finished.model ?? model.id,
+        backend: result.backend ?? finished.backend ?? model.backend,
         jobId: job.id,
+        ...(result.fallbackFrom || finished.fallbackFrom
+          ? {
+              fallbackFrom: result.fallbackFrom ?? finished.fallbackFrom,
+              fallbackReason: result.fallbackReason ?? finished.fallbackReason
+            }
+          : {}),
         ...(session ? { sessionId: session.id } : {})
       })
     }
@@ -696,35 +803,20 @@ export function createAiDraftsRouter({
     // The improvement run is a job like any other model call, so it records
     // model provenance, honors budget and cooldown, and can be inspected or
     // cancelled through the job endpoints.
-    const runner = async ({ signal, onPhase }) => {
-      let inferenceStarted = false
-      let startedAt
-      try {
-        inferenceStarted = true
-        startedAt = Date.now()
-        modelMetrics.recordStart(model.id)
-        try {
-          const content = await modelClient.complete(model, {
-            messages,
-            maxTokens: 400,
-            task: { title: 'Improve workspace', project: 'workspace', task_type: 'chore' },
-            signal,
-            onPhase,
-            onUsage: budgetUsageSink(gate)
-          })
-          modelMetrics.recordSuccess(model.id, { durationMs: Date.now() - startedAt })
-          return content
-        } catch (error) {
-          applyCooldown(modelBudget, model, error)
-          modelMetrics.recordError(model.id, error, {
-            durationMs: startedAt === undefined ? undefined : Date.now() - startedAt
-          })
-          throw error
-        }
-      } finally {
-        settleModelBudget(modelBudget, model, gate)
-        selection.release({ inferenceStarted })
-      }
+    const runner = async ({ signal, onPhase, retarget }) => {
+      const result = await runWithFallback({
+        primary: { model, selection, gate },
+        sessionBound: false,
+        buildRequest: () => ({
+          messages,
+          maxTokens: 400,
+          task: { title: 'Improve workspace', project: 'workspace', task_type: 'chore' }
+        }),
+        signal,
+        onPhase,
+        retarget
+      })
+      return result.content
     }
 
     let job

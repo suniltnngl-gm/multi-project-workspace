@@ -234,7 +234,15 @@ test('legacy tracking databases are migrated without losing data', () => {
   assert.ok(toolColumns.includes('failure_count'))
 
   const jobColumns = tableColumns(inspection, 'ai_jobs')
-  for (const added of ['retry_after', 'backend', 'task_id', 'agent_run_id', 'agent_id']) {
+  for (const added of [
+    'retry_after',
+    'backend',
+    'task_id',
+    'agent_run_id',
+    'agent_id',
+    'fallback_from',
+    'fallback_reason'
+  ]) {
     assert.ok(jobColumns.includes(added), `ai_jobs is missing ${added}`)
   }
   assert.ok(

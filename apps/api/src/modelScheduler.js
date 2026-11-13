@@ -143,7 +143,7 @@ export function createModelScheduler({
           busyReasons: ['A local model request is already in progress.']
         })
       }
-      if (coolingDown) {
+      if (coolingDown && !model.remote) {
         return modelStatus(model, {
           state: 'busy',
           available: false,
@@ -194,7 +194,7 @@ export function createModelScheduler({
       result.error = 'Local AI resource monitoring is unavailable.'
       return result
     }
-    if (coolingDown) {
+    if (coolingDown && models.some((model) => !model.remote)) {
       result.state = 'busy'
       result.busyReasons = ['Cooling down between local model turns.']
       result.retryAfter = Math.max(1, Math.ceil((nextGenerationAt - now) / 1000))
@@ -369,7 +369,10 @@ export function createModelScheduler({
       model,
       release: ({ inferenceStarted = false } = {}) => {
         modelState.inFlight = false
-        if (inferenceStarted) {
+        // The shared turn cooldown protects this machine from back-to-back
+        // local generations. A remote failure must not block an immediate
+        // fallback lane, so only local inference starts it.
+        if (inferenceStarted && !model.remote) {
           nextGenerationAt = Date.now() + turnCooldownMs
         }
       }

@@ -24,7 +24,9 @@ function toJob(row) {
     ...(row.status !== null ? { status: row.status } : {}),
     ...(row.retry_after !== null && row.retry_after !== undefined
       ? { retryAfter: row.retry_after }
-      : {})
+      : {}),
+    ...(row.fallback_from ? { fallbackFrom: row.fallback_from } : {}),
+    ...(row.fallback_reason ? { fallbackReason: row.fallback_reason } : {})
   }
 }
 
@@ -58,14 +60,16 @@ export function createAiJobsStore(connection) {
   const saveJobStatement = connection.prepare(`
     INSERT INTO ai_jobs (
       id, state, phase, model, backend, task_id, title, created_at, started_at,
-      finished_at, result, error, status, retry_after
+      finished_at, result, error, status, retry_after, fallback_from, fallback_reason
     ) VALUES (
       @id, @state, @phase, @model, @backend, @taskId, @title, @createdAt,
-      @startedAt, @finishedAt, @result, @error, @status, @retryAfter
+      @startedAt, @finishedAt, @result, @error, @status, @retryAfter,
+      @fallbackFrom, @fallbackReason
     )
     ON CONFLICT(id) DO UPDATE SET
       state = excluded.state,
       phase = excluded.phase,
+      model = excluded.model,
       backend = excluded.backend,
       task_id = excluded.task_id,
       started_at = excluded.started_at,
@@ -73,7 +77,9 @@ export function createAiJobsStore(connection) {
       result = excluded.result,
       error = excluded.error,
       status = excluded.status,
-      retry_after = excluded.retry_after
+      retry_after = excluded.retry_after,
+      fallback_from = excluded.fallback_from,
+      fallback_reason = excluded.fallback_reason
   `)
   const getJobStatement = connection.prepare('SELECT * FROM ai_jobs WHERE id = ?')
   const deleteJobStatement = connection.prepare('DELETE FROM ai_jobs WHERE id = ?')
@@ -104,7 +110,9 @@ export function createAiJobsStore(connection) {
         result: job.result === undefined ? null : JSON.stringify(job.result),
         error: job.error ?? null,
         status: job.status ?? null,
-        retryAfter: job.retryAfter ?? null
+        retryAfter: job.retryAfter ?? null,
+        fallbackFrom: job.fallbackFrom ?? null,
+        fallbackReason: job.fallbackReason ?? null
       })
       return toJob(getJobStatement.get(job.id))
     },

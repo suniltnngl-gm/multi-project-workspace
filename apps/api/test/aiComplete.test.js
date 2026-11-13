@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { after, before, test } from 'node:test'
 import { createApp } from '../src/app.js'
 import { createDatabase } from '../src/database.js'
+import { ModelCallError } from '../src/modelClient.js'
 
 const LOCAL_MODEL = {
   id: 'local-0.5b',
@@ -39,13 +40,21 @@ after(async () => {
   if (directory) await rm(directory, { recursive: true, force: true })
 })
 
-async function withApp({ respond = async () => 'A direct reply.', modelBudget } = {}, run) {
+async function withApp({
+  respond = async () => 'A direct reply.',
+  modelBudget,
+  models = [LOCAL_MODEL],
+  fallbackChain,
+  fallbackAllowSessions
+} = {}, run) {
   const calls = []
   const app = createApp(database, {
-    models: [LOCAL_MODEL],
+    models,
     getResourceMetrics: idleMetrics,
     turnCooldownMs: 0,
     ...(modelBudget ? { modelBudget } : {}),
+    ...(fallbackChain ? { fallbackChain } : {}),
+    ...(fallbackAllowSessions !== undefined ? { fallbackAllowSessions } : {}),
     modelClient: {
       probe: async () => ({ ok: true }),
       complete: async (model, request) => {
@@ -112,6 +121,109 @@ test('direct AI completion returns content and records provenance', async () => 
     const detail = await (await fetch(`${url}/api/tasks/${task.id}`)).json()
     assert.equal(detail.aiRuns.length, 1)
     assert.equal(detail.aiRuns[0].id, body.jobId)
+  })
+})
+
+const FALLBACK_MODEL = {
+  ...LOCAL_MODEL,
+  id: 'local-1.5b',
+  label: 'Qwen2.5-Coder 1.5B (local)',
+  priority: 9,
+  url: 'http://127.0.0.1:8081'
+}
+
+test('direct AI completion falls back on a capacity failure and records provenance', async () => {
+  await withApp({
+    models: [LOCAL_MODEL, FALLBACK_MODEL],
+    fallbackChain: ['local-0.5b', 'local-1.5b'],
+    respond: async (model) => {
+      if (model.id === 'local-0.5b') {
+        throw new ModelCallError('The provider is at capacity (HTTP 503).', 503)
+      }
+      return 'Fallback reply.'
+    }
+  }, async (url, calls) => {
+    const response = await post(url, '/api/ai/complete', {
+      prompt: 'Say hi',
+      model: 'local-0.5b'
+    })
+    assert.equal(response.status, 200)
+    const body = await response.json()
+    assert.equal(body.content, 'Fallback reply.')
+    assert.equal(body.model, 'local-1.5b')
+    assert.equal(body.fallbackFrom, 'local-0.5b')
+    assert.match(body.fallbackReason, /capacity/)
+    assert.deepEqual(calls.map((call) => call.model), ['local-0.5b', 'local-1.5b'])
+
+    const jobs = await (await fetch(`${url}/api/local-ai/jobs`)).json()
+    const job = jobs.find((entry) => entry.id === body.jobId)
+    assert.equal(job.model, 'local-1.5b')
+    assert.equal(job.fallbackFrom, 'local-0.5b')
+    assert.match(job.fallbackReason, /capacity/)
+  })
+})
+
+test('fallback does not fire for an invalid response or a session-bound request', async () => {
+  await withApp({
+    models: [LOCAL_MODEL, FALLBACK_MODEL],
+    fallbackChain: ['local-0.5b', 'local-1.5b'],
+    respond: async () => {
+      throw new ModelCallError('invalid output', 502)
+    }
+  }, async (url, calls) => {
+    const response = await post(url, '/api/ai/complete', {
+      prompt: 'Say hi',
+      model: 'local-0.5b'
+    })
+    assert.equal(response.status, 502)
+    assert.deepEqual(calls.map((call) => call.model), ['local-0.5b'])
+  })
+
+  await withApp({
+    models: [LOCAL_MODEL, FALLBACK_MODEL],
+    fallbackChain: ['local-0.5b', 'local-1.5b'],
+    respond: async () => {
+      throw new ModelCallError('capacity', 503)
+    }
+  }, async (url, calls) => {
+    const session = database.createAiSession({ title: 'Bound' })
+    const response = await post(url, '/api/ai/complete', {
+      prompt: 'Say hi',
+      model: 'local-0.5b',
+      session_id: session.id
+    })
+    assert.equal(response.status, 503)
+    assert.deepEqual(calls.map((call) => call.model), ['local-0.5b'])
+  })
+})
+
+test('fallback can leave a session when explicitly allowed', async () => {
+  await withApp({
+    models: [LOCAL_MODEL, FALLBACK_MODEL],
+    fallbackChain: ['local-0.5b', 'local-1.5b'],
+    fallbackAllowSessions: true,
+    respond: async (model) => {
+      if (model.id === 'local-0.5b') {
+        throw new ModelCallError('capacity', 503)
+      }
+      return 'Session fallback.'
+    }
+  }, async (url, calls) => {
+    const session = database.createAiSession({ title: 'Bound' })
+    const response = await post(url, '/api/ai/complete', {
+      prompt: 'Say hi',
+      model: 'local-0.5b',
+      session_id: session.id
+    })
+    assert.equal(response.status, 200)
+    const body = await response.json()
+    assert.equal(body.content, 'Session fallback.')
+    assert.equal(body.model, 'local-1.5b')
+    assert.deepEqual(calls.map((call) => call.model), ['local-0.5b', 'local-1.5b'])
+    assert.equal(
+      database.getAiSession(session.id).messages.at(-1).content,
+      'Session fallback.'
+    )
   })
 })
 

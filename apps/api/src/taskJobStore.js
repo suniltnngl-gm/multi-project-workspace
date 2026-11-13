@@ -47,7 +47,9 @@ export function createTaskJobStore({
       ...(job.result !== undefined ? { result: job.result } : {}),
       ...(job.error !== undefined ? { error: job.error } : {}),
       ...(job.status !== undefined ? { status: job.status } : {}),
-      ...(job.retryAfter !== undefined ? { retryAfter: job.retryAfter } : {})
+      ...(job.retryAfter !== undefined ? { retryAfter: job.retryAfter } : {}),
+      ...(job.fallbackFrom !== undefined ? { fallbackFrom: job.fallbackFrom } : {}),
+      ...(job.fallbackReason !== undefined ? { fallbackReason: job.fallbackReason } : {})
     }
   }
 
@@ -107,6 +109,19 @@ export function createTaskJobStore({
     persist(job)
   }
 
+  // A fallback lane changes the model that is actually serving the job. Keep
+  // the job row honest about who ran it and why it moved, without losing the
+  // original request's identity.
+  function retarget(job, target = {}) {
+    if (typeof target.model === 'string' && target.model) job.model = target.model
+    if (typeof target.backend === 'string' && target.backend) job.backend = target.backend
+    if (typeof target.fallbackFrom === 'string') job.fallbackFrom = target.fallbackFrom
+    if (typeof target.fallbackReason === 'string') {
+      job.fallbackReason = target.fallbackReason
+    }
+    persist(job)
+  }
+
   function submit({ model, backend, title, taskId, runner }) {
     const id = `job-${nextId++}`
     const controller = new AbortController()
@@ -134,8 +149,10 @@ export function createTaskJobStore({
       persist(job)
       try {
         const result = await runner({
+          id,
           signal: controller.signal,
-          onPhase: (phase) => setPhase(job, phase)
+          onPhase: (phase) => setPhase(job, phase),
+          retarget: (target) => retarget(job, target)
         })
         if (job.cancelRequested) {
           job.state = 'cancelled'

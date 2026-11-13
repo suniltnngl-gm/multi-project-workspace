@@ -12,6 +12,7 @@ import { createAdaptiveCpuLimit } from './adaptiveCpuLimit.js'
 import { createModelRegistry, modelQuotaProfiles } from './modelRegistry.js'
 import { createModelScheduler } from './modelScheduler.js'
 import { createModelClient } from './modelClient.js'
+import { parseFallbackChain } from './modelFallback.js'
 import { createTaskJobStore } from './taskJobStore.js'
 import { createModelMetrics } from './modelMetrics.js'
 import { createModelBudget } from './modelBudget.js'
@@ -44,6 +45,10 @@ const LOCAL_AI_MAX_DISK_BUSY_PERCENT = Number(process.env.LOCAL_AI_MAX_DISK_BUSY
 const LOCAL_AI_TURN_COOLDOWN_MS = Number(process.env.LOCAL_AI_TURN_COOLDOWN_MS ?? 15000)
 const LOCAL_AI_URL = (process.env.LOCAL_AI_URL ?? 'http://127.0.0.1:8080').replace(/\/+$/, '')
 const LOCAL_AI_API_KEY = process.env.LOCAL_AI_API_KEY ?? ''
+const AI_FALLBACK_CHAIN = parseFallbackChain(process.env.AI_FALLBACK_CHAIN ?? '')
+const AI_FALLBACK_ALLOW_SESSIONS = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.AI_FALLBACK_ALLOW_SESSIONS ?? 'false').toLowerCase()
+)
 
 if (!Number.isFinite(LOCAL_AI_MIN_LOAD) || LOCAL_AI_MIN_LOAD < 0) {
   throw new Error('LOCAL_AI_MIN_LOAD must be a non-negative number.')
@@ -85,6 +90,8 @@ export function createApp(database, {
   opencodeRosterCache,
   taskWorktrees,
   mcpDiscovery,
+  fallbackChain = AI_FALLBACK_CHAIN,
+  fallbackAllowSessions = AI_FALLBACK_ALLOW_SESSIONS,
   turnCooldownMs = LOCAL_AI_TURN_COOLDOWN_MS
 } = {}) {
   const app = express()
@@ -181,7 +188,16 @@ export function createApp(database, {
   app.use(createTasksRouter({ database, jobStore, getTaskWorktrees }))
   app.use(createProposalsRouter({ database }))
   app.use(createModelsRouter({ models, modelMetrics, modelBudget, scheduler, opencodeRosterCache }))
-  app.use(createAiDraftsRouter({ database, jobStore, scheduler, modelClient, modelMetrics, modelBudget }))
+  app.use(createAiDraftsRouter({
+    database,
+    jobStore,
+    scheduler,
+    modelClient,
+    modelMetrics,
+    modelBudget,
+    fallbackChain,
+    fallbackAllowSessions
+  }))
   app.use(createRepositoriesRouter({ database, repositoryScope }))
   app.use(createFilesRouter({ database, repositoryScope }))
   app.use(createFoldersRouter({ database, repositoryScope }))

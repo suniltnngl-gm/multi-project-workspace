@@ -790,6 +790,12 @@ export function runMigrations(connection, { rootDir } = {}) {
   if (!jobColumns.has('agent_id')) {
     connection.exec('ALTER TABLE ai_jobs ADD COLUMN agent_id TEXT')
   }
+  if (!jobColumns.has('fallback_from')) {
+    connection.exec('ALTER TABLE ai_jobs ADD COLUMN fallback_from TEXT')
+  }
+  if (!jobColumns.has('fallback_reason')) {
+    connection.exec('ALTER TABLE ai_jobs ADD COLUMN fallback_reason TEXT')
+  }
   const proposalColumns = new Set(
     connection.prepare('PRAGMA table_info(task_proposals)').all().map((column) => column.name)
   )
