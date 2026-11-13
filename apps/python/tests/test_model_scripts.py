@@ -89,8 +89,8 @@ class ModelScriptTests(unittest.TestCase):
         self.assertIn("project", str(caught.exception))
         self.assertIn("task_type", str(caught.exception))
 
-    def test_kaggle_timeout_attempts_to_cancel_the_kernel(self):
-        module = load_module("kaggle_run_timeout_cancel", KAGGLE_PATH)
+    def test_kaggle_timeout_preserves_the_kernel_for_resume(self):
+        module = load_module("kaggle_run_timeout_resume", KAGGLE_PATH)
         task = {
             "title": "Draft a task",
             "project": "workspace",
@@ -111,6 +111,7 @@ class ModelScriptTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "response.json"
+            manifests = Path(directory) / "manifests"
             with mock.patch.object(
                 module, "run_kaggle", side_effect=fake_run_kaggle
             ), mock.patch.object(
@@ -119,11 +120,19 @@ class ModelScriptTests(unittest.TestCase):
                 module.shutil, "which", return_value="/usr/bin/kaggle"
             ):
                 with self.assertRaises(TimeoutError):
-                    module.execute(task, output, 0, 1, "delete")
+                    module.execute(task, output, 0, 1, "delete", manifests)
 
-        self.assertEqual(
-            cancelled, [("edmundrosariosunil/kaggle-qwen-coder", "delete")]
-        )
+            # A timed-out kernel may still finish. Keep it and its manifest so
+            # the next call can poll/download instead of resubmitting.
+            self.assertEqual(cancelled, [])
+            self.assertFalse(output.exists())
+            manifest_files = list(manifests.glob("kaggle-*.json"))
+            self.assertEqual(len(manifest_files), 1)
+            manifest = json.loads(manifest_files[0].read_text(encoding="utf-8"))
+            self.assertEqual(manifest["phase"], "running")
+            self.assertEqual(
+                manifest["kernelId"], "edmundrosariosunil/kaggle-qwen-coder"
+            )
 
     def test_kaggle_success_does_not_cancel_the_kernel(self):
         module = load_module("kaggle_run_success", KAGGLE_PATH)
@@ -290,6 +299,70 @@ class ModelScriptTests(unittest.TestCase):
             r"response\.json$",
         )
         self.assertEqual(download_timeout, 180)
+        self.assertEqual(cancelled, [])
+
+    def test_execute_resumes_an_existing_kernel_without_push(self):
+        module = load_module("kaggle_run_resume", KAGGLE_PATH)
+        recorder, cancelled, _ = self._execute_with_fake_kaggle(
+            module,
+            iter(["KernelWorkerStatus.COMPLETE"]),
+            lambda output_dir: (output_dir / "response.json").write_text(
+                valid_response(), encoding="utf-8"
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            manifests = Path(directory) / "manifests"
+            task = sample_task()
+            fingerprint = module.job_manifest.task_fingerprint(task)
+            module.job_manifest.save_manifest(
+                module.job_manifest.manifest_path(manifests, fingerprint),
+                {
+                    "taskHash": fingerprint,
+                    "kernelId": "owner/existing-kernel",
+                    "phase": "running",
+                },
+            )
+            output = Path(directory) / "response.json"
+            module.execute(task, output, 30, 1, "none", manifests)
+
+            self.assertEqual(
+                json.loads(output.read_text(encoding="utf-8")),
+                {"description": "draft", "acceptance_criteria": "done"},
+            )
+
+        # Resume polling and download; do not spend another submission.
+        self.assertEqual(
+            [command[2] for command, _ in recorder], ["status", "output"]
+        )
+        self.assertEqual(cancelled, [])
+
+    def test_execute_reuses_a_completed_download_for_the_same_task(self):
+        module = load_module("kaggle_run_reuse", KAGGLE_PATH)
+        recorder, cancelled, _ = self._execute_with_fake_kaggle(
+            module,
+            iter(["KernelWorkerStatus.COMPLETE"]),
+            lambda output_dir: (output_dir / "response.json").write_text(
+                valid_response(), encoding="utf-8"
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            manifests = Path(directory) / "manifests"
+            output = Path(directory) / "response.json"
+            module.execute(sample_task(), output, 30, 1, "none", manifests)
+            self.assertEqual(len(recorder), 3)
+
+            output.unlink()
+            module.execute(sample_task(), output, 30, 1, "none", manifests)
+
+            self.assertEqual(
+                json.loads(output.read_text(encoding="utf-8")),
+                {"description": "draft", "acceptance_criteria": "done"},
+            )
+
+        # The second call is served from the content-addressed response copy.
+        self.assertEqual(len(recorder), 3)
         self.assertEqual(cancelled, [])
 
     def test_execute_requires_the_kaggle_cli(self):

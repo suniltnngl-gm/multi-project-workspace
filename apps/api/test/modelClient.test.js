@@ -430,12 +430,37 @@ test('Kaggle writes the task, runs the batch runner, and reads its response', as
   assert.equal(invocation.args[invocation.args.indexOf('--timeout') + 1], '3600')
   assert.equal(invocation.args[invocation.args.indexOf('--poll-interval') + 1], '30')
   assert.equal(invocation.args[invocation.args.indexOf('--cancel-fallback') + 1], 'none')
+  assert.equal(invocation.args.includes('--manifest-dir'), false)
   assert.equal(invocation.options.timeoutMs, 3600000 + 120000)
   assert.deepEqual(taskContent, REQUEST.task)
   assert.deepEqual(JSON.parse(result), {
     description: 'Kaggle draft',
     acceptance_criteria: 'Kaggle criteria'
   })
+})
+
+test('Kaggle passes the resume manifest directory when configured', async () => {
+  let invocation
+  const runCommand = async (command, args) => {
+    invocation = { command, args }
+    await writeFile(
+      args[args.indexOf('--output') + 1],
+      JSON.stringify({ description: 'draft', acceptance_criteria: 'done' }),
+      'utf8'
+    )
+    return { stdout: '', stderr: '' }
+  }
+
+  const client = createClient({ runCommand, scriptsDir: SCRIPTS })
+  const model = kaggleModel({
+    cli: { ...kaggleModel().cli, manifestDir: '/tmp/workspace-kaggle-runs' }
+  })
+  await client.complete(model, REQUEST)
+
+  assert.equal(
+    invocation.args[invocation.args.indexOf('--manifest-dir') + 1],
+    '/tmp/workspace-kaggle-runs'
+  )
 })
 
 test('Kaggle rejects requests without task fields and invalid outputs', async () => {

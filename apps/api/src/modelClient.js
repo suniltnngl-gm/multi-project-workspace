@@ -639,15 +639,24 @@ export function createModelClient({
       await writeFile(taskPath, JSON.stringify(request.task), 'utf8')
 
       const timeoutMs = model.timeoutMs ?? DEFAULT_KAGGLE_TIMEOUT_MS
-      reportPhase(request, 'submitting')
-      await runCommand(model.cli.python, [
+      const args = [
         join(scriptsDir, 'kaggle_run.py'),
         '--task-json', taskPath,
         '--output', outputPath,
         '--timeout', String(Math.max(60, Math.floor(timeoutMs / 1000))),
         '--poll-interval', String(Math.max(1, model.cli.pollIntervalSeconds ?? 30)),
         '--cancel-fallback', model.cli.cancelFallback ?? 'none'
-      ], { timeoutMs: timeoutMs + 120000, signal: request.signal })
+      ]
+      // A manifest lets a re-queued call resume the existing kernel or reuse
+      // its downloaded response instead of spending another submission.
+      if (model.cli.manifestDir) {
+        args.push('--manifest-dir', model.cli.manifestDir)
+      }
+      reportPhase(request, 'submitting')
+      await runCommand(model.cli.python, args, {
+        timeoutMs: timeoutMs + 120000,
+        signal: request.signal
+      })
 
       reportPhase(request, 'generating')
       const parsed = JSON.parse(await readFile(outputPath, 'utf8'))

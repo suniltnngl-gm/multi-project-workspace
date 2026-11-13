@@ -12,6 +12,12 @@ import tempfile
 import time
 from pathlib import Path
 
+try:  # Imported as scripts.kaggle_run in tests.
+    from . import job_manifest
+except ImportError:  # Executed directly or loaded by file path.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import job_manifest
+
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 NOTEBOOK_PATH = ROOT_DIR / "notebooks" / "kaggle-qwen-coder.ipynb"
@@ -185,15 +191,86 @@ def validate_response(response_path):
     return response
 
 
-def execute(task, output_path, timeout_seconds, poll_interval, cancel_fallback="none"):
+def save_resume_state(manifest_file, manifest, **updates):
+    """Persist resume metadata; a read-only state dir must not break inference."""
+    merged = {**(manifest or {}), **updates}
+    if manifest_file is None:
+        return merged
+    try:
+        job_manifest.save_manifest(manifest_file, merged)
+    except OSError as error:
+        print(
+            f"Warning: could not write the Kaggle manifest {manifest_file}: {error}",
+            file=sys.stderr,
+        )
+    return merged
+
+
+def load_resume_state(manifest_file, fingerprint):
+    manifest = job_manifest.load_manifest(manifest_file)
+    if not manifest or manifest.get("taskHash") != fingerprint:
+        return None
+    return manifest
+
+
+def reuse_completed_manifest(manifest, artifact_file, output_path):
+    """Serve a previously downloaded response without touching Kaggle."""
+    if (
+        not manifest
+        or manifest.get("phase") not in ("downloaded", "done")
+        or artifact_file is None
+    ):
+        return False
+    if not artifact_file.exists():
+        return False
+    digest = job_manifest.output_sha256(artifact_file)
+    if digest != manifest.get("outputSha256"):
+        return False
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(artifact_file, output_path)
+    print("Reusing the completed Kaggle result for this task.", flush=True)
+    print(artifact_file.read_text(encoding="utf-8").strip(), flush=True)
+    return True
+
+
+def execute(
+    task,
+    output_path,
+    timeout_seconds,
+    poll_interval,
+    cancel_fallback="none",
+    manifest_dir=None,
+):
     if shutil.which("kaggle") is None:
         raise FileNotFoundError(
             "Kaggle CLI is required. Install it and configure your Kaggle API credentials."
         )
 
+    fingerprint = job_manifest.task_fingerprint(task)
+    manifest_file = (
+        job_manifest.manifest_path(manifest_dir, fingerprint)
+        if manifest_dir is not None
+        else None
+    )
+    artifact_file = (
+        job_manifest.artifact_path(manifest_dir, fingerprint)
+        if manifest_dir is not None
+        else None
+    )
+    manifest = load_resume_state(manifest_file, fingerprint)
+    if reuse_completed_manifest(manifest, artifact_file, output_path):
+        return
+
+    phase = manifest.get("phase") if manifest else None
+    kernel_id = (
+        manifest.get("kernelId")
+        if phase in ("submitted", "running", "complete")
+        else None
+    )
+
     with tempfile.TemporaryDirectory(prefix="kaggle-qwen-run-") as temporary_dir:
-        kernel_id, _ = prepare_run_directory(task, Path(temporary_dir))
-        try:
+        if not kernel_id:
+            kernel_id, _ = prepare_run_directory(task, Path(temporary_dir))
             print(f"Submitting one private Kaggle notebook run: {kernel_id}", flush=True)
             print(
                 run_kaggle(
@@ -202,7 +279,36 @@ def execute(task, output_path, timeout_seconds, poll_interval, cancel_fallback="
                 ),
                 flush=True,
             )
-            wait_for_completion(kernel_id, timeout_seconds, poll_interval)
+            manifest = save_resume_state(
+                manifest_file,
+                None,
+                taskHash=fingerprint,
+                kernelId=kernel_id,
+                phase="submitted",
+            )
+            phase = "submitted"
+        else:
+            # The kernel already exists: polling and downloading are free of
+            # submission quota, so resume instead of pushing a duplicate.
+            print(f"Resuming Kaggle kernel {kernel_id} from phase {phase}.", flush=True)
+
+        try:
+            if phase != "complete":
+                manifest = save_resume_state(
+                    manifest_file,
+                    manifest,
+                    taskHash=fingerprint,
+                    kernelId=kernel_id,
+                    phase="running",
+                )
+                wait_for_completion(kernel_id, timeout_seconds, poll_interval)
+                manifest = save_resume_state(
+                    manifest_file,
+                    manifest,
+                    taskHash=fingerprint,
+                    kernelId=kernel_id,
+                    phase="complete",
+                )
 
             with tempfile.TemporaryDirectory(prefix="kaggle-qwen-output-") as output_dir:
                 print("Downloading completed notebook output.", flush=True)
@@ -229,9 +335,41 @@ def execute(task, output_path, timeout_seconds, poll_interval, cancel_fallback="
                         f"found {response_files}."
                     )
                 response = validate_response(response_files[0])
+                digest = job_manifest.output_sha256(response_files[0])
+                if artifact_file is not None:
+                    try:
+                        artifact_file.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(response_files[0], artifact_file)
+                    except OSError as error:
+                        print(
+                            "Warning: could not save the Kaggle response copy: "
+                            f"{error}",
+                            file=sys.stderr,
+                        )
+                manifest = save_resume_state(
+                    manifest_file,
+                    manifest,
+                    taskHash=fingerprint,
+                    kernelId=kernel_id,
+                    phase="downloaded",
+                    outputSha256=digest,
+                )
+        except TimeoutError:
+            # A timed-out kernel may still finish after this process exits.
+            # Keep it and the manifest so the next run resumes polling instead
+            # of spending another submission.
+            save_resume_state(
+                manifest_file,
+                manifest,
+                taskHash=fingerprint,
+                kernelId=kernel_id,
+                phase="running",
+            )
+            raise
         except BaseException:
-            # A timed-out or interrupted runner must not leave the kernel
-            # consuming queue space or GPU time.
+            # Any other failure (kernel error, bad payload) is not resumable;
+            # forget the manifest and clean up the kernel.
+            job_manifest.clear_manifest(manifest_file)
             cancel_kernel(kernel_id, cancel_fallback)
             raise
 
@@ -239,6 +377,26 @@ def execute(task, output_path, timeout_seconds, poll_interval, cancel_fallback="
     output_path.write_text(
         json.dumps(response, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
+    )
+    if artifact_file is not None:
+        # Store the normalized response as the reusable copy. The manifest hash
+        # and the artifact must describe the same bytes or reuse would reject a
+        # valid result.
+        try:
+            artifact_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(output_path, artifact_file)
+        except OSError as error:
+            print(
+                f"Warning: could not save the Kaggle response copy: {error}",
+                file=sys.stderr,
+            )
+    save_resume_state(
+        manifest_file,
+        manifest,
+        taskHash=fingerprint,
+        kernelId=kernel_id,
+        phase="done",
+        outputSha256=job_manifest.output_sha256(output_path),
     )
     print(json.dumps(response, ensure_ascii=False, indent=2))
 
@@ -287,6 +445,20 @@ def parse_arguments(argv=None):
             "private kernel if the CLI has no cancel command (default: none)"
         ),
     )
+    parser.add_argument(
+        "--manifest-dir",
+        type=Path,
+        default=(
+            Path(os.environ["KAGGLE_AI_MANIFEST_DIR"])
+            if os.environ.get("KAGGLE_AI_MANIFEST_DIR")
+            else None
+        ),
+        help=(
+            "Directory for resumable run manifests and downloaded responses. "
+            "When omitted, each run submits a new kernel and does not resume "
+            "(default: $KAGGLE_AI_MANIFEST_DIR or none)"
+        ),
+    )
     arguments = parser.parse_args(argv)
     if arguments.timeout < 1 or arguments.poll_interval < 1:
         parser.error("--timeout and --poll-interval must be positive integers")
@@ -312,6 +484,7 @@ def main(argv=None):
             arguments.timeout,
             arguments.poll_interval,
             arguments.cancel_fallback,
+            arguments.manifest_dir,
         )
     except KeyboardInterrupt:
         print("Kaggle inference cancelled.", file=sys.stderr)
