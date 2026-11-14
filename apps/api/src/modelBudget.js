@@ -292,8 +292,9 @@ export function resolveQuotaTarget(configs, id, scope) {
   }
 
   // Google AI Studio / Gemini API keys on OpenCode (console-google/*) share
-  // RPM/TPM/RPD per Google Cloud project rather than per model/key and reset
-  // daily RPD at midnight US Pacific Time (America/Los_Angeles).
+  // project concurrency (opencode:console-google) while enforcing RPM/TPM/RPD
+  // and 429 cooldowns independently per (project, model), resetting daily RPD
+  // at midnight US Pacific Time (America/Los_Angeles).
   if (id === 'opencode' && isConsoleGoogleScope(scope)) {
     const exactKey = `opencode@${scope}`
     if (configs?.has(exactKey)) {
@@ -308,7 +309,7 @@ export function resolveQuotaTarget(configs, id, scope) {
           : entry
       ))
     }
-    return { ledgerId: poolKey, limits, pool: 'console-google' }
+    return { ledgerId: exactKey, limits, pool: 'console-google' }
   }
 
   const ledgerId = scope ? `${id}@${scope}` : id

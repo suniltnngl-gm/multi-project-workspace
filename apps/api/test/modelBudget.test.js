@@ -705,7 +705,7 @@ test('AGY dual 5-hour session and weekly limits keep harvestableSession and pers
   }
 })
 
-test('opencode console-google shares one GCP project pool, stays isolated from agy, and resets at Pacific midnight', () => {
+test('opencode console-google isolates per-model RPD/429 counters, stays separate from agy, and resets at Pacific midnight', () => {
   // Winter PST is UTC-8: 2026-01-14T23:55:00Z is 15:55 PST on Jan 14.
   const clock = clockAt('2026-01-14T23:55:00Z')
   const budget = createModelBudget({
@@ -718,22 +718,25 @@ test('opencode console-google shares one GCP project pool, stays isolated from a
   })
 
   budget.record('opencode', 1, 'console-google/gemini-3.8-flash')
-  assert.equal(budget.snapshot('opencode', 'console-google/gemini-2.5-flash').used, 1)
+  assert.equal(budget.snapshot('opencode', 'console-google/gemini-3.8-flash').used, 1)
+  assert.equal(budget.snapshot('opencode', 'console-google/gemini-3.5-flash-lite').used, 0)
   assert.equal(budget.snapshot('agy', 'gemini-3.8-flash-medium').used, 0)
 
-  // Live 429 on one console-google model also protects sibling models in the same GCP project,
-  // and daily/429 buckets ignore UTC midnight (00:05Z = 16:05 PST) until PT midnight (08:00Z).
+  // Live 429 or exhausted RPD on one console-google model leaves lighter Flash-Lite sibling
+  // headroom intact in the same GCP project, while blocked models wait until PT midnight (08:00Z)
+  // rather than UTC midnight (00:05Z).
   budget.observe429('opencode', { scope: 'console-google/gemini-3.8-flash', retryAfter: 30 })
-  budget.record('opencode', 1, 'console-google/gemini-2.5-flash')
+  budget.record('opencode', 1, 'console-google/gemini-3.8-flash')
   assert.equal(budget.check('opencode', 'console-google/gemini-3.8-flash').ok, false)
+  assert.equal(budget.check('opencode', 'console-google/gemini-3.5-flash-lite').ok, true)
 
   clock.set('2026-01-15T00:05:00Z') // Past UTC midnight, still Jan 14 in America/Los_Angeles
-  assert.equal(budget.check('opencode', 'console-google/gemini-2.5-flash').ok, false)
+  assert.equal(budget.check('opencode', 'console-google/gemini-3.8-flash').ok, false)
 
   clock.set('2026-01-15T07:59:00Z') // 23:59 PST on Jan 14
-  assert.equal(budget.check('opencode', 'console-google/gemini-2.5-flash').ok, false)
+  assert.equal(budget.check('opencode', 'console-google/gemini-3.8-flash').ok, false)
 
   clock.set('2026-01-15T08:01:00Z') // 00:01 PST on Jan 15 -> daily RPD & learned 429 reset
-  assert.equal(budget.check('opencode', 'console-google/gemini-2.5-flash').ok, true)
+  assert.equal(budget.check('opencode', 'console-google/gemini-3.8-flash').ok, true)
   assert.equal(budget.snapshot('opencode', 'console-google/gemini-3.8-flash').used, 0)
 })
