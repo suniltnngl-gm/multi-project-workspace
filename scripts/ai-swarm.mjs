@@ -24,6 +24,7 @@ const VALUE_OPTIONS = new Set([
   '--opencode-models',
   '--agy-models',
   '--gemini-api-models',
+  '--gemini-api-paid-models',
   '--task',
   '--parent-mode',
   '--review-rounds',
@@ -38,6 +39,7 @@ const VALUE_OPTIONS = new Set([
 
 const FLAG_OPTIONS = new Set([
   '--no-reviewer',
+  '--allow-paid',
   '--complete-task',
   '--self-improve',
   '--no-self-improve',
@@ -134,6 +136,14 @@ function buildPlanOptions(objective, options) {
     planOptions.geminiApiModels = splitCsv(options['--gemini-api-models'])
   } else if (process.env.GEMINI_API_MODELS) {
     planOptions.geminiApiModels = splitCsv(process.env.GEMINI_API_MODELS)
+  }
+  if (options['--gemini-api-paid-models']) {
+    planOptions.geminiApiPaidModels = splitCsv(options['--gemini-api-paid-models'])
+  }
+  if (options['--allow-paid']) {
+    planOptions.allowPaidEscalation = true
+  } else if (process.env.GEMINI_API_PAID_ALLOW_SWARM_ESCALATION === 'true') {
+    planOptions.allowPaidEscalation = true
   }
   if (options['--no-reviewer']) {
     planOptions.includeReviewer = false

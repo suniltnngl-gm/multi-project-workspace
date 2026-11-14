@@ -1617,3 +1617,95 @@ Credentials:
     else process.env.GEMINI_API_KEY = prevEnvKey
   }
 })
+
+test('gemini-api-paid allows gemini-4-argon, injects XDG_CONFIG_HOME and --user-project, and strips GEMINI_API_KEY', async () => {
+  const calls = []
+  const prevEnvKey = process.env.GEMINI_API_KEY
+  process.env.GEMINI_API_KEY = 'should-not-leak-into-paid-cli'
+
+  try {
+    const client = createClient({
+      runCommand: async (command, args, options) => {
+        calls.push({
+          command,
+          args,
+          envHasGeminiApiKey: 'GEMINI_API_KEY' in (options?.env ?? {}),
+          xdgConfigHome: options?.env?.XDG_CONFIG_HOME
+        })
+        if (args[0] === 'whoami') {
+          return {
+            stdout: '  --api-key                   [keyring] Paid******Key\n',
+            stderr: ''
+          }
+        }
+        return {
+          stdout: JSON.stringify({
+            id: 'v1_paid_1',
+            status: 'completed',
+            steps: [{ type: 'model_output', content: [{ type: 'text', text: 'PAID_OK' }] }],
+            usage: { total_input_tokens: 10, total_output_tokens: 5, total_thought_tokens: 20, total_tokens: 35 }
+          }),
+          stderr: ''
+        }
+      }
+    })
+
+    const freeModel = {
+      id: 'gemini-api',
+      label: 'Gemini API CLI',
+      backend: 'gemini-api-cli',
+      remote: true,
+      timeoutMs: 30000,
+      cli: {
+        command: 'gemini-api',
+        probeArgs: ['whoami'],
+        model: 'gemini-3.8-flash'
+      }
+    }
+
+    const paidModel = {
+      id: 'gemini-api-paid',
+      label: 'Gemini API CLI (Prepay Tier-1)',
+      provider: 'gemini-api-paid',
+      backend: 'gemini-api-cli',
+      remote: true,
+      allowProModels: true,
+      escalationOnly: true,
+      timeoutMs: 30000,
+      cli: {
+        command: 'gemini-api',
+        userProject: 'prepay-gcp-proj',
+        configHome: '/tmp/prepay-xdg-config',
+        probeArgs: ['whoami', '--user-project', 'prepay-gcp-proj'],
+        model: 'gemini-4-argon',
+        allowProModels: true
+      }
+    }
+
+    const freeProbe = await client.probe(freeModel)
+    const paidProbe = await client.probe(paidModel)
+    assert.deepEqual(freeProbe, { ok: true, source: 'keyring' })
+    assert.deepEqual(paidProbe, { ok: true, source: 'keyring' })
+    assert.equal(calls.length, 2)
+    assert.equal(calls[0].xdgConfigHome, process.env.XDG_CONFIG_HOME)
+    assert.equal(calls[1].xdgConfigHome, '/tmp/prepay-xdg-config')
+    assert.deepEqual(calls[1].args, ['whoami', '--user-project', 'prepay-gcp-proj'])
+
+    const usages = []
+    const reply = await client.complete(paidModel, {
+      messages: [{ role: 'user', content: 'Analyze race condition' }],
+      onUsage: (u) => usages.push(u)
+    })
+    assert.equal(reply, 'PAID_OK')
+    assert.equal(calls[2].envHasGeminiApiKey, false)
+    assert.equal(calls[2].xdgConfigHome, '/tmp/prepay-xdg-config')
+    assert.ok(calls[2].args.includes('--model'))
+    assert.equal(calls[2].args[calls[2].args.indexOf('--model') + 1], 'gemini-4-argon')
+    assert.ok(calls[2].args.includes('--user-project'))
+    assert.equal(calls[2].args[calls[2].args.indexOf('--user-project') + 1], 'prepay-gcp-proj')
+    assert.deepEqual(usages[0], { promptTokens: 10, completionTokens: 25, totalTokens: 35 })
+  } finally {
+    if (prevEnvKey === undefined) delete process.env.GEMINI_API_KEY
+    else process.env.GEMINI_API_KEY = prevEnvKey
+  }
+})

@@ -1019,3 +1019,36 @@ test('provider headroom groups models by quota domain without calling them', asy
     assert.equal(colab.billingCategory, 'subscription')
   })
 })
+
+test('createModelRegistry keeps gemini-api-paid dormant by default and enables escalationOnly prepay config on opt-in', () => {
+  const defaultModels = createModelRegistry({ env: {} })
+  assert.equal(defaultModels.some((entry) => entry.id === 'gemini-api-paid'), false)
+
+  const disabledModels = createModelRegistry({
+    env: {
+      GEMINI_API_PAID_ENABLED: 'false',
+      GEMINI_API_PAID_USER_PROJECT: 'prepay-gcp-1',
+      GEMINI_API_PAID_PREPAY_BALANCE_USD: '5'
+    }
+  })
+  assert.equal(disabledModels.some((entry) => entry.id === 'gemini-api-paid'), false)
+
+  const paidModels = createModelRegistry({
+    env: {
+      GEMINI_API_PAID_USER_PROJECT: 'prepay-gcp-1',
+      GEMINI_API_PAID_CONFIG_HOME: '/tmp/gemini-paid-config',
+      GEMINI_API_PAID_PREPAY_BALANCE_USD: '5'
+    }
+  })
+  const paid = paidModels.find((entry) => entry.id === 'gemini-api-paid')
+  assert.ok(paid)
+  assert.equal(paid.provider, 'gemini-api-paid')
+  assert.equal(paid.backend, 'gemini-api-cli')
+  assert.equal(paid.billingCategory, 'payg')
+  assert.equal(paid.escalationOnly, true)
+  assert.equal(paid.allowProModels, true)
+  assert.equal(paid.autoSelect, false)
+  assert.equal(paid.cli.userProject, 'prepay-gcp-1')
+  assert.equal(paid.cli.configHome, '/tmp/gemini-paid-config')
+  assert.deepEqual(paid.cli.probeArgs, ['whoami', '--user-project', 'prepay-gcp-1'])
+})

@@ -30,7 +30,7 @@ const DAY = 24 * HOUR
 const WEEK = 7 * DAY
 const RETENTION_MS = 400 * DAY
 const WINDOW_MS = { second: 1000, minute: MINUTE, hour: HOUR, day: DAY, week: WEEK }
-const UNIT_NAMES = new Set(['requests', 'tokens', 'compute_seconds'])
+const UNIT_NAMES = new Set(['requests', 'tokens', 'compute_seconds', 'usd_micros'])
 const WINDOW_NAMES = new Set([
   'second', 'minute', 'hour', 'session', 'day', 'week', 'month', 'none'
 ])
@@ -171,7 +171,15 @@ function normalizeLimits(id, raw) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
       throw new Error(`Quota limiter ${index} for ${id} must be an object.`)
     }
-    const unit = entry.unit ?? 'requests'
+    let unit = entry.unit ?? 'requests'
+    let rawLimit = entry.limit
+    if (unit === 'usd') {
+      unit = 'usd_micros'
+      const parsedUsd = Number(rawLimit)
+      rawLimit = Number.isFinite(parsedUsd) && parsedUsd >= 0
+        ? Math.round(parsedUsd * 1_000_000)
+        : NaN
+    }
     if (!UNIT_NAMES.has(unit)) {
       throw new Error(`Quota limiter ${index} for ${id} has an unknown unit.`)
     }
@@ -193,7 +201,7 @@ function normalizeLimits(id, raw) {
         `Quota limiter ${index} for ${id} needs a window unless it is a pool.`
       )
     }
-    const limit = readCount(entry.limit)
+    const limit = readCount(rawLimit)
     if (limit === null) {
       throw new Error(`Quota limiter ${index} for ${id} needs a non-negative numeric limit.`)
     }
@@ -274,6 +282,57 @@ export function isConsoleGoogleScope(scope) {
   return scope === 'console-google' || (typeof scope === 'string' && scope.startsWith('console-google/'))
 }
 
+function readPositiveFloat(env, key) {
+  const value = env[key]
+  if (value === undefined || value === '') return null
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${key} must be a non-negative number.`)
+  }
+  return parsed
+}
+
+/**
+ * Estimate USD microdollars ($1 = 1,000,000 micros) for Paid Tier-1 Gemini
+ * calls so `modelBudget` trips a deterministic local spend circuit-breaker
+ * ahead of upstream Cloud Billing reporting latency. `completionTokens` from
+ * `modelClient` already includes `total_thought_tokens`.
+ */
+export function estimateGeminiPaidCostMicros(usage, scope = '', env = process.env) {
+  if (!usage || typeof usage !== 'object') return 0
+  const explicitUsd = Number(usage.costUsd ?? usage.estimatedUsd)
+  if (Number.isFinite(explicitUsd) && explicitUsd >= 0) {
+    return Math.round(explicitUsd * 1_000_000)
+  }
+  const prompt = Math.max(0, Number(usage.promptTokens ?? usage.prompt_tokens ?? 0) || 0)
+  const completion = Math.max(0, Number(usage.completionTokens ?? usage.completion_tokens ?? 0) || 0)
+  const total = Math.max(0, Number(usage.totalTokens ?? usage.total_tokens ?? 0) || 0)
+  const effectivePrompt = prompt > 0 ? prompt : 0
+  const effectiveCompletion = completion > 0
+    ? completion
+    : Math.max(0, total - effectivePrompt)
+  if (effectivePrompt + effectiveCompletion <= 0) return 0
+
+  const normalizedScope = String(scope || '').toLowerCase()
+  const isHighTier = normalizedScope.includes('argon') || normalizedScope.includes('pro')
+  const defaultInputPer1M = isHighTier ? 2.0 : 0.5
+  const defaultOutputPer1M = isHighTier ? 12.0 : 3.0
+
+  const rawEnvInput = env?.GEMINI_API_PAID_INPUT_USD_PER_1M_TOKENS
+  const envInput = Number(rawEnvInput)
+  const inputPer1M = rawEnvInput !== undefined && rawEnvInput !== '' && Number.isFinite(envInput) && envInput >= 0
+    ? envInput
+    : defaultInputPer1M
+
+  const rawEnvOutput = env?.GEMINI_API_PAID_OUTPUT_USD_PER_1M_TOKENS
+  const envOutput = Number(rawEnvOutput)
+  const outputPer1M = rawEnvOutput !== undefined && rawEnvOutput !== '' && Number.isFinite(envOutput) && envOutput >= 0
+    ? envOutput
+    : defaultOutputPer1M
+
+  return Math.max(1, Math.ceil(effectivePrompt * inputPer1M + effectiveCompletion * outputPer1M))
+}
+
 export function resolveQuotaTarget(configs, id, scope) {
   if (id === 'agy' && scope) {
     const exactKey = `agy@${scope}`
@@ -325,6 +384,22 @@ export function resolveQuotaTarget(configs, id, scope) {
       ))
     }
     return { ledgerId, limits, pool: 'gcp-project' }
+  }
+
+  // Opt-in Prepay Tier-1 project (`gemini-api-paid`): rate limits and the
+  // depleting token/USD spend cap share one project-level ledger (`gemini-api-paid`).
+  if (id === 'gemini-api-paid') {
+    const normalizedScope = typeof scope === 'string' ? scope.trim() : ''
+    const exactKey = normalizedScope ? `gemini-api-paid@${normalizedScope}` : 'gemini-api-paid'
+    let limits = (normalizedScope ? configs?.get(exactKey) : null) ?? configs?.get('gemini-api-paid')
+    if (limits) {
+      limits = limits.map((entry) => (
+        entry.window === 'day' && (!entry.timezone || entry.timezone === 'UTC')
+          ? { ...entry, timezone: GOOGLE_API_DEFAULT_TIMEZONE }
+          : entry
+      ))
+    }
+    return { ledgerId: 'gemini-api-paid', limits, pool: 'gcp-project-paid' }
   }
 
   const ledgerId = scope ? `${id}@${scope}` : id
@@ -530,6 +605,72 @@ export function resolveQuotaProfiles({ env = process.env, profiles } = {}) {
     }
   }
 
+  if (!result.has('gemini-api-paid')) {
+    const paidTz = env.GEMINI_API_PAID_TIMEZONE?.trim() || GOOGLE_API_DEFAULT_TIMEZONE
+    const paidLimits = buildComputeAndRequestLimits(env, [
+      {
+        key: 'GEMINI_API_PAID_MAX_REQUESTS_PER_MINUTE',
+        unit: 'requests',
+        window: 'minute',
+        reset: 'rolling',
+        timezoneEnv: 'GEMINI_API_PAID_TIMEZONE',
+        timezone: GOOGLE_API_DEFAULT_TIMEZONE
+      },
+      {
+        key: 'GEMINI_API_PAID_MAX_TOKENS_PER_MINUTE',
+        unit: 'tokens',
+        window: 'minute',
+        reset: 'rolling',
+        timezoneEnv: 'GEMINI_API_PAID_TIMEZONE',
+        timezone: GOOGLE_API_DEFAULT_TIMEZONE
+      },
+      {
+        key: 'GEMINI_API_PAID_MAX_REQUESTS_PER_DAY',
+        unit: 'requests',
+        window: 'day',
+        reset: 'fixed',
+        timezoneEnv: 'GEMINI_API_PAID_TIMEZONE',
+        timezone: GOOGLE_API_DEFAULT_TIMEZONE
+      }
+    ])
+    const maxPaidTokens = readLimit(env, 'GEMINI_API_PAID_MAX_TOKENS')
+    if (maxPaidTokens !== null) {
+      paidLimits.push({
+        id: 'paid:tokens:pool',
+        unit: 'tokens',
+        limit: maxPaidTokens,
+        window: 'none',
+        reset: 'pool',
+        timezone: paidTz
+      })
+    }
+    const explicitMaxUsd = readPositiveFloat(env, 'GEMINI_API_PAID_MAX_USD')
+    const prepayBalanceUsd = readPositiveFloat(env, 'GEMINI_API_PAID_PREPAY_BALANCE_USD')
+    const explicitSafetyRatio = readPositiveFloat(env, 'GEMINI_API_PAID_SAFETY_RATIO')
+    if (explicitSafetyRatio !== null && (explicitSafetyRatio <= 0 || explicitSafetyRatio > 1)) {
+      throw new Error('GEMINI_API_PAID_SAFETY_RATIO must be > 0 and <= 1.')
+    }
+    let effectiveUsdCap = null
+    if (explicitMaxUsd !== null) {
+      effectiveUsdCap = explicitSafetyRatio !== null ? explicitMaxUsd * explicitSafetyRatio : explicitMaxUsd
+    } else if (prepayBalanceUsd !== null) {
+      effectiveUsdCap = prepayBalanceUsd * (explicitSafetyRatio ?? 0.8)
+    }
+    if (effectiveUsdCap !== null) {
+      paidLimits.push({
+        id: 'paid:usd_micros:pool',
+        unit: 'usd_micros',
+        limit: Math.round(effectiveUsdCap * 1_000_000),
+        window: 'none',
+        reset: 'pool',
+        timezone: paidTz
+      })
+    }
+    if (paidLimits.length > 0) {
+      result.set('gemini-api-paid', normalizeLimits('gemini-api-paid', paidLimits))
+    }
+  }
+
   for (const [id, key] of LEGACY_LIMITS) {
     if (result.has(id)) continue
     const limit = readLimit(env, key)
@@ -698,6 +839,10 @@ export function createModelBudget({
     }
     if (observedId === 'gemini-api' || observedId.startsWith('gemini-api@')) {
       const tz = env.GEMINI_API_TIMEZONE?.trim() || GOOGLE_API_DEFAULT_TIMEZONE
+      return { ...OBSERVED_DAY, timezone: tz }
+    }
+    if (observedId === 'gemini-api-paid' || observedId.startsWith('gemini-api-paid@')) {
+      const tz = env.GEMINI_API_PAID_TIMEZONE?.trim() || GOOGLE_API_DEFAULT_TIMEZONE
       return { ...OBSERVED_DAY, timezone: tz }
     }
     return OBSERVED_DAY
@@ -900,6 +1045,7 @@ export function createModelBudget({
       if (limit.unit === 'requests') amount += reservation.calls
       else if (limit.unit === 'tokens') amount += reservation.tokens
       else if (limit.unit === 'compute_seconds') amount += reservation.computeSeconds
+      else if (limit.unit === 'usd_micros') amount += reservation.usdMicros ?? 0
     }
     return amount
   }
@@ -961,6 +1107,13 @@ export function createModelBudget({
         ok: withinLimit(used, limit),
         resetsInSeconds: wait,
         bucket,
+        ...(limit.unit === 'usd_micros'
+          ? {
+            usedUsd: Number((used / 1_000_000).toFixed(6)),
+            limitUsd: Number((limit.limit / 1_000_000).toFixed(6)),
+            remainingUsd: Number((Math.max(0, limit.limit - used) / 1_000_000).toFixed(6))
+          }
+          : {}),
         ...(limit.unit !== 'requests' && supportedUsage !== undefined
           ? { usageSupported: supportedUsage }
           : {})
@@ -1119,6 +1272,16 @@ export function createModelBudget({
         }
         usageSeen.set(observedId, true)
         addAmount(observedId, limit, compute, at)
+        continue
+      }
+      if (limit.unit === 'usd_micros') {
+        const costMicros = estimateGeminiPaidCostMicros(usage, scope, env)
+        if (!Number.isFinite(costMicros) || costMicros <= 0) {
+          usageSeen.set(observedId, false)
+          continue
+        }
+        usageSeen.set(observedId, true)
+        addAmount(observedId, limit, costMicros, at)
       }
     }
   }
@@ -1142,11 +1305,20 @@ export function createModelBudget({
     calls = 1,
     tokens = 0,
     computeSeconds = 0,
+    usdMicros = 0,
+    costUsd = 0,
     ttlMs = 5 * 60 * 1000
   } = {}) {
     const requestedCalls = Number(calls)
     const requestedTokens = Number(tokens)
     const requestedCompute = Number(computeSeconds)
+    const explicitMicros = Number(usdMicros)
+    const explicitCostUsd = Number(costUsd)
+    const resolvedMicros = Number.isFinite(explicitMicros) && explicitMicros > 0
+      ? Math.ceil(explicitMicros)
+      : (Number.isFinite(explicitCostUsd) && explicitCostUsd > 0
+        ? Math.ceil(explicitCostUsd * 1_000_000)
+        : 0)
     const ttl = Number(ttlMs)
     const budget = snapshot(id, scope)
     if (budget && !budget.ok) {
@@ -1169,6 +1341,7 @@ export function createModelBudget({
       computeSeconds: Number.isFinite(requestedCompute) && requestedCompute > 0
         ? requestedCompute
         : 0,
+      usdMicros: resolvedMicros,
       createdAt: at,
       expiresAt: at + (Number.isFinite(ttl)
         ? Math.min(MAX_RESERVATION_TTL_MS, Math.max(MIN_RESERVATION_TTL_MS, ttl))

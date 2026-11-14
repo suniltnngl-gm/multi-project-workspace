@@ -736,3 +736,92 @@ test('gemini-api shares one gemini-api:gcp-project domain alongside agy & openco
   const geminiApiWorker = failoverRoster.workers.find((worker) => worker.groupKey === 'gemini-api:gcp-project')
   assert.equal(geminiApiWorker?.model, 'gemini-api@gemini-3.5-flash-lite')
 })
+
+test('gemini-api-paid is excluded from routine swarms and unlocks only via explicit opt-in or allowPaidEscalation', () => {
+  const budget = createModelBudget({
+    env: {
+      GEMINI_API_MAX_REQUESTS_PER_DAY: '50',
+      OPENCODE_AI_MAX_REQUESTS_PER_DAY: '50',
+      GEMINI_API_PAID_PREPAY_BALANCE_USD: '5',
+      GEMINI_API_PAID_MAX_REQUESTS_PER_DAY: '100'
+    }
+  })
+
+  const models = [
+    model({
+      id: 'gemini-api',
+      provider: 'gemini-api',
+      backend: 'gemini-api-cli',
+      limitKind: 'provider_model',
+      billingCategory: 'free',
+      cli: { command: 'gemini-api', model: 'gemini-3.8-flash' }
+    }),
+    model({
+      id: 'gemini-api-paid',
+      provider: 'gemini-api-paid',
+      backend: 'gemini-api-cli',
+      limitKind: 'provider_model',
+      billingCategory: 'payg',
+      escalationOnly: true,
+      allowProModels: true,
+      cli: { command: 'gemini-api', userProject: 'prepay-gcp', model: 'gemini-4-argon', allowProModels: true }
+    }),
+    model({
+      id: 'opencode',
+      provider: 'opencode',
+      backend: 'opencode-cli',
+      limitKind: 'provider_model',
+      billingCategory: 'free',
+      cli: { command: 'opencode', model: 'opencode/deepseek-v4.1-flash-free' }
+    })
+  ]
+
+  const paidModel = resolveAgentModel(models, 'gemini-api-paid@gemini-4-argon')
+  assert.equal(modelProviderKey(paidModel), 'gemini-api-paid:gcp-project')
+
+  const routineRoster = buildSwarmRoster({
+    models,
+    modelBudget: budget,
+    workerCount: 2,
+    includeReviewer: true
+  })
+  assert.ok(!routineRoster.workers.some((w) => w.provider === 'gemini-api-paid'))
+  assert.notEqual(routineRoster.reviewer?.provider, 'gemini-api-paid')
+
+  const explicitRoster = buildSwarmRoster({
+    models,
+    modelBudget: budget,
+    workerCount: 2,
+    includeReviewer: false,
+    geminiApiPaidModels: ['gemini-4-argon']
+  })
+  const paidWorker = explicitRoster.workers.find((w) => w.provider === 'gemini-api-paid')
+  assert.ok(paidWorker)
+  assert.equal(paidWorker.model, 'gemini-api-paid@gemini-4-argon')
+  assert.equal(paidWorker.groupKey, 'gemini-api-paid:gcp-project')
+
+  // Exhaust free lanes, verify routine swarm stays on free lanes (fail-closed) when allowPaidEscalation is false,
+  // and escalates to gemini-api-paid only when allowPaidEscalation: true.
+  for (let i = 0; i < 50; i += 1) {
+    budget.record('gemini-api', 1, 'gemini-3.8-flash')
+    budget.record('opencode', 1, 'opencode/deepseek-v4.1-flash-free')
+  }
+  const failClosedRoster = buildSwarmRoster({
+    models,
+    modelBudget: budget,
+    workerCount: 1,
+    includeReviewer: false,
+    allowPaidEscalation: false
+  })
+  assert.notEqual(failClosedRoster.workers[0]?.provider, 'gemini-api-paid')
+
+  const escalatedRoster = buildSwarmRoster({
+    models,
+    modelBudget: budget,
+    workerCount: 1,
+    includeReviewer: false,
+    allowPaidEscalation: true
+  })
+  assert.equal(escalatedRoster.workers[0]?.provider, 'gemini-api-paid')
+  assert.equal(escalatedRoster.workers[0]?.scope, 'gemini-4-argon')
+})

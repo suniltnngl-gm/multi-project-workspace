@@ -179,9 +179,13 @@ function joinMessagesForPrompt(messages = []) {
     .join('\n\n')
 }
 
-function geminiApiKeyringEnv(baseEnv = process.env) {
+function geminiApiKeyringEnv(baseEnv = process.env, model = null) {
   const cleanEnv = { ...(baseEnv && typeof baseEnv === 'object' ? baseEnv : {}) }
   delete cleanEnv.GEMINI_API_KEY
+  const configHome = String(model?.cli?.configHome || '').trim()
+  if (configHome) {
+    cleanEnv.XDG_CONFIG_HOME = configHome
+  }
   return cleanEnv
 }
 
@@ -553,7 +557,9 @@ export function createModelClient({
     const command = model.cli.command
     const cacheKey = command === 'colab'
       ? `colab:${model.cli.session}`
-      : command
+      : model.backend === 'gemini-api-cli'
+        ? `${command}:${model.id}`
+        : command
     const now = Date.now()
     const cached = probeCache.get(cacheKey)
     if (cached && now - cached.at < PROBE_CACHE_MS) return cached.value
@@ -563,7 +569,7 @@ export function createModelClient({
       const args = model.cli.probeArgs
         ?? (command === 'colab' ? ['version'] : ['--version'])
       const runOptions = model.backend === 'gemini-api-cli'
-        ? { timeoutMs: 20000, env: geminiApiKeyringEnv(process.env) }
+        ? { timeoutMs: 20000, env: geminiApiKeyringEnv(process.env, model) }
         : { timeoutMs: 20000 }
       const { stdout, stderr } = await runCommand(command, args, runOptions) ?? {}
       if (model.backend === 'gemini-api-cli') {
@@ -1200,7 +1206,10 @@ export function createModelClient({
   async function completeGeminiApi(model, request) {
     reportPhase(request, 'generating')
     const targetModel = model.cli?.model || 'gemini-3.8-flash'
-    if (isProOnlyGeminiModel(targetModel)) {
+    const allowPro = model.allowProModels === true
+      || model.cli?.allowProModels === true
+      || model.id === 'gemini-api-paid'
+    if (!allowPro && isProOnlyGeminiModel(targetModel)) {
       throw new ModelCallError(
         `Model ${targetModel} requires a paid tier and is blocked on the Free-tier gemini-api lane; route it to agy instead.`,
         400,
@@ -1222,6 +1231,9 @@ export function createModelClient({
 
     const buildArgs = (interactionId) => {
       const args = ['generate', prompt, '--model', targetModel, '--stream=false', '--output-format', 'json']
+      if (model.cli?.userProject) {
+        args.push('--user-project', model.cli.userProject)
+      }
       if (systemText && nonSystemMessages.length > 0) {
         args.push('--system', systemText)
       }
@@ -1234,7 +1246,7 @@ export function createModelClient({
     const runGeminiApiOnce = async (interactionId) => {
       const { stdout, stderr } = await runCommand(model.cli.command, buildArgs(interactionId), {
         timeoutMs,
-        env: geminiApiKeyringEnv(process.env),
+        env: geminiApiKeyringEnv(process.env, model),
         ...(request.worktreePath ? { cwd: request.worktreePath } : {}),
         signal: request.signal
       })

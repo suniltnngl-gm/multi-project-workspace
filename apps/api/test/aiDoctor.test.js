@@ -448,3 +448,10 @@ test('doctor reports gemini-api keyring failure and America/Los_Angeles quota co
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+test('describeQuotaLimiter formats usd_micros depleting spend pools in USD', () => {
+  assert.equal(
+    describeQuotaLimiter({ unit: 'usd_micros', limit: 4_000_000, reset: 'pool' }),
+    '$4.00 USD in a depleting pool'
+  )
+})

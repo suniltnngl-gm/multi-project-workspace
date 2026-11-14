@@ -654,6 +654,72 @@ function createOllamaModel(env, billingCategories) {
   }
 }
 
+export function hasExplicitGeminiApiPaidConfig(env = {}) {
+  const enabledFlag = String(env.GEMINI_API_PAID_ENABLED ?? '').trim().toLowerCase()
+  if (['0', 'false', 'no', 'off'].includes(enabledFlag)) return false
+  return Boolean(
+    env.GEMINI_API_PAID_ENABLED
+    || env.GEMINI_API_PAID_USER_PROJECT
+    || env.GEMINI_API_PAID_CONFIG_HOME
+    || env.GEMINI_API_PAID_MODEL
+    || env.GEMINI_API_PAID_MAX_USD
+    || env.GEMINI_API_PAID_PREPAY_BALANCE_USD
+    || env.GEMINI_API_PAID_MAX_TOKENS
+    || env.GEMINI_API_PAID_MAX_REQUESTS_PER_DAY
+    || env.GEMINI_API_PAID_COMMAND
+  )
+}
+
+function createGeminiApiPaidModel(env, billingCategories) {
+  if (!hasExplicitGeminiApiPaidConfig(env)) return null
+
+  const url = readUrl(env, 'GEMINI_API_PAID_URL')
+  const userProject = readText(env, 'GEMINI_API_PAID_USER_PROJECT', '')
+  const configHome = readText(env, 'GEMINI_API_PAID_CONFIG_HOME', '')
+  const model = readText(env, 'GEMINI_API_PAID_MODEL', 'gemini-4-argon')
+  const models = readList(env, 'GEMINI_API_PAID_MODELS', ['gemini-4-argon', ...GEMINI_API_FREE_TIER_MODELS])
+  const timeoutMs = readNumber(env, 'GEMINI_API_PAID_TIMEOUT_MS', 180000)
+
+  return {
+    id: 'gemini-api-paid',
+    label: 'Gemini API CLI (Prepay Tier-1)',
+    provider: 'gemini-api-paid',
+    execution: 'live',
+    backend: url ? 'http' : 'gemini-api-cli',
+    callable: true,
+    remote: true,
+    limitKind: 'provider_model',
+    priority: 2,
+    billingCategory: resolveBillingCategory({
+      env,
+      categories: billingCategories,
+      id: 'gemini-api-paid',
+      scope: model,
+      definition: { billingEnv: 'GEMINI_API_PAID_BILLING', billingCategory: 'payg' },
+      label: 'GEMINI_API_PAID_BILLING'
+    }),
+    autoSelect: readBoolean(env, 'GEMINI_API_PAID_AUTO_SELECT', Boolean(url)),
+    escalationOnly: readBoolean(env, 'GEMINI_API_PAID_ESCALATION_ONLY', true),
+    allowProModels: true,
+    timeoutMs,
+    minAvailableMemoryMb: 0,
+    ...(url ? { url } : {}),
+    cli: {
+      command: readText(env, 'GEMINI_API_PAID_COMMAND', readText(env, 'GEMINI_API_COMMAND', 'gemini-api')),
+      userProject,
+      configHome,
+      probeArgs: ['whoami', ...(userProject ? ['--user-project', userProject] : [])],
+      model,
+      models,
+      allowProModels: true,
+      previousInteractionId: readText(env, 'GEMINI_API_PAID_INTERACTION_ID', ''),
+      auditDir: readText(env, 'GEMINI_API_PAID_AUDIT_DIR', ''),
+      timeoutMs
+    },
+    notes: 'Opt-in Prepay Tier-1 Gemini API CLI profile; escalation-only with hard local spend cap.'
+  }
+}
+
 function createServerlessModel(env, billingCategories) {
   const definition = SERVERLESS_MODEL_DEFINITION
   const url = readUrl(env, definition.urlEnv)
@@ -870,11 +936,13 @@ export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
     ...createServerlessSlots(env, billingCategories)
   ]
   const ollamaModel = createOllamaModel(env, billingCategories)
+  const geminiApiPaidModel = createGeminiApiPaidModel(env, billingCategories)
   const models = [
     ...localModels,
     ...serverlessModels,
     ...(ollamaModel ? [ollamaModel] : []),
-    ...externalModels
+    ...externalModels,
+    ...(geminiApiPaidModel ? [geminiApiPaidModel] : [])
   ]
 
   const seen = new Set()
@@ -966,6 +1034,7 @@ export function publicModelDefinition(model) {
     backend: model.backend,
     callable: model.callable,
     autoSelect: model.autoSelect ?? true,
+    ...(model.escalationOnly ? { escalationOnly: true } : {}),
     priority: model.priority,
     ...(model.limitKind ? { limitKind: model.limitKind } : {}),
     ...(model.billingCategory

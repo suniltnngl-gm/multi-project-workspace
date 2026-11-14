@@ -12,6 +12,7 @@ import {
   AGY_QUOTA_POOLS,
   GEMINI_API_FREE_TIER_MODELS,
   createModelRegistry,
+  hasExplicitGeminiApiPaidConfig,
   modelQuotaProfiles
 } from '../apps/api/src/modelRegistry.js'
 import { loadWorkspaceEnv, resolveDatabasePath, ROOT_DIR } from './env.mjs'
@@ -134,6 +135,8 @@ function summarizePool(budget, id, scope, label) {
   const sessionLimiter = limiters.find((entry) => entry.window === 'session' && entry.unit === 'requests')
     ?? limiters.find((entry) => entry.window === 'session')
   const dayLimiter = limiters.find((entry) => entry.window === 'day' && !entry.observed)
+  const usdPoolLimiter = limiters.find((entry) => entry.unit === 'usd_micros')
+  const tokenPoolLimiter = limiters.find((entry) => entry.unit === 'tokens' && entry.reset === 'pool')
 
   const weeklyRemainingPct = weekLimiter && weekLimiter.limit > 0
     ? Number(((weekLimiter.remaining / weekLimiter.limit) * 100).toFixed(2))
@@ -216,6 +219,30 @@ function summarizePool(budget, id, scope, label) {
         }
       }
       : {}),
+    ...(usdPoolLimiter
+      ? {
+        usdPool: {
+          usedUsd: usdPoolLimiter.usedUsd ?? Number((usdPoolLimiter.used / 1_000_000).toFixed(6)),
+          limitUsd: usdPoolLimiter.limitUsd ?? Number((usdPoolLimiter.limit / 1_000_000).toFixed(6)),
+          remainingUsd: usdPoolLimiter.remainingUsd ?? Number((usdPoolLimiter.remaining / 1_000_000).toFixed(6)),
+          remainingPct: usdPoolLimiter.limit > 0
+            ? Number(((usdPoolLimiter.remaining / usdPoolLimiter.limit) * 100).toFixed(2))
+            : null
+        }
+      }
+      : {}),
+    ...(tokenPoolLimiter
+      ? {
+        tokenPool: {
+          used: tokenPoolLimiter.used,
+          limit: tokenPoolLimiter.limit,
+          remaining: tokenPoolLimiter.remaining,
+          remainingPct: tokenPoolLimiter.limit > 0
+            ? Number(((tokenPoolLimiter.remaining / tokenPoolLimiter.limit) * 100).toFixed(2))
+            : null
+        }
+      }
+      : {}),
     roleAdvice
   }
 }
@@ -245,6 +272,16 @@ export function buildQuotaReport(budget, env = process.env) {
   const showConsoleGoogle = hasExplicitConsoleGoogleConfig(env)
   const opencodeGoogle = showConsoleGoogle
     ? (budget.snapshot('opencode', 'console-google/gemini-3.8-flash') ?? null)
+    : null
+  const showGeminiApiPaid = hasExplicitGeminiApiPaidConfig(env)
+  const activeGeminiApiPaidModel = env.GEMINI_API_PAID_MODEL?.trim() || 'gemini-4-argon'
+  const geminiApiPaid = showGeminiApiPaid
+    ? summarizePool(
+      budget,
+      'gemini-api-paid',
+      activeGeminiApiPaidModel,
+      `Gemini API Paid Prepay (escalation-only, active=${activeGeminiApiPaidModel})`
+    )
     : null
   const activeGeminiApiModel = env.GEMINI_API_MODEL?.trim() || configuredGeminiModels[0] || 'gemini-3.8-flash'
   const otherBackends = [
@@ -277,6 +314,7 @@ export function buildQuotaReport(budget, env = process.env) {
   return {
     agyPools,
     geminiApiModels,
+    ...(geminiApiPaid ? { geminiApiPaid } : {}),
     otherBackends,
     opencodeGoogle,
     strategy: {
@@ -336,6 +374,26 @@ function printQuotaReport(report) {
         console.log(`  [${tag}] ${entry.target}: ${entry.roleAdvice}`)
       }
     }
+  }
+
+  const paid = report.geminiApiPaid
+  if (paid && (paid.configured || paid.usdPool || paid.tokenPool || paid.daily)) {
+    const tag = paid.ok ? 'ESCALATION ONLY' : 'BLOCKED'
+    const parts = []
+    if (paid.usdPool) {
+      parts.push(`USD spent=$${paid.usdPool.usedUsd.toFixed(2)}/$${paid.usdPool.limitUsd.toFixed(2)}`)
+    }
+    if (paid.tokenPool) {
+      parts.push(`tokens used=${paid.tokenPool.used}/${paid.tokenPool.limit}`)
+    }
+    if (paid.daily) {
+      const suffix = paid.daily.resetsIn ? `, resets in ${paid.daily.resetsIn}` : ''
+      parts.push(
+        `daily=${paid.daily.remainingPct}% (${paid.daily.limit - paid.daily.used}/${paid.daily.limit}${suffix})`
+      )
+    }
+    console.log('\nGemini API Paid CLI (gemini-api-paid:gcp-project, Escalation-Only Prepay Firewall):')
+    console.log(`  [${tag}] ${paid.target}: ${parts.join(', ') || paid.roleAdvice}`)
   }
 
   if (report.otherBackends.length > 0) {

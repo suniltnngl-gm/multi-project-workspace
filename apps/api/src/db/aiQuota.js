@@ -33,8 +33,10 @@ export function createAiQuotaStore(connection) {
   const listQuotaByPolicyStatement = connection.prepare(
     'SELECT model, bucket, used FROM ai_quota WHERE policy = ? ORDER BY bucket DESC'
   )
+  // Pool limiters (reset === 'pool') persist at bucket = 0 without automatic
+  // expiration; preserve bucket = 0 when pruning aged time-window rows.
   const pruneQuotaStatement = connection.prepare(
-    'DELETE FROM ai_quota WHERE bucket < ?'
+    'DELETE FROM ai_quota WHERE bucket > 0 AND bucket < ?'
   )
   return {
     getQuota(model, policy, bucket) {

@@ -52,6 +52,12 @@ function normalizeSwarmBody(body = {}) {
     ...(input.gemini_api_models !== undefined && input.geminiApiModels === undefined
       ? { geminiApiModels: input.gemini_api_models }
       : {}),
+    ...(input.gemini_api_paid_models !== undefined && input.geminiApiPaidModels === undefined
+      ? { geminiApiPaidModels: input.gemini_api_paid_models }
+      : {}),
+    ...(input.allow_paid_escalation !== undefined && input.allowPaidEscalation === undefined
+      ? { allowPaidEscalation: input.allow_paid_escalation }
+      : {}),
     ...(input.worktree_path !== undefined && input.worktreePath === undefined
       ? { worktreePath: input.worktree_path }
       : {}),

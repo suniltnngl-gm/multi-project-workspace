@@ -38,6 +38,9 @@ export function modelProviderKey(model) {
   if (provider === 'gemini-api') {
     return 'gemini-api:gcp-project'
   }
+  if (provider === 'gemini-api-paid') {
+    return 'gemini-api-paid:gcp-project'
+  }
   if (model.scope) {
     return `${provider}:${model.scope}`
   }
@@ -246,9 +249,10 @@ function describeModel(model, modelBudget, resourceMap = null) {
   const headroom = resourceBlocked ? 0 : quota.ratio
   const pacedHeadroom = resourceBlocked ? 0 : (quota.pacedHeadroom ?? headroom)
   const agyPool = model.provider === 'agy' && scope ? agyQuotaPoolForScope(scope) : null
-  const utilizationTier = model.provider === 'agy' && (agyPool === 'claude-gpt' || agyPool === 'gemini-4-argon')
-    ? 1
-    : 0
+  const escalationOnly = Boolean(model.escalationOnly || model.provider === 'gemini-api-paid')
+  const utilizationTier = escalationOnly
+    ? 2
+    : (model.provider === 'agy' && (agyPool === 'claude-gpt' || agyPool === 'gemini-4-argon') ? 1 : 0)
   return {
     id: model.id,
     label: model.label,
@@ -257,6 +261,7 @@ function describeModel(model, modelBudget, resourceMap = null) {
     billingCategory: model.billingCategory,
     ...(scope ? { scope } : {}),
     ...(agyPool ? { agyPool } : {}),
+    ...(escalationOnly ? { escalationOnly: true } : {}),
     autoSelect: model.autoSelect ?? true,
     ...(model.execution ? { execution: model.execution } : {}),
     priority: model.priority,
@@ -523,7 +528,9 @@ export function buildSwarmRoster({
   preferredModels = [],
   opencodeModels = [],
   agyModels = [],
-  geminiApiModels = []
+  geminiApiModels = [],
+  geminiApiPaidModels = [],
+  allowPaidEscalation = false
 } = {}) {
   const resourceMap = normalizeResourceMap(resourceStatus)
   const count = Math.max(1, Math.min(6, Math.floor(Number(workerCount) || 2)))
@@ -560,8 +567,22 @@ export function buildSwarmRoster({
     addRawCandidate(resolveAgentModel(models, trimmed.includes('@') ? trimmed : `gemini-api@${trimmed}`))
   }
 
+  for (const scope of Array.isArray(geminiApiPaidModels) ? geminiApiPaidModels : []) {
+    if (typeof scope !== 'string' || !scope.trim()) continue
+    const trimmed = scope.trim()
+    addRawCandidate(resolveAgentModel(models, trimmed.includes('@') ? trimmed : `gemini-api-paid@${trimmed}`))
+  }
+
   for (const model of Array.isArray(models) ? models : []) {
     if (!model || model.callable === false) continue
+    if ((model.escalationOnly || model.provider === 'gemini-api-paid') && !allowPaidEscalation) continue
+    if ((model.escalationOnly || model.provider === 'gemini-api-paid') && Array.isArray(model.cli?.models)) {
+      for (const scope of model.cli.models) {
+        if (typeof scope !== 'string' || !scope.trim()) continue
+        const trimmed = scope.trim()
+        addRawCandidate(resolveAgentModel(models, trimmed.includes('@') ? trimmed : `${model.id}@${trimmed}`))
+      }
+    }
     addRawCandidate(model)
   }
 
@@ -587,6 +608,14 @@ export function buildSwarmRoster({
         ok: true,
         headroom: 1
       })
+    }
+  }
+  for (const scope of Array.isArray(geminiApiPaidModels) ? geminiApiPaidModels : []) {
+    if (typeof scope !== 'string' || !scope.trim()) continue
+    const trimmed = scope.trim()
+    const resolved = resolveAgentModel(models, trimmed.includes('@') ? trimmed : `gemini-api-paid@${trimmed}`)
+    if (resolved) {
+      preferredPool.push(toRosterCandidate(resolved, modelBudget, resourceMap))
     }
   }
 

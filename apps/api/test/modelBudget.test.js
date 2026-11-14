@@ -773,3 +773,65 @@ test('gemini-api tracks per-model ledgers independently, stays isolated from agy
   assert.equal(budget.check('gemini-api', 'gemini-3.8-flash').ok, true)
   assert.equal(budget.snapshot('gemini-api', 'gemini-3.8-flash').used, 0)
 })
+
+test('gemini-api-paid enforces local prepay safety-ratio USD & token depleting pools across SQLite restarts', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'model-budget-paid-'))
+  const dbPath = join(dir, 'quota.sqlite')
+  try {
+    const env = {
+      GEMINI_API_PAID_PREPAY_BALANCE_USD: '5',
+      GEMINI_API_PAID_MAX_TOKENS: '500000',
+      GEMINI_API_MAX_REQUESTS_PER_DAY: '50'
+    }
+    const db1 = createDatabase(dbPath)
+    try {
+      const budget1 = createModelBudget({ env, repository: db1 })
+      const initialSnap = budget1.snapshot('gemini-api-paid', 'gemini-4-argon')
+      assert.equal(initialSnap.ok, true)
+      const usdLimiter = initialSnap.limiters.find((entry) => entry.unit === 'usd_micros')
+      const tokenLimiter = initialSnap.limiters.find((entry) => entry.unit === 'tokens' && entry.reset === 'pool')
+      assert.equal(usdLimiter.limitUsd, 4)
+      assert.equal(usdLimiter.limit, 4_000_000)
+      assert.equal(tokenLimiter.limit, 500_000)
+
+      // $2/1M input + $12/1M output+thought on argon:
+      // 100k input = $0.20 (200k micros), 250k completion+thought = $3.00 (3,000k micros) => $3.20
+      budget1.recordUsage('gemini-api-paid', {
+        promptTokens: 100_000,
+        completionTokens: 250_000
+      }, 'gemini-4-argon')
+      assert.equal(budget1.check('gemini-api-paid', 'gemini-4-argon').ok, true)
+      const afterFirst = budget1.snapshot('gemini-api-paid', 'gemini-4-argon')
+      const usdAfterFirst = afterFirst.limiters.find((entry) => entry.unit === 'usd_micros')
+      assert.equal(usdAfterFirst.usedUsd, 3.2)
+      assert.equal(usdAfterFirst.remainingUsd, 0.8)
+      assert.equal(budget1.snapshot('gemini-api', 'gemini-3.8-flash').used, 0)
+
+      // Second call adds 100k completion ($1.20) => $4.40 > $4.00 safety cap -> trips circuit breaker
+      budget1.recordUsage('gemini-api-paid', {
+        promptTokens: 0,
+        completionTokens: 100_000
+      }, 'gemini-4-argon')
+      assert.equal(budget1.check('gemini-api-paid', 'gemini-4-argon').ok, false)
+      assert.equal(budget1.reserve('gemini-api-paid', { scope: 'gemini-4-argon' }).ok, false)
+      // Free lane remains unaffected
+      assert.equal(budget1.check('gemini-api', 'gemini-3.8-flash').ok, true)
+    } finally {
+      db1.close()
+    }
+
+    // Reopen SQLite and verify depleted pool persists across restart
+    const db2 = createDatabase(dbPath)
+    try {
+      const budget2 = createModelBudget({ env, repository: db2 })
+      assert.equal(budget2.check('gemini-api-paid', 'gemini-4-argon').ok, false)
+      const reloadedUsd = budget2.snapshot('gemini-api-paid', 'gemini-4-argon').limiters.find((e) => e.unit === 'usd_micros')
+      assert.equal(reloadedUsd.usedUsd, 4.4)
+      assert.equal(reloadedUsd.remainingUsd, 0)
+    } finally {
+      db2.close()
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

@@ -22,6 +22,16 @@ export function describeError(error) {
 }
 
 export function describeQuotaLimiter(limit) {
+  if (limit.unit === 'usd_micros') {
+    const usd = `$${(limit.limit / 1_000_000).toFixed(2)} USD`
+    if (limit.reset === 'pool') {
+      return `${usd} in a depleting pool`
+    }
+    if (limit.window === 'session') {
+      return `${usd} per ${hoursLabel(limit.windowMs)} session`
+    }
+    return `${usd} per ${limit.reset} ${limit.window} (${limit.timezone})`
+  }
   const unit = limit.unit === 'compute_seconds' ? 'compute seconds' : limit.unit
   if (limit.reset === 'pool') {
     return `${limit.limit} ${unit} in a depleting pool`

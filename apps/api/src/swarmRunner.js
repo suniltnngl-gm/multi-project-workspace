@@ -358,6 +358,8 @@ export function createSwarmRunner({
       opencodeModels = [],
       agyModels,
       geminiApiModels,
+      geminiApiPaidModels,
+      allowPaidEscalation,
       agents: customAgents,
       resourceStatus,
       parentMode: rawParentMode = 'deterministic',
@@ -383,6 +385,10 @@ export function createSwarmRunner({
     )
     const resolvedAgyModels = parseCsvOrEnv(agyModels, process.env.AGY_AI_MODELS)
     const resolvedGeminiApiModels = parseCsvOrEnv(geminiApiModels, process.env.GEMINI_API_MODELS)
+    const resolvedGeminiApiPaidModels = parseCsvOrEnv(geminiApiPaidModels)
+    const resolvedAllowPaidEscalation = allowPaidEscalation !== undefined
+      ? Boolean(allowPaidEscalation)
+      : process.env.GEMINI_API_PAID_ALLOW_SWARM_ESCALATION === 'true'
     const selfImprove = rawSelfImprove !== false
     const parentMode = VALID_PARENT_MODES.has(rawParentMode) ? rawParentMode : 'deterministic'
     const maxReviewRounds = Math.max(0, Math.min(3, Math.floor(Number(rawMaxReviewRounds) || 0)))
@@ -405,7 +411,9 @@ export function createSwarmRunner({
       preferredModels,
       opencodeModels,
       agyModels: resolvedAgyModels,
-      geminiApiModels: resolvedGeminiApiModels
+      geminiApiModels: resolvedGeminiApiModels,
+      geminiApiPaidModels: resolvedGeminiApiPaidModels,
+      allowPaidEscalation: resolvedAllowPaidEscalation
     })
 
     const agentsForPlan = Array.isArray(customAgents) && customAgents.length > 0
