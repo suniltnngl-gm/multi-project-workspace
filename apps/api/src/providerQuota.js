@@ -185,11 +185,15 @@ function ratioFor(modelBudget, model) {
   if (modelBudget && typeof modelBudget.headroom === 'function') {
     const result = modelBudget.headroom(targetId, scope)
     const ratio = Number.isFinite(result?.ratio) ? result.ratio : (result?.ok === false ? 0 : 1)
+    const sessionWindow = result?.sessionWindow ?? result?.budget?.sessionWindow
+    const harvestableSession = Boolean(result?.harvestableSession || result?.budget?.harvestableSession)
     return {
       ok: result?.ok !== false,
       ratio,
       pacedHeadroom: Number.isFinite(result?.pacedHeadroom) ? result.pacedHeadroom : ratio,
       ...(result?.pacing ? { pacing: result.pacing } : {}),
+      ...(sessionWindow ? { sessionWindow } : {}),
+      harvestableSession,
       configured: Boolean(result?.configured || !model?.remote),
       observedRequests: Number(result?.observedRequests ?? 0),
       retryAfter: result?.retryAfter,
@@ -203,13 +207,21 @@ function ratioFor(modelBudget, model) {
       ok: result?.ok !== false,
       ratio,
       pacedHeadroom: ratio,
+      harvestableSession: false,
       configured: !model?.remote,
       observedRequests: 0,
       retryAfter: result?.retryAfter,
       budget: result?.budget
     }
   }
-  return { ok: true, ratio: 1, pacedHeadroom: 1, configured: !model?.remote, observedRequests: 0 }
+  return {
+    ok: true,
+    ratio: 1,
+    pacedHeadroom: 1,
+    harvestableSession: false,
+    configured: !model?.remote,
+    observedRequests: 0
+  }
 }
 
 function describeModel(model, modelBudget, resourceMap = null) {
@@ -246,6 +258,8 @@ function describeModel(model, modelBudget, resourceMap = null) {
     headroom,
     pacedHeadroom,
     aheadOfPace: Boolean(quota.pacing?.aheadOfPace),
+    harvestableSession: Boolean(quota.harvestableSession),
+    ...(quota.sessionWindow ? { sessionWindow: quota.sessionWindow } : {}),
     utilizationTier,
     ...(resourceBlocked
       ? {
@@ -293,6 +307,12 @@ export function compareRosterCandidates(a, b) {
   const aTier = a.utilizationTier ?? 0
   const bTier = b.utilizationTier ?? 0
   if (aTier !== bTier) return aTier - bTier
+
+  // Within the same tier, prefer pools with a renewable 5-hour session buffer
+  // (`harvestableSession`) over weekly-only buckets.
+  if (Boolean(a.harvestableSession) !== Boolean(b.harvestableSession)) {
+    return a.harvestableSession ? -1 : 1
+  }
 
   const aEffectiveHeadroom = a.pacedHeadroom ?? a.headroom
   const bEffectiveHeadroom = b.pacedHeadroom ?? b.headroom
@@ -604,7 +624,14 @@ export function buildSwarmRoster({
         && !usedDomains.has(entry.groupKey)
         && entry.utilizationTier === 1
         && !entry.aheadOfPace
+        && entry.harvestableSession
     )
+      ?? selectionPool.find(
+        (entry) => entry.ok
+          && !usedDomains.has(entry.groupKey)
+          && entry.utilizationTier === 1
+          && !entry.aheadOfPace
+      )
       ?? rankedPool.find((entry) => entry.ok && !usedDomains.has(entry.groupKey))
       ?? selectionPool.find((entry) => entry.ok && !usedDomains.has(entry.groupKey))
       ?? rankedPool.find((entry) => entry.ok)

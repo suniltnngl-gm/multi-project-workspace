@@ -1014,6 +1014,7 @@ async function dispatch(argv) {
       if (subcommand === 'improve') return aiImprove(rest.slice(1))
       if (subcommand === 'ask') return aiAsk(rest.slice(1))
       if (subcommand === 'model') return aiModel(rest.slice(1))
+      if (subcommand === 'quota') return runNodeScript('ai-quota.mjs', rest.slice(1))
       if (subcommand === 'swarm') return runNodeScript('ai-swarm.mjs', rest.slice(1))
       fail(
         `Unknown ai subcommand: ${subcommand}\n` +
@@ -1021,6 +1022,7 @@ async function dispatch(argv) {
         '       ./workspace ai improve [run|list|approve <id>|reject <id>|rollback <id>]\n' +
         '       ./workspace ai ask [--model ID] [--session ID] "prompt"\n' +
         '       ./workspace ai model [rotate|status|list|providers|study]\n' +
+        '       ./workspace ai quota [status|sync|recommend] [--json]\n' +
         '       ./workspace ai swarm [plan|run|board <id>|step <id>|list]',
         2
       )

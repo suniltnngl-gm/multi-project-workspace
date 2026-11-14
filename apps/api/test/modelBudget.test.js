@@ -631,3 +631,76 @@ test('weekly quota pacing flags ahead-of-pace burn early in the week and recover
   assert.equal(late.pacing.aheadOfPace, false)
   assert.equal(late.pacedHeadroom, 0.6)
 })
+
+test('AGY dual 5-hour session and weekly limits keep harvestableSession and persist synced state in SQLite', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'mpw-budget-sync-'))
+  const dbPath = join(dir, 'workspace.sqlite')
+  const clock = clockAt('2026-11-14T06:35:00Z')
+  const env = {
+    AGY_AI_SESSION_HOURS: '5',
+    AGY_AI_GEMINI_MAX_REQUESTS_PER_5H: '45',
+    AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK: '200',
+    AGY_AI_CLAUDE_GPT_MAX_REQUESTS_PER_5H: '40',
+    AGY_AI_CLAUDE_GPT_MAX_REQUESTS_PER_WEEK: '200',
+    AGY_AI_ARGON_MAX_REQUESTS_PER_WEEK: '100'
+  }
+
+  let db = createDatabase(dbPath)
+  try {
+    const budget = createModelBudget({ repository: db, env, now: clock.now })
+    budget.syncPoolState('agy', {
+      scope: 'gemini-3.8-flash-medium',
+      weeklyRemainingPercent: 91.81,
+      weeklyResetSeconds: (163 * 3600) + (15 * 60),
+      sessionRemainingPercent: 71.33,
+      sessionResetSeconds: 15 * 60
+    })
+    budget.syncPoolState('agy', {
+      scope: 'claude-sonnet-5-5-medium',
+      weeklyRemainingPercent: 99.95,
+      weeklyResetSeconds: (138 * 3600) + (36 * 60),
+      sessionRemainingPercent: 100
+    })
+    budget.syncPoolState('agy', {
+      scope: 'gemini-4-argon-medium',
+      weeklyRemainingPercent: 57.19,
+      weeklyResetSeconds: (163 * 3600) + (10 * 60)
+    })
+
+    const gemini = budget.headroom('agy', 'gemini-3.8-flash-medium')
+    assert.equal(gemini.harvestableSession, true)
+    assert.equal(gemini.sessionWindow.resetsInSeconds, 15 * 60)
+    assert.equal(gemini.pacing.aheadOfPace, false)
+
+    const claude = budget.headroom('agy', 'claude-sonnet-5-5-medium')
+    assert.equal(claude.harvestableSession, true)
+    assert.equal(claude.pacing.aheadOfPace, false)
+
+    const argon = budget.headroom('agy', 'gemini-4-argon-medium')
+    assert.equal(argon.pacing.aheadOfPace, true)
+    assert.ok(argon.pacing.usedFraction > 0.4)
+    assert.ok(argon.pacedHeadroom < argon.ratio)
+
+    db.close()
+    db = createDatabase(dbPath)
+    const reloaded = createModelBudget({ repository: db, env, now: clock.now })
+    const reloadedArgon = reloaded.headroom('agy', 'gemini-4-argon-medium')
+    assert.equal(reloadedArgon.pacing.aheadOfPace, true)
+    assert.equal(reloadedArgon.pacing.resetsInSeconds, (163 * 3600) + (10 * 60))
+
+    // Advancing 16m refreshes Gemini 5-hour session bucket while keeping weekly count intact.
+    clock.advance(16 * MINUTE)
+    const refreshedGemini = reloaded.snapshot('agy', 'gemini-3.8-flash-medium')
+    assert.equal(refreshedGemini.limiters.find((w) => w.window === 'session').remaining, 45)
+    assert.equal(refreshedGemini.limiters.find((w) => w.window === 'week').remaining, 184)
+
+    // Advancing past synced weekly reset restores full argon weekly capacity.
+    clock.advance(164 * HOUR)
+    const resetArgon = reloaded.headroom('agy', 'gemini-4-argon-medium')
+    assert.equal(resetArgon.ratio, 1)
+    assert.equal(resetArgon.pacing.aheadOfPace, false)
+  } finally {
+    db.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

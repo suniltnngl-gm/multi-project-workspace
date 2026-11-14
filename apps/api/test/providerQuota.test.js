@@ -520,3 +520,71 @@ test('buildSwarmRoster keeps on-pace Tier 0 AGY workers ahead of fresher Tier 1 
   assert.ok(!roster.workers.some((worker) => worker.groupKey === 'agy:claude-gpt'))
   assert.ok(!roster.workers.some((worker) => worker.groupKey === 'agy:gemini-4-argon'))
 })
+
+test('buildSwarmRoster prefers harvestable 5h session pools and demotes ahead-of-pace argon after syncPoolState', () => {
+  const clock = clockAt('2026-11-14T06:35:00Z')
+  const budget = createModelBudget({
+    env: {
+      OPENCODE_AI_MAX_REQUESTS_PER_DAY: '100',
+      AGY_AI_SESSION_HOURS: '5',
+      AGY_AI_GEMINI_MAX_REQUESTS_PER_5H: '45',
+      AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK: '200',
+      AGY_AI_CLAUDE_GPT_MAX_REQUESTS_PER_5H: '40',
+      AGY_AI_CLAUDE_GPT_MAX_REQUESTS_PER_WEEK: '200',
+      AGY_AI_ARGON_MAX_REQUESTS_PER_WEEK: '100'
+    },
+    now: clock.now
+  })
+  budget.syncPoolState('agy', {
+    scope: 'gemini-3.8-flash-medium',
+    weeklyRemainingPercent: 91.81,
+    weeklyResetSeconds: (163 * 3600) + (15 * 60),
+    sessionRemainingPercent: 71.33,
+    sessionResetSeconds: 15 * 60
+  })
+  budget.syncPoolState('agy', {
+    scope: 'claude-sonnet-5-5-medium',
+    weeklyRemainingPercent: 99.95,
+    weeklyResetSeconds: (138 * 3600) + (36 * 60),
+    sessionRemainingPercent: 100
+  })
+  budget.syncPoolState('agy', {
+    scope: 'gemini-4-argon-medium',
+    weeklyRemainingPercent: 57.19,
+    weeklyResetSeconds: (163 * 3600) + (10 * 60)
+  })
+
+  const models = [
+    model({
+      id: 'opencode',
+      provider: 'opencode',
+      backend: 'opencode-cli',
+      limitKind: 'provider_model',
+      cli: { command: 'opencode', model: 'opencode/deepseek-v4.1-flash-free' }
+    }),
+    model({
+      id: 'agy',
+      provider: 'agy',
+      backend: 'agy-cli',
+      limitKind: 'provider_model',
+      cli: { command: 'agy', model: 'gemini-3.8-flash-medium' }
+    })
+  ]
+
+  const roster = buildSwarmRoster({
+    models,
+    modelBudget: budget,
+    workerCount: 2,
+    includeReviewer: true,
+    opencodeModels: ['opencode/deepseek-v4.1-flash-free'],
+    agyModels: [
+      'gemini-3.8-flash-medium',
+      'claude-sonnet-5-5-medium',
+      'gemini-4-argon-medium'
+    ]
+  })
+
+  assert.ok(roster.workers.some((worker) => worker.groupKey === 'agy:gemini'))
+  assert.ok(!roster.workers.some((worker) => worker.groupKey === 'agy:gemini-4-argon'))
+  assert.equal(roster.reviewer?.groupKey, 'agy:claude-gpt')
+})

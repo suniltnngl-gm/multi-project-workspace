@@ -40,6 +40,7 @@ const RESET_NAMES = new Set(['rolling', 'fixed', 'pool'])
 const OBSERVED_REQUESTS_POLICY = 'observed-requests'
 const OBSERVED_429_POLICY = 'observed-429'
 const OBSERVED_COOLDOWN_POLICY = 'observed-cooldown'
+const SYNCED_WEEK_RESET_POLICY = 'synced-week-reset'
 // The observed ledger buckets on UTC day boundaries; the learned cap is
 // applied as its own limiter shape when a cap exists.
 const OBSERVED_DAY = {
@@ -363,21 +364,60 @@ export function resolveQuotaProfiles({ env = process.env, profiles } = {}) {
 
   if (!result.has('agy')) {
     const agyLimits = buildComputeAndRequestLimits(env, [
+      {
+        key: 'AGY_AI_MAX_REQUESTS_PER_5H',
+        unit: 'requests',
+        window: 'session',
+        hoursEnv: 'AGY_AI_SESSION_HOURS',
+        defaultHours: 5
+      },
       { key: 'AGY_AI_MAX_REQUESTS_PER_WEEK', unit: 'requests', window: 'week' },
       { key: 'AGY_AI_MAX_REQUESTS_PER_DAY', unit: 'requests', window: 'day' }
     ])
     if (agyLimits.length > 0) result.set('agy', normalizeLimits('agy', agyLimits))
   }
 
-  for (const [poolId, reqKey, tokenKey] of [
-    ['agy@gemini', 'AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK', 'AGY_AI_GEMINI_MAX_TOKENS_PER_WEEK'],
-    ['agy@claude-gpt', 'AGY_AI_CLAUDE_GPT_MAX_REQUESTS_PER_WEEK', 'AGY_AI_CLAUDE_GPT_MAX_TOKENS_PER_WEEK'],
-    ['agy@gemini-4-argon', 'AGY_AI_ARGON_MAX_REQUESTS_PER_WEEK', 'AGY_AI_ARGON_MAX_TOKENS_PER_WEEK']
+  for (const [poolId, req5hKey, tok5hKey, reqWeekKey, tokWeekKey] of [
+    [
+      'agy@gemini',
+      'AGY_AI_GEMINI_MAX_REQUESTS_PER_5H',
+      'AGY_AI_GEMINI_MAX_TOKENS_PER_5H',
+      'AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK',
+      'AGY_AI_GEMINI_MAX_TOKENS_PER_WEEK'
+    ],
+    [
+      'agy@claude-gpt',
+      'AGY_AI_CLAUDE_GPT_MAX_REQUESTS_PER_5H',
+      'AGY_AI_CLAUDE_GPT_MAX_TOKENS_PER_5H',
+      'AGY_AI_CLAUDE_GPT_MAX_REQUESTS_PER_WEEK',
+      'AGY_AI_CLAUDE_GPT_MAX_TOKENS_PER_WEEK'
+    ],
+    [
+      'agy@gemini-4-argon',
+      'AGY_AI_ARGON_MAX_REQUESTS_PER_5H',
+      'AGY_AI_ARGON_MAX_TOKENS_PER_5H',
+      'AGY_AI_ARGON_MAX_REQUESTS_PER_WEEK',
+      'AGY_AI_ARGON_MAX_TOKENS_PER_WEEK'
+    ]
   ]) {
     if (result.has(poolId)) continue
     const poolLimits = buildComputeAndRequestLimits(env, [
-      { key: reqKey, unit: 'requests', window: 'week' },
-      { key: tokenKey, unit: 'tokens', window: 'week' }
+      {
+        key: req5hKey,
+        unit: 'requests',
+        window: 'session',
+        hoursEnv: 'AGY_AI_SESSION_HOURS',
+        defaultHours: 5
+      },
+      {
+        key: tok5hKey,
+        unit: 'tokens',
+        window: 'session',
+        hoursEnv: 'AGY_AI_SESSION_HOURS',
+        defaultHours: 5
+      },
+      { key: reqWeekKey, unit: 'requests', window: 'week' },
+      { key: tokWeekKey, unit: 'tokens', window: 'week' }
     ])
     if (poolLimits.length > 0) result.set(poolId, normalizeLimits(poolId, poolLimits))
   }
@@ -449,6 +489,37 @@ export function createModelBudget({
     const used = (memoryBuckets.get(key) ?? 0) + amount
     memoryBuckets.set(key, used)
     return used
+  }
+
+  function setBucket(id, policy, bucket, used) {
+    try {
+      if (typeof repository?.setQuota === 'function') {
+        return repository.setQuota(id, policy, bucket, used)
+      }
+      if (typeof repository?.addQuota === 'function') {
+        const current = readBucket(id, policy, bucket)
+        return repository.addQuota(id, policy, bucket, used - current)
+      }
+    } catch (error) {
+      console.error(`Could not set the AI quota for ${id}: ${error.message}`)
+    }
+    memoryBuckets.set(memoryKey(id, policy, bucket), used)
+    return used
+  }
+
+  function deleteBucketPolicy(id, policy) {
+    try {
+      if (typeof repository?.deleteQuotaPolicy === 'function') {
+        return repository.deleteQuotaPolicy(id, policy)
+      }
+    } catch (error) {
+      console.error(`Could not clear the AI quota policy for ${id}: ${error.message}`)
+    }
+    const prefix = `${id}|${policy}|`
+    for (const key of [...memoryBuckets.keys()]) {
+      if (key.startsWith(prefix)) memoryBuckets.delete(key)
+    }
+    return 0
   }
 
   function latestBucket(id, policy) {
@@ -536,6 +607,11 @@ export function createModelBudget({
     return events
   }
 
+  function activeSyncedWeekEnd(id, at) {
+    const syncedResetAt = latestBucket(id, SYNCED_WEEK_RESET_POLICY)
+    return syncedResetAt !== null && syncedResetAt > at ? syncedResetAt : null
+  }
+
   function bucketFor(id, limit, at) {
     if (limit.reset === 'pool') return 0
     if (limit.reset === 'rolling') return null
@@ -543,6 +619,10 @@ export function createModelBudget({
       const latest = latestBucket(id, limit.policy)
       if (latest !== null && at < latest + limit.windowMs) return latest
       return at
+    }
+    if (limit.window === 'week' && limit.reset === 'fixed') {
+      const syncedEnd = activeSyncedWeekEnd(id, at)
+      if (syncedEnd !== null) return syncedEnd - WEEK
     }
     return startOfFixedWindow(at, limit)
   }
@@ -584,6 +664,10 @@ export function createModelBudget({
   function retryAtFor(id, limit, at) {
     if (limit.reset === 'rolling') return rollingRetryAt(id, limit, at)
     if (limit.reset === 'pool') return null
+    if (limit.window === 'week' && limit.reset === 'fixed') {
+      const syncedEnd = activeSyncedWeekEnd(id, at)
+      if (syncedEnd !== null) return syncedEnd
+    }
     return nextFixedBoundary(bucketFor(id, limit, at), limit)
   }
 
@@ -612,45 +696,77 @@ export function createModelBudget({
     return pending
   }
 
-  function evaluateWeeklyPacing(limitConfigs, mappedLimiters, at) {
+  function evaluateWeeklyPacing(observedId, limitConfigs, mappedLimiters, at) {
     const finitePairs = []
     for (let index = 0; index < mappedLimiters.length; index += 1) {
       const limiter = mappedLimiters[index]
       if (!Number.isFinite(limiter.limit) || limiter.limit <= 0) continue
       finitePairs.push({ limiter, rule: limitConfigs?.[index] ?? null })
     }
-    if (finitePairs.length === 0) return { pacedHeadroom: 1, pacing: undefined }
+    if (finitePairs.length === 0) {
+      return { pacedHeadroom: 1, pacing: undefined, sessionWindow: undefined, harvestableSession: false }
+    }
 
-    let minPacedRatio = 1
+    const syncedWeekEnd = activeSyncedWeekEnd(observedId, at)
     let worstWeekly = null
+    let worstSession = null
+    const scoredRatios = []
+
     for (const { limiter, rule } of finitePairs) {
       const rawRatio = Math.max(0, limiter.remaining / limiter.limit)
       if (limiter.window === 'week' && rule && limiter.bucket !== null) {
-        const endMs = nextFixedBoundary(limiter.bucket, rule)
-        const spanMs = Math.max(1, endMs - limiter.bucket)
-        const elapsedFraction = Math.min(1, Math.max(0.05, (at - limiter.bucket) / spanMs))
+        const endMs = syncedWeekEnd !== null ? syncedWeekEnd : nextFixedBoundary(limiter.bucket, rule)
+        const startMs = syncedWeekEnd !== null ? syncedWeekEnd - WEEK : limiter.bucket
+        const spanMs = Math.max(1, endMs - startMs)
+        const elapsedFraction = Math.min(1, Math.max(0.05, (at - startMs) / spanMs))
         const targetAllowance = Math.min(1, elapsedFraction + 0.15)
         const usedFraction = limiter.used / limiter.limit
         const aheadOfPace = usedFraction > targetAllowance
         const pacedRatio = aheadOfPace
           ? rawRatio * (targetAllowance / usedFraction)
           : rawRatio
-        if (pacedRatio < minPacedRatio) minPacedRatio = pacedRatio
+        const resetsInSeconds = Math.max(0, Math.ceil((endMs - at) / 1000))
+        scoredRatios.push({ window: 'week', pacedRatio })
         if (!worstWeekly || usedFraction > worstWeekly.usedFraction) {
           worstWeekly = {
             window: 'week',
             elapsedFraction,
             usedFraction,
-            aheadOfPace
+            aheadOfPace,
+            resetsInSeconds
           }
         }
-      } else if (rawRatio < minPacedRatio) {
-        minPacedRatio = rawRatio
+        continue
       }
+      if (limiter.window === 'session') {
+        const resetsInSeconds = limiter.bucket !== null && rule?.windowMs
+          ? Math.max(0, Math.ceil((limiter.bucket + rule.windowMs - at) / 1000))
+          : 0
+        const harvestable = rawRatio > 0.2
+        scoredRatios.push({ window: 'session', pacedRatio: rawRatio })
+        if (!worstSession || rawRatio < worstSession.remainingRatio) {
+          worstSession = {
+            remainingRatio: rawRatio,
+            resetsInSeconds,
+            harvestable
+          }
+        }
+        continue
+      }
+      scoredRatios.push({ window: limiter.window, pacedRatio: rawRatio })
     }
+
+    const harvestableSession = Boolean(worstSession?.harvestable && !(worstWeekly?.aheadOfPace))
+    const filtered = harvestableSession && scoredRatios.some((entry) => entry.window !== 'session')
+      ? scoredRatios.filter((entry) => entry.window !== 'session')
+      : scoredRatios
+    const pacedHeadroom = Math.min(...filtered.map((entry) => entry.pacedRatio))
+
     return {
-      pacedHeadroom: minPacedRatio,
-      ...(worstWeekly ? { pacing: worstWeekly } : {})
+      pacedHeadroom,
+      ...(worstWeekly ? { pacing: worstWeekly } : {}),
+      ...(worstSession ? { sessionWindow: worstSession } : {}),
+      harvestableSession
     }
   }
 
@@ -775,7 +891,7 @@ export function createModelBudget({
           ? null
           : Math.max(...waits)))
     const ok = blocked.length === 0 && cooldownSeconds === 0
-    const pacingEvaluation = evaluateWeeklyPacing(limits, limiters, at)
+    const pacingEvaluation = evaluateWeeklyPacing(observedId, limits, limiters, at)
     const pacedHeadroom = ok ? pacingEvaluation.pacedHeadroom : 0
 
     return {
@@ -789,6 +905,8 @@ export function createModelBudget({
       resetsInSeconds: primary.resetsInSeconds,
       pacedHeadroom,
       ...(pacingEvaluation.pacing ? { pacing: pacingEvaluation.pacing } : {}),
+      ...(pacingEvaluation.sessionWindow ? { sessionWindow: pacingEvaluation.sessionWindow } : {}),
+      ...(pacingEvaluation.harvestableSession ? { harvestableSession: true } : {}),
       ...(primary.window === 'day' && primary.bucket !== null
         ? { day: dayKey(primary.bucket) }
         : {}),
@@ -978,6 +1096,7 @@ export function createModelBudget({
         ratio: 0,
         pacedHeadroom: 0,
         ...(budget.pacing ? { pacing: budget.pacing } : {}),
+        ...(budget.sessionWindow ? { sessionWindow: budget.sessionWindow } : {}),
         retryAfter: budget.retryAfter,
         configured,
         observedRequests,
@@ -992,10 +1111,65 @@ export function createModelBudget({
       ratio,
       pacedHeadroom: budget.pacedHeadroom ?? ratio,
       ...(budget.pacing ? { pacing: budget.pacing } : {}),
+      ...(budget.sessionWindow ? { sessionWindow: budget.sessionWindow } : {}),
+      ...(budget.harvestableSession ? { harvestableSession: true } : {}),
       configured,
       observedRequests,
       budget
     }
+  }
+
+  /**
+   * Calibrate configured weekly and session buckets (plus their live reset
+   * timers) from authoritative account status percentages.
+   */
+  function syncPoolState(id, {
+    scope,
+    weeklyRemainingPercent,
+    weeklyResetSeconds,
+    sessionRemainingPercent,
+    sessionResetSeconds
+  } = {}) {
+    const target = resolveQuotaTarget(configs, id, scope)
+    const observedId = target.ledgerId
+    const limits = target.limits ?? []
+    const at = now()
+
+    const parsedWeekReset = Number(weeklyResetSeconds)
+    if (weeklyResetSeconds !== undefined && Number.isFinite(parsedWeekReset) && parsedWeekReset > 0) {
+      deleteBucketPolicy(observedId, SYNCED_WEEK_RESET_POLICY)
+      addBucket(observedId, SYNCED_WEEK_RESET_POLICY, Math.floor(at + parsedWeekReset * 1000), 1)
+    }
+
+    for (const limit of limits) {
+      if (limit.window === 'week' && weeklyRemainingPercent !== undefined) {
+        const pct = Math.min(100, Math.max(0, Number(weeklyRemainingPercent)))
+        if (Number.isFinite(pct)) {
+          const targetUsed = Math.round(limit.limit * (1 - pct / 100))
+          const bucket = bucketFor(observedId, limit, at)
+          setBucket(observedId, limit.policy, bucket, targetUsed)
+        }
+      }
+      if (limit.window === 'session'
+        && (sessionRemainingPercent !== undefined || sessionResetSeconds !== undefined)) {
+        const pct = sessionRemainingPercent !== undefined
+          ? Math.min(100, Math.max(0, Number(sessionRemainingPercent)))
+          : 100
+        if (!Number.isFinite(pct)) continue
+        const targetUsed = Math.round(limit.limit * (1 - pct / 100))
+        const parsedSessionReset = Number(sessionResetSeconds)
+        const hasTimer = Number.isFinite(parsedSessionReset) && parsedSessionReset > 0 && limit.windowMs
+        const anchorBucket = hasTimer
+          ? Math.floor(at - Math.max(0, limit.windowMs - parsedSessionReset * 1000))
+          : at
+        deleteBucketPolicy(observedId, limit.policy)
+        if (targetUsed > 0 || hasTimer) {
+          setBucket(observedId, limit.policy, anchorBucket, targetUsed)
+        }
+      }
+    }
+
+    return snapshot(id, scope)
   }
 
   // Learn from a live 429 without touching configured profiles: a marker
@@ -1048,6 +1222,7 @@ export function createModelBudget({
     headroom,
     cooldown,
     observe429,
+    syncPoolState,
     snapshot,
     prune
   }

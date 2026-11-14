@@ -13,6 +13,14 @@ export function createAiQuotaStore(connection) {
     VALUES (?, ?, ?, ?)
     ON CONFLICT(model, policy, bucket) DO UPDATE SET used = used + excluded.used
   `)
+  const setQuotaStatement = connection.prepare(`
+    INSERT INTO ai_quota (model, policy, bucket, used)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(model, policy, bucket) DO UPDATE SET used = excluded.used
+  `)
+  const deleteQuotaPolicyStatement = connection.prepare(
+    'DELETE FROM ai_quota WHERE model = ? AND policy = ?'
+  )
   const latestQuotaStatement = connection.prepare(`
     SELECT bucket, used FROM ai_quota
     WHERE model = ? AND policy = ?
@@ -35,6 +43,13 @@ export function createAiQuotaStore(connection) {
     addQuota(model, policy, bucket, amount) {
       addQuotaStatement.run(model, policy, bucket, amount)
       return getQuotaStatement.get(model, policy, bucket)?.used ?? 0
+    },
+    setQuota(model, policy, bucket, used) {
+      setQuotaStatement.run(model, policy, bucket, used)
+      return getQuotaStatement.get(model, policy, bucket)?.used ?? 0
+    },
+    deleteQuotaPolicy(model, policy) {
+      return deleteQuotaPolicyStatement.run(model, policy).changes
     },
     getLatestQuota(model, policy) {
       const row = latestQuotaStatement.get(model, policy)

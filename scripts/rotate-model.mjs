@@ -59,11 +59,12 @@ export const OPENCODE_PROVIDER_ORDER = Object.freeze([
 export const AGY_POOLS = {
   gemini: [
     'gemini-3.8-flash-medium',
-    'gemini-3.8-flash-high',
-    'gemini-4-hydrogen-medium'
+    'gemini-4-hydrogen-medium',
+    'gemini-3.8-flash-high'
   ],
   'claude-gpt': [
     'claude-sonnet-5-5-medium',
+    'claude-opus-5-5-medium',
     'gpt-oss-120b-medium'
   ],
   'gemini-4-argon': [
