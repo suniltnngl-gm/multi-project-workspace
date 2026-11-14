@@ -7,6 +7,7 @@
 import { isConsoleGoogleScope } from './modelBudget.js'
 import {
   agyQuotaPoolForScope,
+  isProOnlyGeminiModel,
   resolveBillingCategoryForScope
 } from './modelRegistry.js'
 
@@ -33,6 +34,9 @@ export function modelProviderKey(model) {
   if (provider === 'opencode') {
     const scope = model.scope || quotaScopeForModel(model)
     if (isConsoleGoogleScope(scope)) return 'opencode:console-google'
+  }
+  if (provider === 'gemini-api') {
+    return 'gemini-api:gcp-project'
   }
   if (model.scope) {
     return `${provider}:${model.scope}`
@@ -518,7 +522,8 @@ export function buildSwarmRoster({
   includeReviewer = true,
   preferredModels = [],
   opencodeModels = [],
-  agyModels = []
+  agyModels = [],
+  geminiApiModels = []
 } = {}) {
   const resourceMap = normalizeResourceMap(resourceStatus)
   const count = Math.max(1, Math.min(6, Math.floor(Number(workerCount) || 2)))
@@ -528,6 +533,7 @@ export function buildSwarmRoster({
   const addRawCandidate = (candidate) => {
     if (!candidate) return
     const scope = quotaScopeForModel(candidate) ?? ''
+    if (candidate.provider === 'gemini-api' && isProOnlyGeminiModel(scope)) return
     const baseId = candidate.baseId ?? candidate.id
     const key = `${baseId}\0${scope}`
     if (seenBaseScope.has(key)) return
@@ -545,6 +551,13 @@ export function buildSwarmRoster({
     if (typeof scope !== 'string' || !scope.trim()) continue
     const trimmed = scope.trim()
     addRawCandidate(resolveAgentModel(models, trimmed.includes('@') ? trimmed : `agy@${trimmed}`))
+  }
+
+  for (const scope of Array.isArray(geminiApiModels) ? geminiApiModels : []) {
+    if (typeof scope !== 'string' || !scope.trim()) continue
+    const trimmed = scope.trim()
+    if (isProOnlyGeminiModel(trimmed)) continue
+    addRawCandidate(resolveAgentModel(models, trimmed.includes('@') ? trimmed : `gemini-api@${trimmed}`))
   }
 
   for (const model of Array.isArray(models) ? models : []) {

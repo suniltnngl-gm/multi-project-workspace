@@ -310,6 +310,23 @@ export function resolveQuotaTarget(configs, id, scope) {
     return { ledgerId, limits, pool: 'console-google' }
   }
 
+  // Dedicated `gemini-api` CLI executions share one GCP project quota domain
+  // (`gemini-api:gcp-project`) while keeping per-model ledgers
+  // (`gemini-api@<model>`) with US Pacific Time (America/Los_Angeles) resets.
+  if (id === 'gemini-api') {
+    const normalizedScope = typeof scope === 'string' ? scope.trim() : ''
+    const ledgerId = normalizedScope ? `gemini-api@${normalizedScope}` : 'gemini-api'
+    let limits = configs?.get(ledgerId) ?? configs?.get('gemini-api')
+    if (limits) {
+      limits = limits.map((entry) => (
+        entry.window === 'day' && (!entry.timezone || entry.timezone === 'UTC')
+          ? { ...entry, timezone: GOOGLE_API_DEFAULT_TIMEZONE }
+          : entry
+      ))
+    }
+    return { ledgerId, limits, pool: 'gcp-project' }
+  }
+
   const ledgerId = scope ? `${id}@${scope}` : id
   if (!configs) return { ledgerId, limits: undefined, pool: null }
   if (scope) {
@@ -481,6 +498,38 @@ export function resolveQuotaProfiles({ env = process.env, profiles } = {}) {
     }
   }
 
+  if (!result.has('gemini-api')) {
+    const geminiApiLimits = buildComputeAndRequestLimits(env, [
+      {
+        key: 'GEMINI_API_MAX_REQUESTS_PER_MINUTE',
+        unit: 'requests',
+        window: 'minute',
+        reset: 'rolling',
+        timezoneEnv: 'GEMINI_API_TIMEZONE',
+        timezone: GOOGLE_API_DEFAULT_TIMEZONE
+      },
+      {
+        key: 'GEMINI_API_MAX_TOKENS_PER_MINUTE',
+        unit: 'tokens',
+        window: 'minute',
+        reset: 'rolling',
+        timezoneEnv: 'GEMINI_API_TIMEZONE',
+        timezone: GOOGLE_API_DEFAULT_TIMEZONE
+      },
+      {
+        key: 'GEMINI_API_MAX_REQUESTS_PER_DAY',
+        unit: 'requests',
+        window: 'day',
+        reset: 'fixed',
+        timezoneEnv: 'GEMINI_API_TIMEZONE',
+        timezone: GOOGLE_API_DEFAULT_TIMEZONE
+      }
+    ])
+    if (geminiApiLimits.length > 0) {
+      result.set('gemini-api', normalizeLimits('gemini-api', geminiApiLimits))
+    }
+  }
+
   for (const [id, key] of LEGACY_LIMITS) {
     if (result.has(id)) continue
     const limit = readLimit(env, key)
@@ -645,6 +694,10 @@ export function createModelBudget({
     }
     if (observedId === 'opencode@console-google' || observedId.startsWith('opencode@console-google/')) {
       const tz = env.OPENCODE_AI_GOOGLE_TIMEZONE?.trim() || GOOGLE_API_DEFAULT_TIMEZONE
+      return { ...OBSERVED_DAY, timezone: tz }
+    }
+    if (observedId === 'gemini-api' || observedId.startsWith('gemini-api@')) {
+      const tz = env.GEMINI_API_TIMEZONE?.trim() || GOOGLE_API_DEFAULT_TIMEZONE
       return { ...OBSERVED_DAY, timezone: tz }
     }
     return OBSERVED_DAY

@@ -8,6 +8,10 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import {
+  GEMINI_API_FREE_TIER_MODELS,
+  isProOnlyGeminiModel
+} from '../apps/api/src/modelRegistry.js'
 import { workspaceTmpDir } from './env.mjs'
 
 export const OPENCODE_PROVIDERS = {
@@ -69,10 +73,13 @@ export const AGY_POOL_ORDER = Object.freeze(['gemini', 'claude-gpt', 'gemini-4-a
 
 export const AGY_MODELS = AGY_POOL_ORDER.flatMap((pool) => AGY_POOLS[pool])
 
+export const GEMINI_API_MODELS = GEMINI_API_FREE_TIER_MODELS
+
 function parseOptions(argv) {
   let backend = 'opencode'
   let provider = ''
   let pool = ''
+  let model = ''
   let dryRun = false
   let list = false
   for (let index = 0; index < argv.length; index += 1) {
@@ -96,16 +103,27 @@ function parseOptions(argv) {
       index += 1
     } else if (arg.startsWith('--pool=')) {
       pool = arg.slice('--pool='.length)
+    } else if (arg === '--model' && argv[index + 1]) {
+      model = argv[index + 1]
+      index += 1
+    } else if (arg.startsWith('--model=')) {
+      model = arg.slice('--model='.length)
+    } else if (!arg.startsWith('-') && !model && (backend === 'gemini-api' || provider === 'gemini-api')) {
+      model = arg
     } else {
       throw new Error(`Unknown option: ${arg}`)
     }
   }
   if (provider === 'agy') backend = 'agy'
+  if (provider === 'gemini-api') backend = 'gemini-api'
   if (backend === 'agy' && !pool && provider && provider !== 'agy') {
     pool = provider
   }
-  if (!['opencode', 'agy'].includes(backend)) {
-    throw new Error(`Unsupported backend "${backend}". Use opencode or agy.`)
+  if (backend === 'gemini-api' && !model && provider && provider !== 'gemini-api') {
+    model = provider
+  }
+  if (!['opencode', 'agy', 'gemini-api'].includes(backend)) {
+    throw new Error(`Unsupported backend "${backend}". Use opencode, agy, or gemini-api.`)
   }
   if (backend === 'opencode' && provider && !Object.hasOwn(OPENCODE_PROVIDERS, provider)) {
     throw new Error(
@@ -117,7 +135,19 @@ function parseOptions(argv) {
       `Unknown Antigravity weekly pool "${pool}". Available: ${AGY_POOL_ORDER.join(', ')}`
     )
   }
-  return { backend, provider, pool, dryRun, list }
+  if (backend === 'gemini-api' && model) {
+    if (isProOnlyGeminiModel(model)) {
+      throw new Error(
+        `Model "${model}" requires a paid tier and is blocked on the Free-tier gemini-api lane; use --backend agy --pool gemini-4-argon instead.`
+      )
+    }
+    if (!GEMINI_API_MODELS.includes(model)) {
+      throw new Error(
+        `Unknown gemini-api Free-tier model "${model}". Available: ${GEMINI_API_MODELS.join(', ')}`
+      )
+    }
+  }
+  return { backend, provider, pool, model, dryRun, list }
 }
 
 function updateEnvKey(envPath, key, value) {
@@ -133,9 +163,14 @@ function updateEnvKey(envPath, key, value) {
 }
 
 function main() {
-  const { backend, provider, pool: agyPool, dryRun, list } = parseOptions(process.argv.slice(2))
+  const { backend, provider, pool: agyPool, model: explicitModel, dryRun, list } = parseOptions(process.argv.slice(2))
 
   if (list) {
+    if (backend === 'gemini-api') {
+      console.log('gemini-api (keyring Free-tier roster):')
+      for (const entry of GEMINI_API_MODELS) console.log(`  - ${entry}`)
+      return
+    }
     if (backend === 'agy') {
       const targetPools = agyPool ? [agyPool] : AGY_POOL_ORDER
       for (const entry of targetPools) {
@@ -161,7 +196,9 @@ function main() {
     agyDay: 0,
     agyIndex: 0,
     agyPoolIndex: 0,
-    agyIndices: Object.fromEntries(AGY_POOL_ORDER.map((name) => [name, 0]))
+    agyIndices: Object.fromEntries(AGY_POOL_ORDER.map((name) => [name, 0])),
+    geminiApiDay: 0,
+    geminiApiIndex: 0
   }
   try {
     const parsed = JSON.parse(readFileSync(stateFile, 'utf8'))
@@ -179,6 +216,29 @@ function main() {
 
   const today = Math.floor(Date.now() / 86400000)
   const envPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', '.env')
+
+  if (backend === 'gemini-api') {
+    const nextState = { ...state }
+    const dayAdvanced = nextState.geminiApiDay !== today
+    let index = Number(nextState.geminiApiIndex || 0) % GEMINI_API_MODELS.length
+    if (explicitModel) {
+      index = GEMINI_API_MODELS.indexOf(explicitModel)
+      nextState.geminiApiDay = today
+    } else if (dayAdvanced) {
+      nextState.geminiApiDay = today
+      index = (index + 1) % GEMINI_API_MODELS.length
+    }
+    nextState.geminiApiIndex = index
+    const targetModel = GEMINI_API_MODELS[index]
+    if (!dryRun) {
+      mkdirSync(tmpDir, { recursive: true })
+      writeFileSync(stateFile, JSON.stringify(nextState, null, 2))
+      updateEnvKey(envPath, 'GEMINI_API_MODEL', targetModel)
+    }
+    console.log(`${dryRun ? '[dry-run] Would rotate' : 'Rotated'} gemini-api model: ${targetModel}`)
+    console.log(`   State: day=${today}, index=${index}`)
+    return
+  }
 
   if (backend === 'agy') {
     const nextState = {

@@ -112,7 +112,7 @@ function refine(url, body = {}) {
   })
 }
 
-test('registry contains two callable local models and four CLI-backed remote models', () => {
+test('registry contains two callable local models and five CLI-backed remote models', () => {
   const models = createModelRegistry({ env: {} })
   assert.deepEqual(models.map((model) => [model.id, model.execution, model.backend, model.autoSelect]), [
     ['local-0.5b', 'live', 'http', true],
@@ -120,7 +120,8 @@ test('registry contains two callable local models and four CLI-backed remote mod
     ['colab-3b', 'live', 'colab-cli', false],
     ['kaggle-3b', 'batch', 'kaggle-cli', false],
     ['opencode', 'live', 'opencode-cli', false],
-    ['agy', 'live', 'agy-cli', false]
+    ['agy', 'live', 'agy-cli', false],
+    ['gemini-api', 'live', 'gemini-api-cli', false]
   ])
   assert.equal(models[0].minAvailableMemoryMb, 1024)
   assert.equal(models[1].minAvailableMemoryMb, 1792)
@@ -152,13 +153,24 @@ test('registry contains two callable local models and four CLI-backed remote mod
   assert.equal(models[5].cli.command, 'agy')
   assert.deepEqual(models[5].cli.probeArgs, ['--version'])
   assert.equal(models[5].cli.model, 'gemini-3.8-flash-medium')
+  assert.equal(models[6].cli.command, 'gemini-api')
+  assert.deepEqual(models[6].cli.probeArgs, ['whoami'])
+  assert.equal(models[6].cli.model, 'gemini-3.8-flash')
+  assert.deepEqual(models[6].cli.models, [
+    'gemini-3.8-flash',
+    'gemini-2.5-flash',
+    'gemini-3.5-flash-lite',
+    'gemma-4-31b-it'
+  ])
+  assert.equal(models[6].apiKeyEnv, undefined)
   assert.deepEqual(models.map((model) => [model.id, model.limitKind]), [
     ['local-0.5b', 'resource'],
     ['local-1.5b', 'resource'],
     ['colab-3b', 'compute_utilization'],
     ['kaggle-3b', 'compute_utilization'],
     ['opencode', 'provider_model'],
-    ['agy', 'provider_model']
+    ['agy', 'provider_model'],
+    ['gemini-api', 'provider_model']
   ])
 
   const accelerated = createModelRegistry({
@@ -224,7 +236,8 @@ test('models expose billing categories without changing quota enforcement', () =
       ['colab-3b', 'free'],
       ['kaggle-3b', 'free'],
       ['opencode', 'free'],
-      ['agy', 'free']
+      ['agy', 'free'],
+      ['gemini-api', 'free']
     ]
   )
 
@@ -292,7 +305,7 @@ test('serverless slot is registered only when an endpoint is configured', () => 
   })
 
   assert.deepEqual(models.map((model) => model.id), [
-    'local-0.5b', 'local-1.5b', 'serverless', 'colab-3b', 'kaggle-3b', 'opencode', 'agy'
+    'local-0.5b', 'local-1.5b', 'serverless', 'colab-3b', 'kaggle-3b', 'opencode', 'agy', 'gemini-api'
   ])
   const serverless = models.find((model) => model.id === 'serverless')
   assert.equal(serverless.url, 'https://api.example/openai')
@@ -354,7 +367,7 @@ test('multiple serverless slots register independently', () => {
   })
 
   assert.deepEqual(models.map((model) => model.id), [
-    'local-0.5b', 'local-1.5b', 'slot-a', 'slot-b', 'colab-3b', 'kaggle-3b', 'opencode', 'agy'
+    'local-0.5b', 'local-1.5b', 'slot-a', 'slot-b', 'colab-3b', 'kaggle-3b', 'opencode', 'agy', 'gemini-api'
   ])
 
   const slotA = models.find((model) => model.id === 'slot-a')
@@ -403,7 +416,7 @@ test('legacy serverless variables coexist with JSON slots', () => {
   })
 
   assert.deepEqual(models.map((model) => model.id), [
-    'local-0.5b', 'local-1.5b', 'serverless', 'slot-a', 'colab-3b', 'kaggle-3b', 'opencode', 'agy'
+    'local-0.5b', 'local-1.5b', 'serverless', 'slot-a', 'colab-3b', 'kaggle-3b', 'opencode', 'agy', 'gemini-api'
   ])
 })
 

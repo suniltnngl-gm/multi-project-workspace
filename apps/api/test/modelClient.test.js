@@ -3,7 +3,13 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { createModelClient, ModelCallError, parseColabStatus } from '../src/modelClient.js'
+import {
+  createModelClient,
+  ModelCallError,
+  parseColabStatus,
+  parseGeminiApiOutput,
+  parseGeminiApiWhoami
+} from '../src/modelClient.js'
 
 const SCRIPTS = '/workspace/scripts'
 const RESULT_SENTINEL = '__WORKSPACE_MODEL_RESULT__'
@@ -1475,4 +1481,139 @@ test('HTTP completions report missing usage instead of guessing', async () => {
   )
 
   assert.deepEqual(usages, [undefined])
+})
+
+test('gemini-api probes via whoami [keyring], strips GEMINI_API_KEY, and parses interactions JSON + errors', async () => {
+  const whoamiOk = parseGeminiApiWhoami(`
+Configuration
+=============
+Credentials:
+  --api-key                   [keyring] AQ******Iw
+  --access-token              [unset  ] (not set)
+`)
+  assert.deepEqual(whoamiOk, { ok: true, source: 'keyring' })
+
+  const whoamiUnset = parseGeminiApiWhoami(`
+Credentials:
+  --api-key                   [unset  ] (not set)
+`)
+  assert.equal(whoamiUnset.ok, false)
+  assert.match(whoamiUnset.error, /\[keyring\]/)
+
+  const parsedInteraction = parseGeminiApiOutput(JSON.stringify({
+    id: 'v1_interaction_123',
+    status: 'completed',
+    model: 'gemini-3.8-flash',
+    steps: [
+      { type: 'thought', signature: 'sig' },
+      { type: 'model_output', content: [{ type: 'text', text: '{"ok":true}' }] }
+    ],
+    usage: {
+      total_input_tokens: 12,
+      total_output_tokens: 6,
+      total_thought_tokens: 8,
+      total_tokens: 26
+    }
+  }))
+  assert.equal(parsedInteraction.interactionId, 'v1_interaction_123')
+  assert.equal(parsedInteraction.text, '{"ok":true}')
+  assert.deepEqual(parsedInteraction.usage, {
+    promptTokens: 12,
+    completionTokens: 14,
+    totalTokens: 26
+  })
+
+  const calls = []
+  const usages = []
+  const prevEnvKey = process.env.GEMINI_API_KEY
+  process.env.GEMINI_API_KEY = 'should-never-reach-gemini-api-child'
+  try {
+    const client = createClient({
+      runCommand: async (command, args, options) => {
+        calls.push({ command, args, envHasGeminiApiKey: 'GEMINI_API_KEY' in (options?.env ?? {}) })
+        if (args[0] === 'whoami') {
+          return {
+            stdout: '  --api-key                   [keyring] AQ******Iw\n',
+            stderr: ''
+          }
+        }
+        if (args.includes('--model') && args[args.indexOf('--model') + 1] === 'gemini-3.5-flash-lite') {
+          return {
+            stdout: '',
+            stderr: 'Error 403 FREE_TIER_VERIFICATION_REQUIRED: verify your AI Studio project'
+          }
+        }
+        return {
+          stdout: JSON.stringify({
+            id: `v1_turn_${calls.length}`,
+            status: 'completed',
+            steps: [{ type: 'model_output', content: [{ type: 'text', text: 'OK' }] }],
+            usage: { total_input_tokens: 4, total_output_tokens: 1, total_thought_tokens: 5, total_tokens: 10 }
+          }),
+          stderr: ''
+        }
+      }
+    })
+
+    const geminiModel = {
+      id: 'gemini-api',
+      label: 'Gemini API CLI',
+      backend: 'gemini-api-cli',
+      remote: true,
+      timeoutMs: 30000,
+      cli: {
+        command: 'gemini-api',
+        probeArgs: ['whoami'],
+        model: 'gemini-3.8-flash'
+      }
+    }
+
+    const probeResult = await client.probe(geminiModel)
+    assert.deepEqual(probeResult, { ok: true, source: 'keyring' })
+    assert.equal(calls[0].envHasGeminiApiKey, false)
+
+    const reply1 = await client.complete(geminiModel, {
+      messages: [
+        { role: 'system', content: 'Be terse.' },
+        { role: 'user', content: 'Reply OK' }
+      ],
+      sessionKey: 's1',
+      onUsage: (u) => usages.push(u)
+    })
+    assert.equal(reply1, 'OK')
+    assert.equal(calls[1].command, 'gemini-api')
+    assert.equal(calls[1].envHasGeminiApiKey, false)
+    assert.ok(!calls[1].args.includes('--api-key'))
+    assert.ok(calls[1].args.includes('--stream=false'))
+    assert.ok(calls[1].args.includes('--output-format'))
+    assert.ok(calls[1].args.includes('json'))
+    assert.ok(calls[1].args.includes('--system'))
+    assert.deepEqual(usages[0], { promptTokens: 4, completionTokens: 6, totalTokens: 10 })
+
+    await client.complete(geminiModel, {
+      messages: [{ role: 'user', content: 'Follow up' }],
+      sessionKey: 's1'
+    })
+    assert.ok(calls[2].args.includes('--previous-interaction-id'))
+    assert.equal(calls[2].args[calls[2].args.indexOf('--previous-interaction-id') + 1], 'v1_turn_2')
+
+    await assert.rejects(
+      () => client.complete({
+        ...geminiModel,
+        cli: { ...geminiModel.cli, model: 'gemini-3.5-flash-lite' }
+      }, { messages: [{ role: 'user', content: 'hi' }] }),
+      (error) => error instanceof ModelCallError && error.status === 403 && error.code === 'free_tier_verification_required'
+    )
+
+    await assert.rejects(
+      () => client.complete({
+        ...geminiModel,
+        cli: { ...geminiModel.cli, model: 'gemini-4-argon-medium' }
+      }, { messages: [{ role: 'user', content: 'hi' }] }),
+      (error) => error instanceof ModelCallError && error.status === 400 && error.code === 'pro_only_model'
+    )
+  } finally {
+    if (prevEnvKey === undefined) delete process.env.GEMINI_API_KEY
+    else process.env.GEMINI_API_KEY = prevEnvKey
+  }
 })

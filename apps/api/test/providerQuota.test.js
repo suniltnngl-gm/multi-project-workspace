@@ -666,3 +666,73 @@ test('console-google API key models share one GCP project domain while running c
   const googleWorker = failoverRoster.workers.find((worker) => worker.groupKey === 'opencode:console-google')
   assert.equal(googleWorker?.model, 'opencode@console-google/gemini-3.5-flash-lite')
 })
+
+test('gemini-api shares one gemini-api:gcp-project domain alongside agy & opencode, blocks gemini-4-argon, and fails over per model', () => {
+  const budget = createModelBudget({
+    env: {
+      GEMINI_API_MAX_REQUESTS_PER_DAY: '50',
+      AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK: '50',
+      OPENCODE_AI_MAX_REQUESTS_PER_DAY: '50'
+    }
+  })
+
+  const models = [
+    model({
+      id: 'gemini-api',
+      provider: 'gemini-api',
+      backend: 'gemini-api-cli',
+      limitKind: 'provider_model',
+      billingCategory: 'free',
+      cli: { command: 'gemini-api', model: 'gemini-3.8-flash' }
+    }),
+    model({
+      id: 'agy',
+      provider: 'agy',
+      backend: 'agy-cli',
+      limitKind: 'provider_model',
+      billingCategory: 'free',
+      cli: { command: 'agy', model: 'gemini-3.8-flash-medium' }
+    }),
+    model({
+      id: 'opencode',
+      provider: 'opencode',
+      backend: 'opencode-cli',
+      limitKind: 'provider_model',
+      billingCategory: 'free',
+      cli: { command: 'opencode', model: 'opencode/deepseek-v4.1-flash-free' }
+    })
+  ]
+
+  const ga38 = resolveAgentModel(models, 'gemini-api@gemini-3.8-flash')
+  const gaGemma = resolveAgentModel(models, 'gemini-api@gemma-4-31b-it')
+  assert.equal(modelProviderKey(ga38), 'gemini-api:gcp-project')
+  assert.equal(modelProviderKey(gaGemma), 'gemini-api:gcp-project')
+
+  const roster = buildSwarmRoster({
+    models,
+    modelBudget: budget,
+    workerCount: 3,
+    includeReviewer: false,
+    geminiApiModels: ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-4-argon-medium', 'gemma-4-31b-it'],
+    agyModels: ['gemini-3.8-flash-medium'],
+    opencodeModels: ['opencode/deepseek-v4.1-flash-free']
+  })
+
+  const groupKeys = roster.workers.map((worker) => worker.groupKey).sort()
+  assert.deepEqual(groupKeys, ['agy:gemini', 'gemini-api:gcp-project', 'opencode:opencode/deepseek-v4.1-flash-free'])
+  assert.ok(!roster.workers.some((worker) => String(worker.model).includes('argon')))
+
+  budget.observe429('gemini-api', { scope: 'gemini-3.8-flash', retryAfter: 300 })
+  const failoverRoster = buildSwarmRoster({
+    models,
+    modelBudget: budget,
+    workerCount: 3,
+    includeReviewer: false,
+    geminiApiModels: ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemma-4-31b-it'],
+    agyModels: ['gemini-3.8-flash-medium'],
+    opencodeModels: ['opencode/deepseek-v4.1-flash-free']
+  })
+
+  const geminiApiWorker = failoverRoster.workers.find((worker) => worker.groupKey === 'gemini-api:gcp-project')
+  assert.equal(geminiApiWorker?.model, 'gemini-api@gemini-3.5-flash-lite')
+})

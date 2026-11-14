@@ -234,6 +234,18 @@ export const AGY_POOL_DEFAULT_MODELS = Object.freeze({
   'gemini-4-argon': 'gemini-4-argon-medium'
 })
 
+export const GEMINI_API_FREE_TIER_MODELS = Object.freeze([
+  'gemini-3.8-flash',
+  'gemini-2.5-flash',
+  'gemini-3.5-flash-lite',
+  'gemma-4-31b-it'
+])
+
+export function isProOnlyGeminiModel(scope) {
+  const normalized = String(scope ?? '').trim().toLowerCase()
+  return normalized.includes('gemini-4-argon')
+}
+
 export function agyQuotaPoolForScope(scope) {
   let normalized = String(scope ?? '').trim().toLowerCase()
   if (!normalized) return null
@@ -354,6 +366,25 @@ export const EXTERNAL_MODEL_DEFINITIONS = Object.freeze([
     defaultTimeoutMs: 300000,
     minAvailableMemoryMb: 0,
     notes: 'Antigravity CLI (`agy --print --output-format json`); set AGY_AI_URL to use an HTTP tunnel instead.'
+  },
+  {
+    id: 'gemini-api',
+    label: 'Gemini API CLI',
+    provider: 'gemini-api',
+    execution: 'live',
+    backend: 'gemini-api-cli',
+    callable: true,
+    remote: true,
+    limitKind: 'provider_model',
+    priority: 4,
+    billingEnv: 'GEMINI_API_BILLING',
+    billingCategory: 'free',
+    urlEnv: 'GEMINI_API_URL',
+    timeoutEnv: 'GEMINI_API_TIMEOUT_MS',
+    autoSelectEnv: 'GEMINI_API_AUTO_SELECT',
+    defaultTimeoutMs: 180000,
+    minAvailableMemoryMb: 0,
+    notes: 'Google GenAI CLI (`gemini-api generate --stream=false --output-format json`); uses system keyring credential.'
   }
 ])
 
@@ -490,6 +521,15 @@ function createCliConfig(env) {
       conversation: readText(env, 'AGY_AI_CONVERSATION', ''),
       auditDir: readText(env, 'AGY_AI_AUDIT_DIR', ''),
       timeoutMs: readNumber(env, 'AGY_AI_TIMEOUT_MS', 300000)
+    },
+    geminiApi: {
+      command: readText(env, 'GEMINI_API_COMMAND', 'gemini-api'),
+      probeArgs: ['whoami'],
+      model: readText(env, 'GEMINI_API_MODEL', 'gemini-3.8-flash'),
+      models: readList(env, 'GEMINI_API_MODELS', [...GEMINI_API_FREE_TIER_MODELS]),
+      previousInteractionId: readText(env, 'GEMINI_API_INTERACTION_ID', ''),
+      auditDir: readText(env, 'GEMINI_API_AUDIT_DIR', ''),
+      timeoutMs: readNumber(env, 'GEMINI_API_TIMEOUT_MS', 180000)
     }
   }
 }
@@ -776,9 +816,11 @@ export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
       ? cli.opencode.model
       : definition.backend === 'agy-cli'
         ? cli.agy.model
-        : definition.backend === 'colab-cli'
-          ? cli.colab.modelId
-          : ''
+        : definition.backend === 'gemini-api-cli'
+          ? cli.geminiApi.model
+          : definition.backend === 'colab-cli'
+            ? cli.colab.modelId
+            : ''
     const model = {
       ...definition,
       execution: url ? 'live' : definition.execution,
@@ -815,6 +857,9 @@ export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
       )
       model.quotaPools = AGY_QUOTA_POOLS
       model.quotaWindow = hasWeeklyAgyEnv || !env.AGY_AI_MAX_REQUESTS_PER_DAY ? 'week' : 'day'
+    }
+    if (backend === 'gemini-api-cli') {
+      model.cli = cli.geminiApi
     }
     return model
   })

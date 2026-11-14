@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { createHash } from 'node:crypto'
+import { isProOnlyGeminiModel } from './modelRegistry.js'
 
 const execFileAsync = promisify(execFile)
 const RESULT_SENTINEL = '__WORKSPACE_MODEL_RESULT__'
@@ -93,6 +94,7 @@ async function defaultRunCommand(command, args, {
       timeout: timeoutMs,
       maxBuffer: 10 * 1024 * 1024,
       env,
+      stdio: ['ignore', 'pipe', 'pipe'],
       ...(cwd ? { cwd } : {}),
       signal
     })
@@ -177,15 +179,16 @@ function joinMessagesForPrompt(messages = []) {
     .join('\n\n')
 }
 
-export function parseAgyOutput(stdout) {
-  const raw = stripAnsi(stdout).trim()
-  if (!raw) {
-    return { conversationId: '', text: '', error: 'The Antigravity CLI returned no output.', usage: undefined }
-  }
+function geminiApiKeyringEnv(baseEnv = process.env) {
+  const cleanEnv = { ...(baseEnv && typeof baseEnv === 'object' ? baseEnv : {}) }
+  delete cleanEnv.GEMINI_API_KEY
+  return cleanEnv
+}
 
-  let parsed = null
+function parseJsonObjectFromOutput(raw) {
+  if (!raw) return null
   try {
-    parsed = JSON.parse(raw)
+    return JSON.parse(raw)
   } catch {
     const lines = raw
       .split('\n')
@@ -195,24 +198,166 @@ export function parseAgyOutput(stdout) {
       const candidate = lines[index]
       if (!candidate.startsWith('{')) continue
       try {
-        parsed = JSON.parse(candidate)
-        break
+        return JSON.parse(candidate)
       } catch {
         // Keep scanning earlier lines.
       }
     }
-    if (!parsed) {
-      const firstBrace = raw.indexOf('{')
-      const lastBrace = raw.lastIndexOf('}')
-      if (firstBrace >= 0 && lastBrace > firstBrace) {
-        try {
-          parsed = JSON.parse(raw.slice(firstBrace, lastBrace + 1))
-        } catch {
-          parsed = null
-        }
+    const firstBrace = raw.indexOf('{')
+    const lastBrace = raw.lastIndexOf('}')
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      try {
+        return JSON.parse(raw.slice(firstBrace, lastBrace + 1))
+      } catch {
+        return null
       }
     }
   }
+  return null
+}
+
+export function parseGeminiApiWhoami(stdout) {
+  const text = stripAnsi(stdout)
+  if (/--api-key\s+\[keyring\]/i.test(text)) {
+    return { ok: true, source: 'keyring' }
+  }
+  return {
+    ok: false,
+    error: 'The gemini-api CLI does not have a [keyring] API key configured (run `gemini-api configure`).'
+  }
+}
+
+function isFreeTierVerificationError(text) {
+  return /FREE_TIER_VERIFICATION_REQUIRED|free_tier_verification_required/i.test(String(text ?? ''))
+}
+
+export function parseGeminiApiOutput(stdout) {
+  const raw = stripAnsi(stdout).trim()
+  if (!raw) {
+    return {
+      interactionId: '',
+      text: '',
+      error: 'The Gemini API CLI returned no output.',
+      usage: undefined
+    }
+  }
+
+  const parsed = parseJsonObjectFromOutput(raw)
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    if (isFreeTierVerificationError(raw)) {
+      return {
+        interactionId: '',
+        text: '',
+        status: 403,
+        code: 'free_tier_verification_required',
+        error: 'Google AI Studio Free Tier verification is required for this GCP project (403 FREE_TIER_VERIFICATION_REQUIRED). Complete verification in Google AI Studio or switch to another backend.',
+        usage: undefined
+      }
+    }
+    return {
+      interactionId: '',
+      text: '',
+      error: raw.startsWith('{') ? 'The Gemini API CLI returned invalid JSON output.' : raw,
+      usage: undefined
+    }
+  }
+
+  const interactionId = String(parsed.id ?? parsed.interaction_id ?? parsed.interactionId ?? '').trim()
+  let text = ''
+  if (Array.isArray(parsed.steps)) {
+    const modelSteps = parsed.steps.filter((step) => step && step.type === 'model_output')
+    const candidateSteps = modelSteps.length > 0
+      ? modelSteps
+      : parsed.steps.filter((step) => step && step.type !== 'thought')
+    const parts = []
+    for (const step of candidateSteps) {
+      if (Array.isArray(step.content)) {
+        for (const item of step.content) {
+          if (typeof item?.text === 'string' && (!item.type || item.type === 'text')) {
+            parts.push(item.text)
+          }
+        }
+      } else if (typeof step.content === 'string') {
+        parts.push(step.content)
+      } else if (typeof step.text === 'string') {
+        parts.push(step.text)
+      }
+    }
+    text = parts.join('').trim()
+  }
+  if (!text) {
+    for (const field of [parsed.text, parsed.output, parsed.response, parsed.content]) {
+      if (typeof field === 'string' && field.trim()) {
+        text = field.trim()
+        break
+      }
+    }
+  }
+
+  let error = null
+  let status
+  let code
+  if (parsed.error) {
+    error = typeof parsed.error === 'string'
+      ? parsed.error
+      : (parsed.error.message || JSON.stringify(parsed.error))
+    if (Number.isFinite(Number(parsed.error.code ?? parsed.error.status))) {
+      status = Number(parsed.error.code ?? parsed.error.status)
+    }
+    if (isFreeTierVerificationError(`${error} ${JSON.stringify(parsed.error)}`)) {
+      status = 403
+      code = 'free_tier_verification_required'
+      error = 'Google AI Studio Free Tier verification is required for this GCP project (403 FREE_TIER_VERIFICATION_REQUIRED). Complete verification in Google AI Studio or switch to another backend.'
+    }
+  } else if (parsed.status && !['completed', 'SUCCESS', 'ok', 'OK'].includes(String(parsed.status))) {
+    error = String(parsed.message || parsed.error_message || text || `gemini-api exited with status ${parsed.status}.`)
+    if (isFreeTierVerificationError(error)) {
+      status = 403
+      code = 'free_tier_verification_required'
+    }
+  } else if (!text && isFreeTierVerificationError(raw)) {
+    status = 403
+    code = 'free_tier_verification_required'
+    error = 'Google AI Studio Free Tier verification is required for this GCP project (403 FREE_TIER_VERIFICATION_REQUIRED). Complete verification in Google AI Studio or switch to another backend.'
+  }
+
+  let usage
+  if (parsed.usage && typeof parsed.usage === 'object') {
+    const promptTokens = Number(
+      parsed.usage.total_input_tokens
+      ?? parsed.usage.initial_input_tokens
+      ?? parsed.usage.input_tokens
+      ?? parsed.usage.prompt_tokens
+      ?? 0
+    )
+    const outputTokens = Number(
+      parsed.usage.total_output_tokens
+      ?? parsed.usage.output_tokens
+      ?? parsed.usage.completion_tokens
+      ?? 0
+    )
+    const thoughtTokens = Number(
+      parsed.usage.total_thought_tokens
+      ?? parsed.usage.thinking_tokens
+      ?? 0
+    )
+    const completionTokens = outputTokens + (Number.isFinite(thoughtTokens) ? thoughtTokens : 0)
+    const totalTokens = Number(parsed.usage.total_tokens ?? (promptTokens + completionTokens))
+    if (Number.isFinite(promptTokens) && Number.isFinite(completionTokens) && Number.isFinite(totalTokens)) {
+      usage = { promptTokens, completionTokens, totalTokens }
+    }
+  }
+
+  return { interactionId, text, error, ...(status ? { status } : {}), ...(code ? { code } : {}), usage }
+}
+
+export function parseAgyOutput(stdout) {
+  const raw = stripAnsi(stdout).trim()
+  if (!raw) {
+    return { conversationId: '', text: '', error: 'The Antigravity CLI returned no output.', usage: undefined }
+  }
+
+  const parsed = parseJsonObjectFromOutput(raw)
 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return { conversationId: '', text: '', error: 'The Antigravity CLI returned invalid JSON output.', usage: undefined }
@@ -314,6 +459,7 @@ export function createModelClient({
   const colabStates = new Map()
   const opencodeSessions = new Map()
   const agySessions = new Map()
+  const geminiApiSessions = new Map()
   const probeCache = new Map()
   // Cache and adaptive timeout state belong to the client instance. Module
   // singletons leaked cached completions and timeouts between app instances
@@ -416,8 +562,16 @@ export function createModelClient({
     try {
       const args = model.cli.probeArgs
         ?? (command === 'colab' ? ['version'] : ['--version'])
-      await runCommand(command, args, { timeoutMs: 20000 })
-      value = { ok: true }
+      const runOptions = model.backend === 'gemini-api-cli'
+        ? { timeoutMs: 20000, env: geminiApiKeyringEnv(process.env) }
+        : { timeoutMs: 20000 }
+      const { stdout, stderr } = await runCommand(command, args, runOptions) ?? {}
+      if (model.backend === 'gemini-api-cli') {
+        const whoami = parseGeminiApiWhoami(`${stdout ?? ''}\n${stderr ?? ''}`)
+        value = whoami.ok ? { ok: true, source: whoami.source } : { ok: false, error: whoami.error }
+      } else {
+        value = { ok: true }
+      }
       if (command === 'colab') {
         const status = await readColabStatus(model, { timeoutMs: 15000 })
         value.sessionState = status.error
@@ -443,6 +597,7 @@ export function createModelClient({
       || model.backend === 'kaggle-cli'
       || model.backend === 'opencode-cli'
       || model.backend === 'agy-cli'
+      || model.backend === 'gemini-api-cli'
     let result
     if (cliBackend) {
       result = await probeCli(model)
@@ -452,9 +607,9 @@ export function createModelClient({
     if (result.ok) return result
     return {
       ok: false,
-      error: cliBackend
+      error: result.error || (cliBackend
         ? `The ${model.cli.command} CLI is not installed or not authenticated for ${model.label}.`
-        : `Configured endpoint for ${model.label} is unavailable.`
+        : `Configured endpoint for ${model.label} is unavailable.`)
     }
   }
 
@@ -1029,6 +1184,150 @@ export function createModelClient({
     return parsed.text
   }
 
+  function geminiApiSessionKey(model, request) {
+    return [
+      model.id ?? 'gemini-api',
+      model.cli?.model ?? '',
+      request.worktreePath ?? '',
+      request.sessionKey ?? ''
+    ].join('\0')
+  }
+
+  function isMissingGeminiApiInteractionMessage(text) {
+    return /interaction.*not found|invalid.*interaction|unknown.*interaction|previous.*interaction/i.test(String(text ?? ''))
+  }
+
+  async function completeGeminiApi(model, request) {
+    reportPhase(request, 'generating')
+    const targetModel = model.cli?.model || 'gemini-3.8-flash'
+    if (isProOnlyGeminiModel(targetModel)) {
+      throw new ModelCallError(
+        `Model ${targetModel} requires a paid tier and is blocked on the Free-tier gemini-api lane; route it to agy instead.`,
+        400,
+        { code: 'pro_only_model' }
+      )
+    }
+
+    const systemText = (request.messages ?? [])
+      .filter((message) => message.role === 'system' && message.content)
+      .map((message) => message.content)
+      .join('\n\n')
+    const nonSystemMessages = (request.messages ?? []).filter((message) => message.role !== 'system')
+    const prompt = nonSystemMessages.length > 0
+      ? joinMessagesForPrompt(nonSystemMessages)
+      : joinMessagesForPrompt(request.messages ?? [])
+    const timeoutMs = model.timeoutMs ?? 180000
+    const sessionKey = geminiApiSessionKey(model, request)
+    const cachedInteractionId = geminiApiSessions.get(sessionKey) || model.cli?.previousInteractionId || ''
+
+    const buildArgs = (interactionId) => {
+      const args = ['generate', prompt, '--model', targetModel, '--stream=false', '--output-format', 'json']
+      if (systemText && nonSystemMessages.length > 0) {
+        args.push('--system', systemText)
+      }
+      if (interactionId) {
+        args.push('--previous-interaction-id', interactionId)
+      }
+      return args
+    }
+
+    const runGeminiApiOnce = async (interactionId) => {
+      const { stdout, stderr } = await runCommand(model.cli.command, buildArgs(interactionId), {
+        timeoutMs,
+        env: geminiApiKeyringEnv(process.env),
+        ...(request.worktreePath ? { cwd: request.worktreePath } : {}),
+        signal: request.signal
+      })
+      const parsed = parseGeminiApiOutput(stdout)
+      if (parsed.error && stderr && parsed.error === 'The Gemini API CLI returned no output.') {
+        const stderrText = stripAnsi(stderr).trim()
+        if (isFreeTierVerificationError(stderrText)) {
+          parsed.status = 403
+          parsed.code = 'free_tier_verification_required'
+          parsed.error = 'Google AI Studio Free Tier verification is required for this GCP project (403 FREE_TIER_VERIFICATION_REQUIRED). Complete verification in Google AI Studio or switch to another backend.'
+        } else {
+          parsed.error = stderrText
+        }
+      }
+      return parsed
+    }
+
+    const throwGeminiApiCliFailure = (err) => {
+      if (err instanceof ModelCallError) throw err
+      const message = String(err?.message || err)
+      if (isFreeTierVerificationError(message)) {
+        throw new ModelCallError(
+          'Google AI Studio Free Tier verification is required for this GCP project (403 FREE_TIER_VERIFICATION_REQUIRED). Complete verification in Google AI Studio or switch to another backend.',
+          403,
+          { code: 'free_tier_verification_required' }
+        )
+      }
+      if (isRateLimitText(message)) {
+        throw new ModelCallError(message, 429, {
+          retryAfter: retrySecondsFromText(message) ?? undefined
+        })
+      }
+      throw new ModelCallError(`The Gemini API CLI failed: ${message}`, 502)
+    }
+
+    let parsed
+    try {
+      parsed = await runGeminiApiOnce(cachedInteractionId)
+      if (cachedInteractionId && parsed.error && isMissingGeminiApiInteractionMessage(parsed.error)) {
+        geminiApiSessions.delete(sessionKey)
+        parsed = await runGeminiApiOnce('')
+      }
+    } catch (error) {
+      if (cachedInteractionId && isMissingGeminiApiInteractionMessage(error?.message)) {
+        geminiApiSessions.delete(sessionKey)
+        try {
+          parsed = await runGeminiApiOnce('')
+        } catch (retryError) {
+          throwGeminiApiCliFailure(retryError)
+        }
+      } else {
+        throwGeminiApiCliFailure(error)
+      }
+    }
+
+    if (parsed.error || !parsed.text) {
+      const errorMessage = String(parsed.error || 'The Gemini API CLI returned no model output.')
+      if (parsed.code === 'free_tier_verification_required' || isFreeTierVerificationError(errorMessage)) {
+        throw new ModelCallError(errorMessage, 403, { code: 'free_tier_verification_required' })
+      }
+      if (isRateLimitText(errorMessage)) {
+        throw new ModelCallError(errorMessage, 429, {
+          retryAfter: retrySecondsFromText(errorMessage) ?? undefined
+        })
+      }
+      throw new ModelCallError(errorMessage, parsed.status && parsed.status >= 400 ? parsed.status : 502)
+    }
+
+    const nextInteractionId = parsed.interactionId || cachedInteractionId
+    if (nextInteractionId) geminiApiSessions.set(sessionKey, nextInteractionId)
+
+    reportUsage(
+      request,
+      parsed.usage ?? {
+        promptTokens: estimateTokens(prompt),
+        completionTokens: estimateTokens(parsed.text),
+        totalTokens: estimateTokens(prompt) + estimateTokens(parsed.text)
+      }
+    )
+
+    if (model.cli?.auditDir) {
+      await writeColabAudit(model, {
+        interactionId: nextInteractionId || null,
+        status: 'ok',
+        request: { messages: request.messages, maxTokens: request.maxTokens },
+        response: { content: parsed.text },
+        usage: parsed.usage ?? null
+      })
+    }
+
+    return parsed.text
+  }
+
   function promptCacheKey(model, request) {
     // Worktree and task are part of the prompt's effective input for the CLI
     // backends, so two otherwise-identical requests must not share a cache
@@ -1118,6 +1417,7 @@ export function createModelClient({
       else if (model.backend === 'kaggle-cli') content = await completeKaggle(model, request)
       else if (model.backend === 'opencode-cli') content = await completeOpencode(model, request)
       else if (model.backend === 'agy-cli') content = await completeAgy(model, request)
+      else if (model.backend === 'gemini-api-cli') content = await completeGeminiApi(model, request)
       else if (model.backend === 'ollama') content = await completeOllama(model, request)
       else content = await completeHttp(model, request)
       const observed = Date.now() - startedAt

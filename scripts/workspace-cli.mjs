@@ -670,6 +670,7 @@ async function aiModel(args) {
     }
     info(`Current OPENCODE_AI_MODEL: ${readEnvValue('OPENCODE_AI_MODEL')}`)
     info(`Current AGY_AI_MODEL: ${readEnvValue('AGY_AI_MODEL')}`)
+    info(`Current GEMINI_API_MODEL: ${readEnvValue('GEMINI_API_MODEL')}`)
     info('Available providers/models:')
     return runNodeScript('opencode-console.mjs', ['status', ...restArgs])
   }
@@ -678,7 +679,7 @@ async function aiModel(args) {
   }
   fail(
     `Unknown ai model subcommand: ${subcommand}\n` +
-    'Usage: ./workspace ai model [rotate|status|list|providers|study] [--dry-run] [--all] [--provider NAME] [--backend opencode|agy] [--agy]',
+    'Usage: ./workspace ai model [rotate|status|list|providers|study] [--dry-run] [--all] [--provider NAME] [--backend opencode|agy|gemini-api] [--agy]',
     2
   )
 }

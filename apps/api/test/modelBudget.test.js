@@ -739,3 +739,37 @@ test('opencode console-google keeps per-model failover ledgers, stays isolated f
   assert.equal(budget.check('opencode', 'console-google/gemini-3.8-flash').ok, true)
   assert.equal(budget.snapshot('opencode', 'console-google/gemini-3.8-flash').used, 0)
 })
+
+test('gemini-api tracks per-model ledgers independently, stays isolated from agy, and resets at Pacific midnight', () => {
+  const clock = clockAt('2026-01-14T23:55:00Z')
+  const budget = createModelBudget({
+    env: {
+      GEMINI_API_MAX_REQUESTS_PER_DAY: '2',
+      GEMINI_API_MAX_REQUESTS_PER_MINUTE: '10',
+      GEMINI_API_TIMEZONE: 'America/Los_Angeles',
+      AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK: '5'
+    },
+    now: clock.now
+  })
+
+  budget.record('gemini-api', 1, 'gemini-3.8-flash')
+  budget.observe429('gemini-api', { scope: 'gemini-3.8-flash', retryAfter: 30 })
+  budget.record('gemini-api', 1, 'gemini-3.8-flash')
+
+  assert.equal(budget.check('gemini-api', 'gemini-3.8-flash').ok, false)
+  assert.equal(budget.snapshot('gemini-api', 'gemini-3.5-flash-lite').used, 0)
+  assert.equal(budget.check('gemini-api', 'gemini-3.5-flash-lite').ok, true)
+  assert.equal(budget.snapshot('agy', 'gemini-3.8-flash-medium').used, 0)
+
+  // Configured daily RPD & learned 429 stay active past cooldown and UTC midnight (00:05Z = 16:05 PST)
+  // until midnight America/Los_Angeles (08:00Z in winter PST).
+  clock.set('2026-01-15T00:05:00Z')
+  assert.equal(budget.check('gemini-api', 'gemini-3.8-flash').ok, false)
+
+  clock.set('2026-01-15T07:59:00Z')
+  assert.equal(budget.check('gemini-api', 'gemini-3.8-flash').ok, false)
+
+  clock.set('2026-01-15T08:01:00Z')
+  assert.equal(budget.check('gemini-api', 'gemini-3.8-flash').ok, true)
+  assert.equal(budget.snapshot('gemini-api', 'gemini-3.8-flash').used, 0)
+})

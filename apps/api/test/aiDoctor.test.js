@@ -215,7 +215,7 @@ test('offline doctor runs configuration checks without probing anything', async 
     assert.match(marker.message, /skipped/)
     for (const area of areas) {
       assert.ok(
-        !/^(local-|colab|kaggle|serverless|opencode|agy|ollama)/.test(area),
+        !/^(local-|colab|kaggle|serverless|opencode|agy|gemini-api|ollama)/.test(area),
         `offline run reported a probe result for ${area}`
       )
     }
@@ -404,8 +404,46 @@ test('the doctor CLI skips probing in offline mode', async () => {
       )
     }
     assert.ok(!parsed.checks.some(
-      (check) => /^(local-|colab-|kaggle-|groq$|opencode$|agy$)/.test(check.area)
+      (check) => /^(local-|colab-|kaggle-|groq$|opencode$|agy$|gemini-api$)/.test(check.area)
     ))
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('doctor reports gemini-api keyring failure and America/Los_Angeles quota configuration', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'workspace-doctor-gemini-api-'))
+  try {
+    const modelClient = {
+      probe: async (model) => {
+        if (model.backend === 'gemini-api-cli') {
+          return {
+            ok: false,
+            error: 'The gemini-api CLI does not have a [keyring] API key configured (run `gemini-api configure`).'
+          }
+        }
+        return { ok: true }
+      }
+    }
+
+    const { checks } = await runDoctorChecks({
+      env: {
+        GEMINI_API_MAX_REQUESTS_PER_DAY: '50',
+        GEMINI_API_TIMEZONE: 'America/Los_Angeles'
+      },
+      databasePath: join(directory, 'doctor.sqlite'),
+      modelClient
+    })
+
+    const quotaCheck = checks.find((check) => check.area === 'quota' && /Gemini API CLI/.test(check.message))
+    assert.ok(quotaCheck)
+    assert.equal(quotaCheck.level, 'ok')
+    assert.match(quotaCheck.message, /50 requests per fixed day \(America\/Los_Angeles\)/)
+
+    const probeCheck = checks.find((check) => check.area === 'gemini-api')
+    assert.ok(probeCheck)
+    assert.equal(probeCheck.level, 'error')
+    assert.match(probeCheck.message, /\[keyring\]/)
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

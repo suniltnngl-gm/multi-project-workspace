@@ -10,6 +10,7 @@ import { createModelBudget } from '../apps/api/src/modelBudget.js'
 import {
   AGY_POOL_DEFAULT_MODELS,
   AGY_QUOTA_POOLS,
+  GEMINI_API_FREE_TIER_MODELS,
   createModelRegistry,
   modelQuotaProfiles
 } from '../apps/api/src/modelRegistry.js'
@@ -235,12 +236,20 @@ export function buildQuotaReport(budget, env = process.env) {
     summarizePool(budget, 'agy', AGY_POOL_DEFAULT_MODELS['claude-gpt'], 'AGY Claude & GPT-OSS'),
     summarizePool(budget, 'agy', AGY_POOL_DEFAULT_MODELS['gemini-4-argon'], 'AGY Gemini 4 Argon')
   ]
+  const configuredGeminiModels = typeof env.GEMINI_API_MODELS === 'string' && env.GEMINI_API_MODELS.trim()
+    ? env.GEMINI_API_MODELS.split(',').map((entry) => entry.trim()).filter(Boolean)
+    : [...GEMINI_API_FREE_TIER_MODELS]
+  const geminiApiModels = configuredGeminiModels.map((scope) =>
+    summarizePool(budget, 'gemini-api', scope, `gemini-api@${scope}`)
+  )
   const showConsoleGoogle = hasExplicitConsoleGoogleConfig(env)
   const opencodeGoogle = showConsoleGoogle
     ? (budget.snapshot('opencode', 'console-google/gemini-3.8-flash') ?? null)
     : null
+  const activeGeminiApiModel = env.GEMINI_API_MODEL?.trim() || configuredGeminiModels[0] || 'gemini-3.8-flash'
   const otherBackends = [
     summarizePool(budget, 'opencode', undefined, 'OpenCode headless (4+1 daily/RPM pools)'),
+    summarizePool(budget, 'gemini-api', activeGeminiApiModel, `Gemini API CLI (keyring, active=${activeGeminiApiModel}, PT reset)`),
     ...(showConsoleGoogle
       ? [summarizePool(budget, 'opencode', 'console-google/gemini-3.8-flash', 'OpenCode console-google (GCP project API key, PT reset)')]
       : []),
@@ -258,18 +267,22 @@ export function buildQuotaReport(budget, env = process.env) {
     .sort((a, b) => Number(b.entry.harvestableSession) - Number(a.entry.harvestableSession))
 
   const recommendedAgyArgs = agyWorkerCandidates.map(({ defaultModel }) => defaultModel)
+  const healthyGeminiApi = geminiApiModels.filter((entry) => entry.configured && entry.ok)
   const suggestedSwarmCommand = recommendedAgyArgs.length > 0
     ? `./workspace ai swarm run "<objective>" --agy-models ${recommendedAgyArgs.join(',')}`
-    : './workspace ai swarm run "<objective>" --opencode-models opencode/deepseek-v4.1-flash-free,opencode/glm-5.3-flash-free'
+    : (healthyGeminiApi.length > 0
+      ? `./workspace ai swarm run "<objective>" --gemini-api-models ${configuredGeminiModels.join(',')}`
+      : './workspace ai swarm run "<objective>" --opencode-models opencode/deepseek-v4.1-flash-free,opencode/glm-5.3-flash-free')
 
   return {
     agyPools,
+    geminiApiModels,
     otherBackends,
     opencodeGoogle,
     strategy: {
       workerPrimary: agyPools.find((entry) => entry.target.includes('gemini-3.8') || entry.target.includes('hydrogen'))?.ok
         ? AGY_POOL_DEFAULT_MODELS.gemini
-        : 'opencode/deepseek-v4.1-flash-free',
+        : (healthyGeminiApi[0]?.target ?? 'opencode/deepseek-v4.1-flash-free'),
       reviewerPrimary: agyPools.find((entry) => entry.target.includes('claude'))?.ok
         ? AGY_POOL_DEFAULT_MODELS['claude-gpt']
         : null,
@@ -306,6 +319,23 @@ function printQuotaReport(report) {
       )
     }
     console.log(`    Strategy: ${pool.roleAdvice}`)
+  }
+
+  const configuredGeminiApi = (report.geminiApiModels ?? []).filter((entry) => entry.configured || entry.daily)
+  if (configuredGeminiApi.length > 0) {
+    console.log('\nGemini API CLI (gemini-api:gcp-project, keyring-backed, Midnight PT Reset):')
+    for (const entry of configuredGeminiApi) {
+      const tag = entry.ok ? 'READY' : 'BLOCKED'
+      if (entry.daily) {
+        const suffix = entry.daily.resetsIn ? `, resets in ${entry.daily.resetsIn}` : ''
+        console.log(
+          `  [${tag}] ${entry.target}: daily=${entry.daily.remainingPct}% ` +
+          `(${entry.daily.limit - entry.daily.used}/${entry.daily.limit}${suffix})`
+        )
+      } else {
+        console.log(`  [${tag}] ${entry.target}: ${entry.roleAdvice}`)
+      }
+    }
   }
 
   if (report.otherBackends.length > 0) {
