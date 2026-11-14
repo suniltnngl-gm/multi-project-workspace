@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -454,4 +454,60 @@ test('describeQuotaLimiter formats usd_micros depleting spend pools in USD', () 
     describeQuotaLimiter({ unit: 'usd_micros', limit: 4_000_000, reset: 'pool' }),
     '$4.00 USD in a depleting pool'
   )
+})
+
+test('doctor flags repo-internal or loose-permission GEMINI_API_PAID_CONFIG_HOME and accepts 0700/0600 external config', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'workspace-doctor-paid-home-'))
+  try {
+    const insideRepo = await runDoctorChecks({
+      offline: true,
+      databasePath: join(dir, 'doctor.sqlite'),
+      env: {
+        GEMINI_API_PAID_CONFIG_HOME: '.gemini-paid-secret',
+        GEMINI_API_PAID_PREPAY_BALANCE_USD: '5'
+      }
+    })
+    const repoError = insideRepo.checks.find(
+      (check) => check.area === 'safety' && check.level === 'error'
+    )
+    assert.ok(repoError)
+    assert.match(repoError.message, /inside the workspace repository/)
+
+    const paidHome = join(dir, 'paid-home')
+    const configDir = join(paidHome, '.config', 'gemini-api')
+    const configFile = join(configDir, 'config.yaml')
+    await mkdir(configDir, { recursive: true })
+    await writeFile(configFile, 'api-key: dummy\n')
+    await chmod(paidHome, 0o755)
+    await chmod(configFile, 0o644)
+
+    const loose = await runDoctorChecks({
+      offline: true,
+      databasePath: join(dir, 'doctor.sqlite'),
+      env: {
+        GEMINI_API_PAID_CONFIG_HOME: paidHome,
+        GEMINI_API_PAID_PREPAY_BALANCE_USD: '5'
+      }
+    })
+    const warnings = loose.checks.filter((check) => check.area === 'safety' && check.level === 'warn')
+    assert.equal(warnings.length, 2)
+    assert.match(warnings[0].message, /chmod 700/)
+    assert.match(warnings[1].message, /chmod 600/)
+
+    await chmod(paidHome, 0o700)
+    await chmod(configFile, 0o600)
+    const tight = await runDoctorChecks({
+      offline: true,
+      databasePath: join(dir, 'doctor.sqlite'),
+      env: {
+        GEMINI_API_PAID_CONFIG_HOME: paidHome,
+        GEMINI_API_PAID_PREPAY_BALANCE_USD: '5'
+      }
+    })
+    const tightSafety = tight.checks.filter((check) => check.area === 'safety')
+    assert.equal(tightSafety.some((check) => check.level === 'error' || check.level === 'warn'), false)
+    assert.ok(tightSafety.some((check) => check.level === 'ok' && /private permissions/.test(check.message)))
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })

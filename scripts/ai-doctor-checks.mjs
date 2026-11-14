@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync } from 'node:fs'
+import { accessSync, constants, existsSync, statSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import {
   createModelRegistry,
@@ -167,6 +167,44 @@ function checkSafetyOptions(models, env, record) {
   }
   if (env.COLAB_AI_AUDIT_DIR) {
     record('ok', 'safety', `Colab CLI request audit files are written to ${env.COLAB_AI_AUDIT_DIR}.`)
+  }
+  const geminiPaid = models.find((model) => model.id === 'gemini-api-paid')
+  if (geminiPaid?.cli?.configHome) {
+    const normalizedRoot = resolve(ROOT_DIR)
+    const resolvedHome = resolve(ROOT_DIR, geminiPaid.cli.configHome)
+    if (resolvedHome === normalizedRoot || resolvedHome.startsWith(`${normalizedRoot}/`)) {
+      record(
+        'error',
+        'safety',
+        `GEMINI_API_PAID_CONFIG_HOME (${resolvedHome}) is inside the workspace repository; move it outside any Git checkout (e.g. ~/.local/state/gemini-api-paid) so credentials are never scanned or committed.`
+      )
+    } else if (process.platform !== 'win32') {
+      let hasPermWarning = false
+      if (existsSync(resolvedHome) && (statSync(resolvedHome).mode & 0o077) !== 0) {
+        hasPermWarning = true
+        record(
+          'warn',
+          'safety',
+          `GEMINI_API_PAID_CONFIG_HOME (${resolvedHome}) is group/world-accessible; restrict permissions with \`chmod 700 "${resolvedHome}"\`.`
+        )
+      }
+      const configFile = resolve(resolvedHome, '.config/gemini-api/config.yaml')
+      if (existsSync(configFile) && (statSync(configFile).mode & 0o077) !== 0) {
+        hasPermWarning = true
+        record(
+          'warn',
+          'safety',
+          `Paid Gemini API config (${configFile}) is group/world-accessible; restrict permissions with \`chmod 600 "${configFile}"\`.`
+        )
+      }
+      if (!hasPermWarning && existsSync(resolvedHome)) {
+        record(
+          'ok',
+          'safety',
+          `GEMINI_API_PAID_CONFIG_HOME (${resolvedHome}) is outside the repository with private permissions.`
+        )
+      }
+    }
   }
 }
 
