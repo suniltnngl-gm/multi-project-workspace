@@ -257,3 +257,11 @@ settled into `ai_quota`.
 
 Every message, state change, task op, and checkpoint is appended to `agent_events`,
 so a run can be reconstructed without replaying model output.
+
+## Swarm orchestration & multi-agent draft routes
+
+For higher-level orchestration built on top of this protocol — including the
+non-native `2+2+2` swarm runner (`./workspace ai swarm` and `/api/agents/swarm/*`),
+`parent_mode` (`deterministic`, `auto`, `ai`), reviewer retry rounds, register
+backfill, context hydration, and multi-agent execution across `/api/local-ai/*` and
+`/api/ai/*` — see [AGENTS.md](../AGENTS.md).

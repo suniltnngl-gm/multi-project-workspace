@@ -1,236 +1,77 @@
 # Multi-project workspace
 
-This workspace contains a Vite frontend, an Express/Node.js API, a Python analytics satellite, and shared utilities. Both backend services read the same SQLite task store at `apps/api/data/workspace.sqlite` by default; the database is created automatically by the Node API and ignored by Git.
+[![CI](https://github.com/suniltnngl-gm/multi-project-workspace/actions/workflows/ci.yml/badge.svg)](https://github.com/suniltnngl-gm/multi-project-workspace/actions/workflows/ci.yml)
 
-## Run locally
+A local-first Node/Vite/Python monorepo that unifies Git-tracked task, file, and worktree state in a relocatable SQLite database with a resource- and quota-gated multi-agent AI control plane.
 
-Prerequisites: Node.js 22 or newer (see `.nvmrc`), [uv](https://docs.astral.sh/uv/), and Git. Linux and WSL are the primary target; macOS and native Windows are supported on a best-effort basis. On native Windows, use PowerShell or CMD and call `.\workspace.cmd`; on Linux, WSL, and macOS use `./workspace`.
+## Services & Architecture
+
+| Service | Directory | Default Address | Role |
+| --- | --- | --- | --- |
+| **Web Board** | `apps/web` | `http://127.0.0.1:5173` | Vite frontend; proxies `/api` and `/satellite` |
+| **Node API & Control Plane** | `apps/api` | `http://127.0.0.1:3001` | Express API, SQLite stores, resource scheduler, `agentBus`, and `swarmRunner` |
+| **Python Satellite** | `apps/python` | `http://127.0.0.1:3002` | `uv`-managed analytics satellite reading the same SQLite database |
+| **SQLite Store** | `apps/api/data/workspace.sqlite` | Local file | Shared relocatable state for tasks, files, folders, worktrees, quotas, and agent runs |
+
+All services bind to `127.0.0.1` by default.
+
+---
+
+## Quick Start
+
+**Prerequisites:** Node.js 22+ (`.nvmrc`), [uv](https://docs.astral.sh/uv/), and Git. Linux (including WSL) is the primary target; macOS and native Windows are best-effort (`./workspace` on POSIX, `.\workspace.cmd` on Windows).
 
 ```sh
+git clone https://github.com/suniltnngl-gm/multi-project-workspace.git
+cd multi-project-workspace
 ./workspace install
+cp .env.example .env   # configure optional model/backend settings
 ./workspace dev
 ```
 
-The web app is available at http://localhost:5173, the Node API at http://localhost:3001, and the Python satellite at http://localhost:3002. The Vite dev server proxies `/api` to Node and `/satellite` to Python.
-
-For portable configuration, copy `.env.example` to `.env` and set machine-specific values there. The Node and Python services load the workspace-root `.env` automatically, and the `./workspace` launcher passes those settings to child processes. Values already set in the shell take precedence. Keep `.env` private; it is ignored by Git.
-
-Install scripts are disabled in `.npmrc` so `npm install` works without a C++ toolchain: `better-sqlite3` ships platform-specific prebuilt binaries. If a future dependency needs its install script, run `npm install --ignore-scripts=false` for that installation.
-
-## Portability and reuse
-
-The checkout is designed to be cloned or moved anywhere. Linux and WSL are the primary target; macOS and native Windows are supported on a best-effort basis:
-
-- **One launcher.** `./workspace` is a small POSIX shim and `.\workspace.cmd` is the Windows shim; both run `scripts/workspace-cli.mjs`. Process spawning, port checks, HTTP calls, and file operations are implemented in Node, so no command depends on bash, `curl`, `fuser`, `lsof`, or `/dev/tcp`.
-- **Relocatable database.** The default SQLite file lives inside the checkout. A relative `DATABASE_PATH` is anchored to the workspace root, never to the caller's directory. When a workspace-local database is opened after the checkout moved, the primary repository row (`id 1`) is adopted for the new root and its Git worktree and environment paths are rewritten, so tracking history survives the move without manual SQL. A missing *external* database path is still reported as an error.
-- **Portable scratch space.** Rotation state, model studies, and Kaggle run manifests use `WORKSPACE_TMP_DIR` when set and otherwise the OS temp directory (`/tmp/opencode`, `$TMPDIR/opencode`, or `%TEMP%\opencode`).
-- **Portable local models.** `llama-server` is resolved from `PATH` (or `LLAMA_SERVER`), and model files come from `LOCAL_AI_MODEL_DIR` (default `~/.local/share/llama.cpp/models`). Memory checks use `MemAvailable` on Linux and the OS free-memory figure elsewhere.
-- **Reproducible setup.** `apps/python/.python-version` and `apps/python/uv.lock` pin Python; `.nvmrc` and `package.json#engines` pin Node 22 or newer; `.npmrc` keeps installs toolchain-free.
-
-To copy the workspace to another machine or directory:
-
-```sh
-git clone <remote> workspace
-cd workspace
-./workspace install    # .\workspace.cmd install on native Windows (optional)
-cp .env.example .env   # then set credentials and overrides
-./workspace status
-./workspace check
-```
-
-Do not commit `.env`, the SQLite database, downloaded model files, or absolute machine paths. Optional second repositories are registered with `./workspace repos add <path>`, not by editing source.
-
-Useful commands:
-
-- `./workspace dev` — start all services
-- `./workspace web`, `./workspace node`, `./workspace python` — start one service
-- `./workspace local-ai [all|0.5b|1.5b]` — start local models within memory limits
-- `./workspace colab [status|stop] [session]` — inspect or stop the reusable Colab session
-- `./workspace ai doctor [--json] [--strict] [--offline]` — check model endpoints, CLIs, budgets, and the database without running inference; `--offline` skips every endpoint and CLI probe
-- `./workspace ai ask [--model ID] [--session ID] "prompt"` — ask a direct AI question through the running Node API (`POST /api/ai/complete`); with `--session`, the exchange is stored in that AI session
-- `./workspace install` — install npm dependencies, sync the uv-managed Python environment, and install the post-commit tracking hook
-- `./workspace python-add <package>` — add a tracked Python dependency with uv
-- `./workspace python-pip install <package>` — use uv's pip-compatible interface in the workspace environment
-- `./workspace test` / `./workspace lint` / `./workspace build` — run tests, lint the frontend, or build
-- `./workspace self-check` — scan tracking domains, then run lint, tests, build, tracking checks, and the doctor; safe on a fresh clone
-- `./workspace maintain` — scan every tracking domain and run the self-check
-- `npm run dev:web` / `npm run dev:api` / `npm run dev:python` — run one workspace directly
-- `npm run build` — build the frontend
-- `npm test` — run frontend and backend tests
-- `npm run lint` — lint the frontend
-
-The frontend uses Vitest with jsdom for DOM-level tests and ESLint for static checks; both are configured inside `apps/web`.
-- `npm run start:api` — start the API without the Vite dev server
-
-Python is managed by [uv](https://docs.astral.sh/uv/), with its version pinned in `apps/python/.python-version` and its project metadata in `apps/python/pyproject.toml`. Commands use an activated `VIRTUAL_ENV` when present; otherwise, they use `apps/python/.venv` by default (configurable with `UV_PROJECT_ENVIRONMENT`). Add persistent project dependencies with `./workspace python-add <package>` so `pyproject.toml` and `uv.lock` stay in sync. For pip-compatible operations, use `./workspace python-pip ...`; it calls `uv pip` against that environment, never standalone pip. The Python service uses `python-dotenv` to load the workspace-root `.env` file.
-
-Set `DATABASE_PATH` to use a different SQLite file. Set `PORT` for the Node API or `PYTHON_PORT` for the Python satellite. Both backend services bind to `127.0.0.1` by default; set `HOST` to override the bind address. The Vite dev server and preview also bind to `127.0.0.1`, so the unauthenticated task API is not exposed through the proxy on the local network. Set `UV` to select a uv executable if it is not on `PATH`.
-
-## Task API
-
-- `GET /api/tasks` — list tasks; supports `project`, `status`, `priority`, `task_type`, and `search` filters
-- `GET /api/tasks/:id` — return one task with its newest-first activity timeline and linked AI runs (matched by the job's task link or the task's drafting origin); `activity_limit` defaults to 50 and is capped at 200, `ai_limit` defaults to 20 and is capped at 100
-- `GET /api/projects` — list project names used by tasks
-- `POST /api/tasks` — create tasks with title, project, type (`feature`, `bug`, `chore`, `test`, `docs`), priority (`low`, `medium`, `high`, `urgent`), status (`todo`, `in_progress`, `blocked`, `done`), description, acceptance criteria, objectives, requirements, decisions, relevant files, important context, and work state (`work_completed`, `work_active`, `work_blocked`, `next_move`); `source_job_id` optionally records the AI job that drafted the task (404 for an unknown job, 409 when the job is already linked to another task), stamping the new task's `origin_job_id` and linking the job to it
-- `PATCH /api/tasks/:id` — update any of those task fields; `completed` remains supported for older clients and maps to `done`/`todo`
-- `DELETE /api/tasks/:id` — delete a task
-- `POST /api/tasks/:id/worktree` — create an isolated Git worktree for a task (optional `branch` and `name` in the body), link it on the task, and register it in the git-worktrees domain; a task with a live worktree linked returns `409`, and a link whose worktree was removed by hand self-heals on the next create
-- `DELETE /api/tasks/:id/worktree` — remove the linked worktree and unlink the task; `?force=1` removes one with uncommitted changes
-- `GET /api/repositories` — list registered repository roots with their file, folder, and worktree counts
-- `GET /api/repositories/:id` — one registered repository
-- `POST /api/repositories` — register a repository root (`root_path`, optional `name`); the root must be an existing directory, and names, duplicate roots, and roots nested inside or containing a registered root are rejected with `409` so scans never double-track a path
-- `GET /api/files` — list centrally tracked user files; supports `search` and a `repository` name filter
-- `POST /api/files/scan` — scan tracked Git files and register user files, excluding vendor/transient paths; accepts an optional `root` in the body to scan another registered (or new) repository root, defaulting to the API's own repository
-- `POST /api/files`, `PATCH /api/files/:id`, `DELETE /api/files/:id` — manage user-file metadata; creation accepts an optional `repository` name for the scoping check and insert (create-only, like `source_job_id` on tasks)
-- `GET /api/verify` — list the allowlisted local checks with their commands and timeouts
-- `POST /api/verify` — run every allowlisted check, or a subset via `{ "checks": ["lint", "api-tests"] }`; each check runs in a bounded subprocess and returns structured pass/fail/timeout results with captured output
-- `GET /api/ai/sessions`, `POST /api/ai/sessions`, `GET /api/ai/sessions/:id`, `POST /api/ai/sessions/:id/messages`, `POST /api/ai/sessions/:id/compact`, `DELETE /api/ai/sessions/:id` — manage AI chat sessions, messages, and compacted summaries
-- `GET /api/prompt-templates`, `POST /api/prompt-templates`, `GET /api/prompt-templates/:id`, `PATCH /api/prompt-templates/:id`, `DELETE /api/prompt-templates/:id` — manage reusable prompt templates; templates render `{{variable}}` placeholders from a request's `variables` object
-- `POST /api/ai/improve` — generate AI improvement suggestions from workspace tracking summary; the run is recorded as an AI job (model, backend, budget, cooldown, and job endpoints behave like every other model call) and the response includes its `jobId`; optional `create_tasks` creates task entries stamped with that job as their drafting origin
-- `POST /api/ai/complete` — direct AI chat: `prompt`/`messages` plus optional `system`, `model`, `max_tokens`, `variables`, `prompt_template_id`, `session_id`, and `task_id`; returns `{ content, model, backend, jobId }`; sessions persist the exchange and jobs keep provenance
-- `GET /api/folders`, `POST /api/folders/scan` (optional `root` in the body), `POST /api/folders`, `PATCH /api/folders/:id`, `DELETE /api/folders/:id` — manage folder-level objectives; `GET` and creation accept the same `repository` scoping as user files
-- `GET /api/models` — list the model registry, including in-process request/failure metrics and any configured quota budget
-- `GET /api/models/providers` — group models by provider quota domain and report normalized headroom, the preferred model, and the earliest retry when a provider is blocked
-- `GET /api/local-ai/status` — report each model's live state, session state, resource limits, and metrics
-- `POST /api/local-ai/refine-task` — draft a task with an auto-selected or explicitly named model; the response includes the drafting run's `jobId`, which can be passed back as `source_job_id` when creating the task to record its provenance; pass `task_id` to link the run to an existing task
-- `POST /api/local-ai/jobs` — start a background draft job; requires `model` in the body and accepts the same optional `task_id`
-- `GET /api/local-ai/jobs` / `GET /api/local-ai/jobs/:id` — list or poll draft jobs (`queued`, `running`, `done`, `cancelled`, or `error`) with model, backend, phase, elapsed time, error, and retry delay
-- `DELETE /api/local-ai/jobs/:id` — request cancellation of a queued or running job (`202` when accepted, `409` when it already finished)
-- `GET /health` — API health
-
-The web board supports adding, editing, filtering, searching, reprioritizing, moving tasks through the development workflow, and deleting tasks. Planning details are stored in dedicated objectives, requirements, decisions, relevant-files, and important-context fields; they appear as collapsible sections on the card and are included in task search. Work state is tracked in dedicated `work_completed`, `work_active`, `work_blocked`, and `next_move` fields and appears the same way. Each task records a field-level activity timeline (creation, status, priority, project, type, title, description, acceptance criteria, and planning-field changes); the board loads it on demand from `GET /api/tasks/:id` and shows creation/updated ages on the card. Activity is stored in `task_events` and is deleted with its task. Existing SQLite task databases are migrated on startup; new planning columns default to empty, old completed tasks become `done`, other existing tasks retain their content with sensible defaults, and existing tasks receive a synthetic creation event so their history is not blank after the upgrade.
-
-Task execution can be isolated in a Git worktree: `./workspace task worktree create <id>` creates one outside the main checkout (sibling `<repo>-worktrees/task-<id>-<slug>` directory, branch `task/<id>-<slug>`, overridable via `WORKSPACE_TASK_WORKTREE_ROOT`), links it on the task's `worktree_path` with a `worktree_linked` activity event, and registers it in the git-worktrees tracking domain. `./workspace task worktree <id>` shows the link and `./workspace task worktree remove <id> [--force]` removes the worktree, drops its tracking row, and records `worktree_unlinked`. When `POST /api/ai/complete` references a `task_id` with a live worktree, the OpenCode backend runs inside that worktree, so AI-generated changes never touch the main checkout; the worktree link is owned by these lifecycle endpoints and survives normal task edits.
-
-Every draft is also recorded in `ai_jobs`, including synchronous local and serverless calls, so a task can retain its AI provenance after the transient progress indicator disappears. Jobs may carry a nullable `task_id`; drafts for a new task leave it unset and never save the task automatically. Unknown task ids are rejected before model selection. `GET /api/tasks/:id` returns at most `ai_limit` linked runs newest-first with the model, backend, state, phase, duration, error, and `retryAfter`. Deleting a task unlinks its AI runs instead of deleting them, so the run remains inspectable through the job API without referencing a missing task. Terminal jobs are pruned by count (`50` by default), which bounds the persisted history; queued or running jobs are never pruned.
-
-## Agent control plane
-
-One parent agent can coordinate up to six workers in a strict star topology: workers only address the parent, and the optional reviewer is parent-side only. Routing, leases, retries, cancellation, and task writes are deterministic code; models are called only at decision points. Raw agent tokens are returned once by `POST /api/agents/runs`, writes authenticate with `x-agent-token`, and messages are typed, idempotent, deadline-aware, and redacted before storage. Parent task writes use `POST /api/agents/runs/:id/task-ops` with optimistic concurrency; `done` is verifier-gated and opportunistic work becomes a proposal. Before repeating a known procedure, `POST /api/agents/scripts/resolve` returns `script`, `needs_input`, or `model`, and `POST /api/agents/artifacts` stores content-addressed summaries so workers can reference artifacts instead of pasting them into messages. Run history is available at `GET /api/agents/runs/:id`. Quota-aware dispatch gates each `assign` on the run budget, provider headroom, and `AGENT_MAX_PARALLEL_PER_PROVIDER` (default `1`) before it touches the queue, so a parent never fans work out to a provider that will reject it; workers report real usage with `POST /api/agents/runs/:id/usage`, and `GET /api/agents/runs/:id/dispatch-plan` shows each agent's pinned model, provider, headroom, active assignments, and remaining budget without calling a model. See [docs/agent-protocol.md](docs/agent-protocol.md) for the message matrix, lifecycle, task-op schema, and configuration limits.
-
-## Tracking domains
-
-The workspace tracks more than tasks:
-
-- Tasks: workflow, priority, project, type, acceptance criteria, planning fields, and work state.
-- Repositories: registered workspace roots that scope every other tracking domain.
-- User files: objective, requirements, decisions, relevant files, and important context, synced from each file's header comments.
-- Folders: folder-level objectives.
-- Git worktrees: repository, worktree path, branch, HEAD, and remote URL.
-- Tools: availability and versions for core workflow tools.
-- Environments: OS, release, architecture, and runtime versions.
-
-Use `./workspace tracks`, `./workspace status`, and `<domain> scan|list|check` commands to inspect or refresh these domains. Tracking updates are scoped to touched surfaces, preserve history, and complement Git.
-
-File, folder, and worktree tracking is scoped per repository root. The workspace's own repository registers itself as the primary root (id `1`, named after the root directory), and additional roots are registered with `./workspace repos add <path> [--name NAME]` or `POST /api/repositories`; `./workspace repos list` shows every root with its counts. A root that is nested inside or contains a registered root is rejected, so the same file is never tracked twice. The `files`, `folders`, and `git-context` scan commands default to every registered root that still exists on disk (a missing root is skipped with a warning), and `--repo NAME` scopes one; their list and check commands accept the same flag, and list output prints `name/path` so rows from different roots are distinguishable. Two roots may track the same relative path as separate rows. Removing a root from disk leaves its rows for manual cleanup; repository deregistration is not part of this surface yet.
-
-User-file fields sync from the files themselves. A tracked file's leading comment block can carry `# Objective:`, `# Requirements:`, `# Decisions:`, `# Relevant Files:`, and `# Important Context:` lines (`//` comments in JavaScript). `./workspace files scan` and the board's **Scan user files** button parse that block and write the values into the file's tracked fields. The sync is scoped by a content hash: untouched files are skipped entirely, and a changed file only writes the fields whose header value changed. Header syncs record `synced` events and manual edits record `updated` events in the file's activity trail (`GET /api/files/:id` returns it), so history is preserved. Removing a header line stops syncing that field rather than erasing the last value, and `# Work State:` lines are informational only — work state lives on tasks, not files. `./workspace install` also places a post-commit hook in the repository that runs the same scan after each commit, so header edits sync without a manual step (an existing foreign post-commit hook is left untouched). Folder objectives have no header source and remain manual edits.
-
-## Workspace sensors
-
-Sensors are deterministic gap detectors. They read one immutable snapshot of tasks, agent runs, provider headroom, tracking rows, and local filesystem state, then return findings without calling a model or a provider. A scan never spends quota; model-generated improvements remain separate task proposals behind their own approval gate.
-
-`./workspace sensors scan` detects and persists findings, `cycle` runs the same scan as one atomic improvement cycle with optional auto-promotion, `suggestions` lists evidence-backed ideas for new detectors, `list` shows actionable findings, `show <id>` adds the event trail, `runs` shows the audit history, and `catalog` lists every detector plus the candidate ideas. Lifecycle commands are `ack`, `dismiss`, `resolve`, and `reopen`; `promote <id>` creates a task from an open finding and acknowledges it. The same surface is available over HTTP: `POST /api/sensors/scan`, `POST /api/sensors/cycles`, `GET /api/sensors/suggestions`, `GET /api/sensors/findings`, `GET /api/sensors/findings/:id`, `GET /api/sensors/summary`, `GET /api/sensors/runs`, the four `POST /api/sensors/findings/:id/<action>` transitions, and `POST /api/sensors/findings/:id/promote`.
-
-Finding keys are stable per entity, so rescans update the same row and increment `occurrences` instead of duplicating the queue. A scan auto-resolves an `open` or `acknowledged` finding that disappears, reopens a `resolved` finding that returns, and leaves `dismissed` findings muted until someone explicitly reopens them. Severity is `low`, `medium`, or `high`; states are `open`, `acknowledged`, `dismissed`, and `resolved`. Aggregated detectors report a count plus a bounded sample instead of one finding per file. The `meta.sensor_suggestion` detector proposes new detectors only when the snapshot proves the gap, and each suggestion carries the proposed sensor plus its evidence. A cycle persists its run, findings, and optional promotions in one transaction; auto-promotion is `off` unless explicitly set to `high`, `medium`, or `all`, and periodic cycles are opt-in through `SENSOR_CYCLE_INTERVAL_MS`. See [docs/sensors.md](docs/sensors.md) for the detector list, cycle semantics, and thresholds.
-
-## Local task assistant
-
-The board's **Draft brief with AI** action on the create form, and **Draft with AI** on an existing task's edit form, ask a selected model to refine a task description and acceptance criteria using the task's objectives, requirements, decisions, relevant files, and important context. Existing drafts send their `task_id` so the run appears in that task's AI-run history; the result is only placed into the form for review and is never saved automatically. Draft input excludes fields the model does not need, such as priority and status. A draft may also pass `session_id`; the session's compacted summary is appended to the prompt as session context so prior decisions are respected. Start the local models separately:
-
-```sh
-./workspace local-ai        # start every installed model within memory limits
-./workspace local-ai 0.5b   # start only the 0.5B model on :8080
-./workspace local-ai 1.5b   # start only the 1.5B model on :8081
-```
-
-Beyond task drafts, `POST /api/ai/complete` offers direct AI chat: pass `prompt` or `messages`, with optional `system`, `model`, `max_tokens`, `prompt_template_id` plus a `variables` object (templates render `{{variable}}` placeholders), `session_id`, and `task_id`. Direct completions reuse the same model selection, budget, cooldown, job layer, and audit path as task drafts, so quota and provenance behave identically; requests with `session_id` include the session's summary and recent messages as context and store the exchange back into that session. `./workspace ai ask [--model ID] [--session ID] "prompt"` calls the same endpoint from the command line:
-
-```sh
-curl http://localhost:3001/api/ai/complete \
-  -H 'Content-Type: application/json' \
-  -d '{"prompt": "Why is the sky blue?", "model": "serverless"}'
-```
-
-The workspace tracks five models in one registry: the two local Qwen2.5-Coder models (0.5B and 1.5B), the two web notebooks (Colab 3B and Kaggle 3B), and OpenCode headless. OpenCode headless is CLI-backed and optional; set `OPENCODE_AI_MODEL` to a working/free model such as `opencode/beam-free` or `console-openrouter/openrouter/free`, and `OPENCODE_AI_AUTO_SELECT=false` to avoid implicit quota use. Change `OPENCODE_AI_MODEL` only between sessions: OpenCode's provider prompt cache is per model, and the workspace prompt cache key includes the effective CLI model and agent so a switch never reuses an old reply. OpenCode provider availability varies by account and guardrails. `GET /api/models` returns the registry, and `GET /api/local-ai/status` reports each model's live state. The API also discovers the models the local opencode CLI can reach (`opencode models`, no inference): `GET /api/models/opencode` returns the configured model, whether it appears in the live roster, the full roster, and when it was fetched; `?refresh=1` forces a fresh discovery. Discovery is best-effort with a TTL cache (`OPENCODE_AI_DISCOVERY_TIMEOUT_MS`, default `15000`, and `OPENCODE_AI_DISCOVERY_TTL_MS`, default `600000`) and never switches the configured model on its own. The 0.5B and 1.5B Q4_K_M servers can run at the same time; the launcher starts each only when its model file exists and enough free memory remains for its configured threshold. Set `LOCAL_AI_CONTEXT` or `LOCAL_AI_THREADS` to change the defaults (`1024` context tokens and `2` threads), and use `LOCAL_AI_0_5B_PORT` / `LOCAL_AI_1_5B_PORT` if the defaults conflict.
-
-Colab 3B calls the installed `colab` CLI (Linux or macOS, authenticated) using a reusable session (`COLAB_AI_SESSION`, default `workspace-qwen`). On the first request it checks `colab status`, creates a GPU session with `colab new --gpu` when needed, and bootstraps `scripts/colab_model_server.py` once inside the runtime; later requests reuse that session through `colab exec`. `colab status` is authoritative: `colab sessions` lists the requested session name even when the runtime is CPU-backed, and the bundled server cannot load on CPU. With `COLAB_AI_REQUIRE_GPU=true` (default) the client verifies the allocation before downloading weights, creates and re-verifies a missing session, and fails fast with a `503`, `code: "gpu_unavailable"`, and a `retryAfter` hint instead of spending minutes on a doomed bootstrap. The probe timeout is `COLAB_AI_GPU_PROBE_TIMEOUT_MS` (default `30000`). The server mirrors the Kaggle notebook's known-good setup: NF4 4-bit weights with double quantization, FP16 compute, SDPA attention, and a one-token warm-up. If a GPU shape reports a capacity error, the client retries the next entry in `COLAB_AI_GPUS` (default `T4`) before returning a `503` with a `retryAfter` hint; entitlement errors are not retried. Kaggle 3B calls the existing batch runner `scripts/kaggle_run.py` through the `kaggle` CLI, so every request is a finite private notebook submission, not a low-latency endpoint. Its default timeout is one hour (`KAGGLE_AI_TIMEOUT_MS`), and polls default to 30 seconds (`KAGGLE_AI_POLL_INTERVAL_SECONDS`). Both CLIs use their own configured credentials; the API never reads or writes those tokens. Availability checks run `colab sessions`/`colab status` and `kaggle config view` (cached for one minute), so the roster reflects authentication and the actual Colab accelerator rather than only a binary on `PATH`. A missing reusable session is reported as `sessionState: "absent"` and created on the next request. Set `COLAB_AI_AUDIT_DIR` to a private directory to persist each Colab CLI request and response as a JSON file (disabled by default; files are written with `0600` permissions; the `COLAB_AI_URL` HTTP override is not audited). Auditing is best-effort and never blocks inference.
-
-GPU capacity varies by account and time; if `colab new` reports `Service Unavailable`, retry later or set `COLAB_AI_GPUS` to an ordered list of accelerators your account can use. If the runtime is CPU-backed, stop it and request a GPU session; `COLAB_AI_REQUIRE_GPU=false` is only for a server that can actually run on CPU. The reusable Colab session keeps its GPU assigned while idle, so release it when finished:
-
-```sh
-./workspace colab status          # list active Colab sessions
-./workspace colab stop            # stop workspace-qwen
-./workspace colab stop my-session # stop a custom session
-```
-
-The CLI backend uses `colab exec`, not `colab ssh --proxy-mode`. Google's free-tier Colab FAQ disallows remote control such as SSH shells, remote desktops, and bypassing the notebook UI to interact primarily via a web UI; an SSH tunnel to a long-lived model server would fall under that restriction. A paid Colab plan with a positive compute-unit balance, Colab Enterprise, or compute you control is the compliant way to expose a persistent endpoint. The `COLAB_AI_URL` HTTP override is intended for such environments.
-
-The board's **Draft model** picker lists every callable model. `Auto` prefers the local models; selecting `colab-3b` or `kaggle-3b` targets it explicitly. Every draft is submitted through the job layer. Kaggle drafts are polled by the board, so a long batch does not hold one HTTP request open; local and serverless drafts are awaited by the request but still persist their provenance. Job phase and elapsed time appear in the board's status line, and pressing **Cancel draft** sends `DELETE /api/local-ai/jobs/:id` so the runner can abort the CLI process. Jobs persist in SQLite; after an API restart, jobs that were queued or running are reported as interrupted rather than silently forgotten. Runs linked to a task appear in that task's AI-run history with the selected model and backend. The model roster shows each model's billing category as a badge, session state, in-process request/failure counts, last duration, and every configured quota limiter (unit, window, reset mode, used/limit, cooldown, and usage support) instead of only the most constrained one; a lone legacy daily profile keeps the compact "budget X/Y today" label, and multiple limiters wrap at spaces on the roster's full-width meta line.
-
-Set `COLAB_AI_MAX_REQUESTS_PER_DAY` or `KAGGLE_AI_MAX_REQUESTS_PER_DAY` to cap quota-backed remote requests. Counters persist in SQLite (`ai_quota`) and reset at UTC midnight; a request over the limit returns `429` with the remaining budget. Kaggle runs are recorded in `KAGGLE_AI_MANIFEST_DIR` (default `$WORKSPACE_TMP_DIR/workspace-kaggle-runs`, or the OS temp directory when unset) by task fingerprint, kernel id, phase, and output SHA-256. A re-queued call with the same task resumes polling or reuses the downloaded response instead of submitting another kernel; a timeout preserves the kernel and manifest, while a kernel or payload failure clears the manifest and attempts cleanup. Kaggle CLI 2.2.5 has no `kaggle kernels cancel` command, so cleanup is best-effort: the runner tries `kaggle kernels cancel`, and only when `KAGGLE_AI_CANCEL_FALLBACK=delete` is set does it fall back to deleting the private kernel. Deletion stops the run but removes the private notebook, which the next submission recreates. If the queued kernel cannot be cancelled, stop it from the Kaggle website.
-
-Opt in to cross-lane fallback with `AI_FALLBACK_CHAIN`, an ordered `>`-separated list of model ids such as `colab-3b>kaggle-3b>local-1.5b`. The client moves to the next lane only for `429`, `503`, `504`, or `gpu_unavailable`, never for an invalid request or a malformed response; each attempt gets its own scheduler selection and budget reservation. A session-bound request stays on its model unless `AI_FALLBACK_ALLOW_SESSIONS=true`, because changing the model mid-session resets the provider prompt cache. The job records the model that actually answered plus `fallbackFrom` and `fallbackReason`.
-
-Every model also carries a billing category: `free`, `payg` (pay-as-you-go), or `subscription` (monthly subscription). Set `AI_BILLING_CATEGORIES` to a JSON object keyed by model id, or use `COLAB_AI_BILLING`, `KAGGLE_AI_BILLING`, `OPENCODE_AI_BILLING`, `SERVERLESS_AI_BILLING`, and `OLLAMA_AI_BILLING`; a serverless slot can set `billing` directly. Local models and the web CLI backends default to `free`, while generic serverless and Ollama endpoints default to `payg`. Billing is descriptive only: it never bypasses or relaxes quota enforcement, so TPS/TPM, RPM/RPD, and session/daily/weekly resets still apply to every category. The roster shows the category as a badge, and the API returns it as `billingCategory` and `billingLabel`.
-
-For providers whose limits are not a single requests-per-day cap, set `AI_QUOTA_PROFILES` to a JSON object keyed by model id. Each value is an array of limiters: `unit` (`requests`, `tokens`, or `compute_seconds`), `limit`, `window` (`second`, `minute`, `hour`, `session`, `day`, `week`, `month`, or `none`), `reset` (`rolling`, `fixed`, or `pool`), and an optional `timezone` (IANA name, default `UTC`). Use `windowMs` or `hours` for a `session` window; `hours: 5` models a five-hour reset. A single profile can combine tokens-per-second and tokens-per-minute with requests-per-minute, requests-per-day, a weekly cap, and a five-hour session cap. Rolling second/minute/hour limiters use an in-memory sliding window and refill as events expire; fixed, session, weekly, and pool limiters persist in SQLite (`ai_quota`) so an API restart keeps the bucket. `session` buckets anchor at first use and reset after the configured window; weeks start on Monday in the chosen time zone; a `pool` never resets on its own. When the provider returns token `usage`, the client settles it into token limiters; if usage is absent, the limiter reports `usageSupported: false` instead of silently undercounting. A `429` with `Retry-After` also sets a slot cooldown that blocks further calls until it expires. An explicit profile overrides that model's daily shorthand. No vendor quota values are embedded in source, and the provider's live `429` response remains authoritative. Before a call starts, the API reserves a slot in an in-memory ledger and settles the real usage afterward, so concurrent jobs cannot both take the last request; a crash loses the reservation, not persisted usage. `GET /api/models/providers` groups models by provider quota domain and reports normalized headroom without probing any model.
-
-Setting `COLAB_AI_URL` or `KAGGLE_AI_URL` to an OpenAI-compatible endpoint skips the CLI backend and uses HTTP instead. Use an endpoint whose host and plan permit a persistent web service; securing the tunnel and endpoint is your responsibility. Optional `COLAB_AI_API_KEY` and `KAGGLE_AI_API_KEY` bearer tokens are supported. Because CLI-backed remote models can spend quota, they are excluded from automatic selection by default; set `COLAB_AI_AUTO_SELECT=true` or `KAGGLE_AI_AUTO_SELECT=true` to include them, or pass `model` explicitly. A URL-configured remote model is auto-selected unless its `*_AI_AUTO_SELECT` is false.
-
-An optional provider-agnostic serverless slot adds an OpenAI-compatible API without hardcoding a vendor. Set `SERVERLESS_AI_URL` to the base URL, `SERVERLESS_AI_MODEL` to the provider's model slug, and optionally `SERVERLESS_AI_API_KEY`; the slot is registered only when the URL is set. It is excluded from automatic selection unless `SERVERLESS_AI_AUTO_SELECT=true`, and it honors `SERVERLESS_AI_TIMEOUT_MS` and `SERVERLESS_AI_MAX_REQUESTS_PER_DAY`. `SERVERLESS_AI_CHAT_PATH` and `SERVERLESS_AI_HEALTH_PATH` default to `/v1/chat/completions` and `/v1/models` for providers that use a different prefix. New providers default to prompt-enforced JSON (`SERVERLESS_AI_SUPPORTS_JSON_MODE=false`); set it to `true` only when the endpoint supports OpenAI JSON mode. A `429` response is surfaced as `429` with a `retryAfter` value parsed from the `Retry-After` header (delta-seconds or HTTP-date), so the board and job layer can back off instead of treating it as a generic failure. The adapter does not embed provider RPM/TPM tables or fixed quota numbers; the provider's live response remains the source of truth.
-
-To run several provider endpoints side by side, set `SERVERLESS_AI_SLOTS` to a JSON array of slots. Each slot needs a unique `id` and a `url`; optional fields mirror the single slot (`label`, `apiModel`, `billing`, `timeoutMs`, `autoSelect`, `supportsJsonMode`, `chatPath`, `healthPath`, `priority`) plus `apiKeyEnv`, which names the environment variable holding that slot's key. A slot may also carry its own `limits` array using the same schema as `AI_QUOTA_PROFILES`, so one slot can have rolling per-minute requests and tokens while another has a five-hour session window. The legacy `SERVERLESS_AI_URL` slot keeps working and can coexist with JSON slots as long as every model id is unique. Slots are registered only when configured, appear individually in `/api/models` and the roster with their own budget and metrics, and remain excluded from automatic selection unless `autoSelect` is true. Endpoint URLs, model slugs, and quota values stay in environment configuration rather than source.
-
-The [Colab notebook](./notebooks/colab-qwen-coder-free-tier.ipynb) runs Qwen2.5-Coder 3B for interactive inference inside the notebook. Use **Select Kernel → Colab → Auto Connect**, mount Drive to reuse the model snapshot (`MyDrive/colab-models`, about 6 GB), and run inference only when needed. To reduce GPU startup time, prepare the model snapshot and dependencies on CPU first, then switch to GPU for model loading and inference. The notebook caches Hugging Face files and pip downloads on Drive, but installs packages into each fresh runtime and reuses Colab's PyTorch; it deliberately does not persist an installed virtualenv because compiled packages may not be compatible across runtimes. Model loading uses PyTorch SDPA when supported. Free-tier GPU quotas and availability are dynamic and not published as fixed hour or cooldown schedules. The free-tier notebook does not expose a network endpoint or connect to the workspace task board; this avoids relying on a public tunnel/web service on a free managed runtime. The separate CLI backend above uses its own headless Colab session and a loopback-only server inside that runtime; this interactive notebook is unchanged. For use inside the workspace UI, use one of the local models, the CLI backend, or a compute environment whose terms permit an externally reachable inference service. An optional form-based cell before the cleanup cell checkpoints artifacts to Drive with `scripts/colab_checkpoint.py` (atomic copy plus SHA-256 verification), and a second form-based cell publishes the verified files to a private Kaggle Dataset; both run only when you execute them, so no GUI automation or background daemon is involved. The final notebook cell releases model memory, flushes and unmounts Drive, and asks Colab to unassign the runtime; if unassignment fails, disconnect/delete the runtime manually. Drive model files remain persistent. See [Remote execution boundaries](#remote-execution-boundaries) for why there is no polling bridge.
-
-An observed T4 run of Qwen2.5-Coder-3B-Instruct in 4-bit mode generated the same 72-token response in 10.85 s (6.64 tokens/s) without a warm-up and 4.35 s (16.56 tokens/s) after a one-token CUDA warm-up. Both runs reported 2,028 MiB peak allocated and 3,014 MiB peak reserved VRAM on a 14.6 GiB T4. These are individual measurements from this prompt and runtime, not a performance guarantee or a multi-run average.
-
-For an optional Kaggle fallback, use the [Kaggle notebook](./notebooks/kaggle-qwen-coder.ipynb). To avoid local multi-gigabyte downloads or the web UI's remote-URL importer, first run the [CPU-only dataset preparation notebook](./notebooks/kaggle-prepare-qwen-dataset.ipynb) with Internet enabled and save its output as a private Kaggle Dataset. The inference notebook uses KaggleHub to fetch that dataset by handle; inside Kaggle, the resource is integrated with the notebook's input/cache. The CLI metadata also declares this dataset for batch submissions. Select one GPU; the inference notebook pins this 4-bit model to GPU 0 rather than requesting multi-GPU placement. Kaggle accelerator availability, quotas, session limits, and storage policies can change, so the notebook makes no fixed weekly-hours claim. Stop the interactive inference session from Kaggle's UI when finished; clearing Python objects alone does not stop GPU usage.
-
-For an explicit one-shot batch run using the Kaggle CLI, install and configure the CLI using Kaggle's official instructions, then provide a task JSON with non-empty string fields `title`, `project`, and `task_type`; `description`, `acceptance_criteria`, `objectives`, `requirements`, `decisions`, `relevant_files`, and `important_context` are optional and default to empty:
-
-```sh
-python scripts/kaggle_run.py --task-json /path/to/task.json
-```
-
-The runner makes a temporary notebook copy with that task, pushes the private GPU kernel, polls until completion (up to one hour by default), downloads only `response.json` (filtered with `kaggle kernels output --file-pattern`), validates it, and saves it to `kaggle-output/response.json`. With `--manifest-dir` (or `KAGGLE_AI_MANIFEST_DIR`), an interrupted run resumes the recorded kernel or reuses its downloaded response instead of pushing again. The task is embedded in the pushed private notebook version and sent to Kaggle; do not submit confidential prompts or data. Use `--output`, `--timeout`, `--poll-interval`, and `--manifest-dir` to override defaults. This is a finite notebook submission, not a live inference API; every run consumes Kaggle resources and may incur model-load/setup time. Run one submission at a time and check Kaggle's current rules and quotas before use. The runner never reads or writes your Kaggle API token; the Kaggle CLI uses its own configured credentials.
-
-To keep checkpoints or generated files after a Colab runtime is recycled, publish them to a private Kaggle Dataset with `scripts/colab_publish_kaggle.py`. This is artifact storage, not a request/response transport, so it needs no tunnel or web service. In Colab, install the CLI and add a Kaggle access token to **Colab Secrets** named `KAGGLE_API_TOKEN` (legacy `KAGGLE_USERNAME` and `KAGGLE_KEY` secrets are also read); never upload `kaggle.json` or print the token. Then run:
-
-```sh
-pip install -q kaggle
-python scripts/colab_publish_kaggle.py \
-  --source /content/artifacts \
-  --dataset your-user/workspace-artifacts \
-  --message "checkpoint $(date -u +%Y-%m-%dT%H:%MZ)"
-```
-
-Credentials resolve from the environment first, then Colab Secrets; within each source, an access token is preferred. The publisher always writes `"isPrivate": true` and skips VCS metadata, dependency/cache directories (`.cache`, `.venv`, `node_modules`), `.env*`, `kaggle.json`, access tokens, key material, and similar secrets. Add repeatable `--exclude` globs for other large caches, and use `--max-size-mb` to fail before staging. `--dry-run` reports file count and total size without copying or contacting Kaggle. Uploads stage into a temporary directory with a 30-minute default timeout (`--timeout`), and `--dir-mode zip|tar|skip` controls subdirectory handling; `tar` is faster for already-compressed checkpoints. The publisher also supports `--mode auto|create|version` and `--json`, and `auto` checks the dataset with `kaggle datasets files` and creates or versions it as needed. The [interactive notebook](./notebooks/colab-qwen-coder-free-tier.ipynb) wraps this command in a form cell: set `DATASET`, keep `DRY_RUN` on for a validation pass, then run it before the cleanup cell. Treat Kaggle as quota-limited artifact storage rather than unlimited cloud storage, keep each dataset reasonably small, and confirm the upload in the Kaggle UI if it is important. Reuse the dataset across sessions instead of creating a new one per run; versions count against your storage allowance.
-
-The API starts generation only when all monitored resources are within their limits: the system's 1-minute load average is below an adaptive CPU threshold, available memory is at least the selected model's threshold (`1024` MiB for 0.5B, `1792` MiB for 1.5B by default; remote models need no local model memory), and physical-disk busy time is at most `30%`. The CPU threshold starts at the configured maximum (`1.0` by default), drops by `0.1` after 10 seconds of sustained overload, and recovers by `0.05` after 30 seconds below the threshold with `0.15` load-average hysteresis. It stays between `LOCAL_AI_MIN_LOAD` (`0.5`) and `LOCAL_AI_MAX_LOAD` (`1.0`). Adaptation is observed at most once every five seconds. While any limit is exceeded, the board reports the specific resource and retries every five seconds. Memory and disk limits are configurable with `LOCAL_AI_MIN_AVAILABLE_MEMORY_MB`, `LOCAL_AI_1_5B_MIN_AVAILABLE_MEMORY_MB`, and `LOCAL_AI_MAX_DISK_BUSY_PERCENT`; endpoints are configurable with `LOCAL_AI_URL` (0.5B), `LOCAL_AI_1_5B_URL` (1.5B), `COLAB_AI_URL`, and `KAGGLE_AI_URL`. Memory is read from Linux `MemAvailable` and from the OS free-memory figure on macOS and Windows, and physical-disk busy time is averaged over a minimum five-second `/proc/diskstats` sampling window; intermediate checks reuse the latest disk measurement while still refreshing CPU and memory. If resource monitoring is unavailable, generation is refused rather than started without a safety check.
-
-Each request is handled by the highest-priority live model that is healthy and within its resource limits (1.5B before 0.5B by default), falling back to other models when one is unavailable or memory-constrained. Automatic selection considers the local models plus remote models that are explicitly enabled for it; CLI-backed Colab and Kaggle models are only chosen when requested by id, while URL-configured remote models join the pool after the local models by default. Among ready models, automatic selection now prefers models with fewer recorded failures before falling back to priority. Because remote models do not use this machine's CPU, memory, or disk, only the shared cooldown and per-model in-flight limit apply to them. Pass `model` in the refine request (for example `local-0.5b`, `colab-3b`, or `kaggle-3b`) to target a specific callable model. Each model processes one request at a time, so the two local servers plus any configured remote endpoints can run concurrently, but generation starts only after the shared 15-second post-turn cooldown (`LOCAL_AI_TURN_COOLDOWN_MS`). Local and HTTP requests use a 120-second per-turn timeout (`LOCAL_AI_TIMEOUT_MS` for local models); Colab and Kaggle have longer defaults (`COLAB_AI_TIMEOUT_MS` and `KAGGLE_AI_TIMEOUT_MS`) because they include CLI startup and batch polling. The prompt router sends short task requests through a compact prompt with a 180-token output cap, and detailed requests through a constraint-preserving prompt with a 300-token cap. Inputs are split into labeled task fields and bounded to 2,200 characters so long notes cannot consume the model context; they are trimmed, not sent as multiple model calls. The router selects prompt style and output budget only. If resources become busy after generation starts, the current request is allowed to finish; later generations wait until resources are within limits. Local endpoints are loopback-only by default and are not exposed through the browser.
-
-## Remote execution boundaries
-
-The repository uses two deliberately separate remote paths, and neither one is a request/response mailbox:
-
-- **Interactive Colab is human-driven.** You open the notebook in a browser, run the cells yourself, and keep large I/O on the runtime's local `/content` disk. The optional checkpoint cell copies explicit artifacts to `/content/drive/MyDrive` with `scripts/colab_checkpoint.py`: a `.tmp` write, `fsync`, atomic `os.replace`, and a SHA-256 read-back check. Directory checkpoints are zipped into a single file. The cleanup cell flushes and unmounts Drive before unassigning the runtime. Do not add a background loop that watches for new data and runs inference unattended.
-- **Automated remote work is finite Kaggle batch.** The local backend submits one private notebook per task through `scripts/kaggle_run.py`, polls from the local process, and downloads only `response.json`. That is Kaggle's supported batch flow, not a live endpoint.
-- **Drive is checkpoint storage, not a queue.** Drive sync is asynchronous and its free quota is shared and limited; treat the flush and hash check as risk reduction, not a durability guarantee. Kaggle Datasets are versioned artifact storage, not a message broker.
-
-Do not implement a polling bridge that uploads prompts to a Kaggle Dataset for a Colab notebook to pick up and writes results back. Changing the transport from an SSH tunnel or public web service to a dataset mailbox does not change the control model; the free-tier rule still targets bypassing the notebook UI to interact primarily through another interface. It is also a poor fit technically: dataset versions are immutable, so each request creates a version and burns storage and API calls, and readers can observe half-written bundles.
-
-Allowed shapes are: interactive notebook execution with manual or cell-triggered artifact handoff, finite Kaggle kernel submissions, a paid Colab plan or Colab Enterprise with a positive compute-unit balance, or a VM/service you control. Keep any such service loopback-only unless you own the host and its terms permit exposure.
-
-## Diagnostics and CI
-
-Run `./workspace ai doctor` before filing an AI issue. It checks Node and SQLite writability, probes each configured endpoint or CLI, reports Colab session state and the actual accelerator, validates quota profiles and serverless slot configuration (model slug, key environment variable, chat/health paths, and JSON mode), and warns about quota-spending or destructive options. It summarizes which capability lanes (live or batch) can serve now and flags a CPU-backed Colab runtime as an unavailable live lane. It never starts a model, bootstraps a Colab session, or submits a Kaggle kernel. Add `--json` for machine-readable output; `--strict` exits nonzero when an error is found (for example when a remote CLI or endpoint is unavailable). The default advisory mode exits zero so it is safe to run while local models are stopped. Pass `--offline` (or `--no-probe`) to skip every endpoint and CLI probe — useful in CI, preflight checks, or environments without network access. Offline mode still runs the registry, quota-profile, serverless-slot, selection, and safety checks, and reports probing as skipped (an `[info] probing` entry in text output, a `probing: "skipped"` field in JSON) rather than claiming reachability or failures.
-
-GitHub Actions runs lint, the full frontend/Node/Python test suite, the production build, and the workspace self-check on Linux and macOS for pushes to `master` and on pull requests; a native Windows leg runs without blocking the workflow (`.github/workflows/ci.yml`).
-
-## Python satellite
-
-- `GET /health` — satellite and database health
-- `GET /summary` — total, open, and completed task counts from SQLite
+<details>
+<summary>Portability notes & environment configuration</summary>
+
+- **Single launcher:** `./workspace` and `.\workspace.cmd` wrap `scripts/workspace-cli.mjs` in Node with no external `bash`/`curl`/`lsof` dependencies.
+- **Relocatable SQLite:** Relative `DATABASE_PATH` values anchor to the workspace root, and moving a workspace-local checkout automatically adopts the primary repository row (`id = 1`), worktrees, and environment paths.
+- **Portable scratch & dependencies:** `.npmrc` keeps `npm install` toolchain-free; Python versions and packages are locked via `apps/python/.python-version` and `uv.lock`; temporary scratch files respect `WORKSPACE_TMP_DIR`.
+- Keep `.env`, SQLite files, and downloaded GGUF models out of Git.
+
+</details>
+
+---
+
+## Common CLI Commands
+
+| Category | Command | Purpose |
+| --- | --- | --- |
+| **Lifecycle** | `./workspace install \| dev \| status \| stop` | Install deps & `post-commit` hook, run services, inspect status |
+| **Single service** | `./workspace web \| node \| python` | Run one service individually |
+| **Quality & CI** | `./workspace lint \| test \| build \| check` | Run ESLint, Vitest, Node API tests, Python `unittest`, or Vite build |
+| **Self-check** | `./workspace self-check \| maintain` | Scan tracking domains, run lint/test/build/checks, and run `ai doctor --strict` |
+| **Tracking** | `./workspace <domain> scan\|list\|check` | Inspect `files`, `folders`, `git-context`, `tools`, `environment`, `repos`, `mcp` |
+| **Tasks** | `./workspace task worktree [create\|remove] <id>` | Isolate task branches in sibling Git worktrees |
+| **Sensors** | `./workspace sensors scan\|cycle\|list\|promote <id>` | Deterministic gap detection and atomic improvement cycles (`0` tokens) |
+| **Multi-Agent Swarm** | `./workspace ai swarm [plan\|run\|board\|step\|list]` | Plan and run low-quota `2+2+2` agent swarms |
+| **AI Backends** | `./workspace local-ai \| ai doctor \| ai ask \| ai improve` | Manage local models, run diagnostics, ask chat prompts, or review proposals |
+
+---
+
+## Core Capabilities
+
+- **Structured Task & Workspace Tracking**: Tasks track planning registers (`objectives`, `requirements`, `decisions`, `relevant_files`, `important_context`), work state, activity trails, AI job provenance, and sibling Git worktrees alongside file headers, folders, tools, and environments.
+- **Multi-Agent Swarm & Control Plane**: Star-topology `agentBus` (`parent` + up to `6` workers + parent-side `reviewer`) with zero-token routing, `2+2+2` cross-pool diversity, 1-hop context hydration, pre-run register backfill, and multi-agent execution across all `/api/local-ai/*` and `/api/ai/*` routes.
+- **Resource & Quota Safety**: Live adaptive CPU, RAM, disk, GPU, and swap gating for local models plus persistent SQLite quota ledgers, pre-dispatch reservations, `observe429` learned cooldowns, and `402` billing circuit breakers.
+- **Deterministic Sensors**: Snapshot-based detectors catch workspace gaps without calling models or spending quota.
+
+---
+
+## Documentation Index
+
+| Document | Contents |
+| --- | --- |
+| [AGENTS.md](AGENTS.md) | Multi-agent architecture, swarm CLI/API, parent/sibling hooks, context hydration, register backfill, quota/resource rules, and contributor conventions |
+| [docs/agent-protocol.md](docs/agent-protocol.md) | Star-topology message matrix, leases, checkpoints, task-ops, script resolver, artifacts, and provider dispatch rules |
+| [docs/api-and-tracking.md](docs/api-and-tracking.md) | Complete HTTP API reference (Tasks, Worktrees, Tracking domains, Verify, AI routes, Python satellite) |
+| [docs/ai-backends-and-quotas.md](docs/ai-backends-and-quotas.md) | Local `llama-server` resource gates, OpenCode/AGY CLIs, serverless slots, Colab/Kaggle notebooks, `AI_QUOTA_PROFILES`, and `ai doctor` |
+| [docs/sensors.md](docs/sensors.md) | Deterministic gap detectors, improvement cycles, findings lifecycle, and thresholds |
