@@ -157,7 +157,7 @@ test('detectors report every scripted gap from one snapshot', () => {
     'tracking.repository_root_missing',
     'tracking.worktree_missing',
     'tracking.script_unverified',
-    'meta.sensor_suggestion'
+    'task.project_blocker_cluster'
   ]) {
     assert.ok(sensors.has(id), `expected ${id}`)
   }
@@ -498,15 +498,13 @@ test('detectors suggest a new sensor only when the snapshot proves the gap', () 
   const { findings, errors } = runSensorScan({ snapshot })
   assert.deepEqual(errors, [])
 
-  const projectIdea = findings.find(
-    (finding) => finding.sensorId === 'meta.sensor_suggestion'
-      && finding.entity.id === 'task.project_blocker_cluster'
+  const projectCluster = findings.find(
+    (finding) => finding.sensorId === 'task.project_blocker_cluster'
+      && finding.entity.id === 'workspace'
   )
-  assert.ok(projectIdea, 'two blocked workspace tasks prove the cluster gap')
-  assert.equal(projectIdea.details.detectionMode, 'deterministic')
-  assert.equal(projectIdea.details.suggestedSensor.id, 'task.project_blocker_cluster')
-  assert.equal(projectIdea.details.evidence.projects[0].project, 'workspace')
-  assert.equal(projectIdea.details.evidence.projects[0].count, 2)
+  assert.ok(projectCluster, 'two blocked workspace tasks trigger task.project_blocker_cluster')
+  assert.equal(projectCluster.details.project, 'workspace')
+  assert.equal(projectCluster.details.count, 2)
 
   const covered = new Set(SENSORS.map((sensor) => sensor.id))
   for (const idea of SENSOR_IDEAS) {

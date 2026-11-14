@@ -203,33 +203,6 @@ export function buildWorkspaceSnapshot({
 // evidence-based instead of a generic wish list.
 export const SENSOR_IDEAS = Object.freeze([
   {
-    id: 'task.project_blocker_cluster',
-    title: 'Cluster blocked tasks by project',
-    description: 'Report one finding when several unfinished tasks in the same project are blocked, because the blocker is likely project-level.',
-    category: 'tasks',
-    severity: 'medium',
-    rationale: 'Blocked tasks are currently reported one by one, which hides project-level dependencies and creates duplicate triage.',
-    applies(snapshot) {
-      return this.evidence(snapshot).projects.length > 0
-    },
-    evidence(snapshot) {
-      const groups = new Map()
-      for (const task of snapshot.tasks) {
-        if (task.status !== 'blocked') continue
-        const project = text(task.project) || 'workspace'
-        const group = groups.get(project) ?? []
-        group.push(task.id)
-        groups.set(project, group)
-      }
-      return {
-        projects: [...groups.entries()]
-          .filter(([, taskIds]) => taskIds.length >= 2)
-          .map(([project, taskIds]) => ({ project, taskIds, count: taskIds.length }))
-          .sort((a, b) => b.count - a.count || a.project.localeCompare(b.project))
-      }
-    }
-  },
-  {
     id: 'task.priority_aging',
     title: 'High-priority task is aging',
     description: 'Report high or urgent todo tasks that have waited longer than the stale-task window without starting.',
@@ -356,6 +329,37 @@ export const SENSOR_IDEAS = Object.freeze([
 // One detector per gap. Each returns zero or more findings; keys are stable for
 // the same entity so a rescan updates the same row instead of duplicating it.
 export const SENSORS = Object.freeze([
+  {
+    id: 'task.project_blocker_cluster',
+    title: 'Cluster blocked tasks by project',
+    description: 'Report one finding when several unfinished tasks in the same project are blocked, because the blocker is likely project-level.',
+    category: 'tasks',
+    defaultSeverity: 'medium',
+    detect(snapshot) {
+      const groups = new Map()
+      for (const task of snapshot.tasks) {
+        if (task.status !== 'blocked') continue
+        const project = text(task.project) || 'workspace'
+        const group = groups.get(project) ?? []
+        group.push(task.id)
+        groups.set(project, group)
+      }
+      const found = []
+      for (const [project, taskIds] of groups.entries()) {
+        if (taskIds.length < 2) continue
+        found.push(finding('task.project_blocker_cluster', {
+          key: `project:${project}`,
+          severity: 'medium',
+          title: `Project "${project}" has ${taskIds.length} blocked tasks`,
+          summary: `${taskIds.length} tasks in project "${project}" are blocked (#${taskIds.join(', #')}).`,
+          entityType: 'project',
+          entityId: project,
+          details: { project, taskIds, count: taskIds.length }
+        }))
+      }
+      return found
+    }
+  },
   {
     id: 'task.blocked_without_reason',
     title: 'Blocked task has no reason',
