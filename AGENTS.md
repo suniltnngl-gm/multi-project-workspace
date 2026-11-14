@@ -1,8 +1,8 @@
 # Operational Invariants & Swarm Playbooks
 
 ## 1. Mandatory Task-Board Gate
-- Before starting any implementation, audit, or commit, create and mark a task `in_progress` on the workspace board (`POST /api/tasks` or `createDatabase().createTask(...)` in `apps/api/src/database.js`).
-- On completion, attach the commit SHA and verification summary and mark the task `done`.
+- Before starting any implementation, audit, or commit, create and mark a task `in_progress` on the workspace board (`./workspace task create "<title>"` or `POST /api/tasks`).
+- On completion, attach the commit SHA and verification summary and mark the task `done` (`./workspace task done <id> --notes "..."`).
 
 ## 2. Resource-Gated Local Lanes (`llama.cpp`)
 - `local-0.5b` and `local-1.5b` are `resourceGated: true` on-demand `llama-server` (`llama.cpp`) endpoints—**not** background Ollama daemons.

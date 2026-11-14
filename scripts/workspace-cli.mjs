@@ -549,6 +549,71 @@ async function taskWorktree(args) {
   )
 }
 
+async function taskCreate(args) {
+  let project = 'multi-project-workspace'
+  let taskType = 'feature'
+  let priority = 'medium'
+  let status = 'in_progress'
+  let description = ''
+  const titleParts = []
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i]
+    if (arg === '--project' && args[i + 1]) { project = args[++i]; continue }
+    if (arg === '--type' && args[i + 1]) { taskType = args[++i]; continue }
+    if (arg === '--priority' && args[i + 1]) { priority = args[++i]; continue }
+    if (arg === '--status' && args[i + 1]) { status = args[++i]; continue }
+    if (arg === '--description' && args[i + 1]) { description = args[++i]; continue }
+    titleParts.push(arg)
+  }
+  const title = titleParts.join(' ').trim()
+  if (!title) fail('Usage: ./workspace task create <title> [--project P] [--type T] [--priority P] [--status S]', 2)
+  const { createDatabase } = await import('../apps/api/src/database.js')
+  const db = createDatabase()
+  try {
+    const task = db.createTask({ title, project, task_type: taskType, priority, status, description })
+    log(JSON.stringify({ id: task.id, status: task.status, title: task.title }))
+  } finally {
+    db.close()
+  }
+  return 0
+}
+
+async function taskDone(args) {
+  const id = Number(args[0])
+  if (!Number.isInteger(id) || id <= 0) fail('Usage: ./workspace task done <id> [--notes "..."]', 2)
+  let notes = ''
+  for (let i = 1; i < args.length; i += 1) {
+    if (args[i] === '--notes' && args[i + 1]) { notes = args[++i] }
+  }
+  const { createDatabase } = await import('../apps/api/src/database.js')
+  const db = createDatabase()
+  try {
+    const task = db.updateTask(id, { status: 'done', ...(notes ? { notes } : {}) })
+    log(JSON.stringify({ id: task.id, status: task.status, title: task.title }))
+  } finally {
+    db.close()
+  }
+  return 0
+}
+
+async function taskList(args) {
+  let status
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === '--status' && args[i + 1]) { status = args[++i] }
+  }
+  const { createDatabase } = await import('../apps/api/src/database.js')
+  const db = createDatabase()
+  try {
+    const tasks = db.listTasks(status ? { status } : {})
+    for (const task of tasks.slice(0, 20)) {
+      log(`#${task.id} [${task.status}] ${task.title}`)
+    }
+  } finally {
+    db.close()
+  }
+  return 0
+}
+
 async function probeLocalPort(port) {
   try {
     const response = await fetch(`http://127.0.0.1:${port}/health`, {
@@ -1110,16 +1175,19 @@ async function dispatch(argv) {
     }
     case 'task': {
       const subcommand = rest[0] ?? ''
-      if (subcommand !== 'worktree') {
-        fail(
-          `Unknown task subcommand: ${subcommand}\n` +
-          'Usage: ./workspace task worktree <id>\n' +
-          '       ./workspace task worktree create <id> [--branch NAME] [--name NAME]\n' +
-          '       ./workspace task worktree remove <id> [--force]',
-          2
-        )
-      }
-      return taskWorktree(rest.slice(1))
+      if (subcommand === 'create') return taskCreate(rest.slice(1))
+      if (subcommand === 'done') return taskDone(rest.slice(1))
+      if (subcommand === 'list') return taskList(rest.slice(1))
+      if (subcommand === 'worktree') return taskWorktree(rest.slice(1))
+      fail(
+        `Unknown task subcommand: ${subcommand}\n` +
+        'Usage: ./workspace task create <title> [--project P] [--type T] [--priority P] [--status S]\n' +
+        '       ./workspace task done <id> [--notes "..."]\n' +
+        '       ./workspace task list [--status S]\n' +
+        '       ./workspace task worktree <id>',
+        2
+      )
+      break
     }
     case 'maintain':
       info('Running maintenance cycle...')

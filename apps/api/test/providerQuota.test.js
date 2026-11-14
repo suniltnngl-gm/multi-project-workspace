@@ -937,3 +937,12 @@ test('buildSwarmRoster prefers non-local reviewer over local-* when reviewerMode
   })
   assert.notEqual(roster.reviewer?.provider, 'local')
 })
+
+test('workspace-cli.mjs derives local model ports from LOCAL_MODEL_DEFINITIONS without hardcoding', async () => {
+  const { readFileSync } = await import('node:fs')
+  const { resolve } = await import('node:path')
+  const cliSource = readFileSync(resolve(import.meta.dirname, '../../../scripts/workspace-cli.mjs'), 'utf8')
+  assert.match(cliSource, /LOCAL_MODEL_DEFINITIONS/)
+  assert.doesNotMatch(cliSource, /LOCAL_AI_0_5B_PORT\s*\|\|\s*8080/)
+  assert.doesNotMatch(cliSource, /LOCAL_AI_1_5B_PORT\s*\|\|\s*8081/)
+})
