@@ -17,6 +17,7 @@ Defaults & overrides:
 - Default context/threads: `LOCAL_AI_CONTEXT=1024`, `LOCAL_AI_THREADS=2`.
 - Default endpoints/ports: `LOCAL_AI_URL` / `LOCAL_AI_0_5B_PORT`, `LOCAL_AI_1_5B_URL` / `LOCAL_AI_1_5B_PORT`.
 - Endpoints bind to loopback (`127.0.0.1`) by default.
+- Both `local-0.5b` and `local-1.5b` are tagged `resourceGated: true` as on-demand `llama-server` (`llama.cpp`) endpoints (not background Ollama daemons); `./workspace ai doctor` reports them as `[info]` (`on-demand, not running`) when idle and `[ok]` when running.
 
 ---
 

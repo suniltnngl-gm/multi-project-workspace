@@ -296,6 +296,10 @@ async function checkModelProbing(models, modelClient, record) {
 
   for (const { model, result } of probes) {
     if (!result.ok) {
+      if (model.resourceGated) {
+        record('info', model.id, `${model.label} is resource-gated (on-demand, not running).`)
+        continue
+      }
       const level = model.remote ? 'error' : 'warn'
       record(level, model.id, result.error || `${model.label} is not reachable.`)
       continue
@@ -339,10 +343,15 @@ async function checkModelProbing(models, modelClient, record) {
   // from the same probe results, so it never bootstraps a session or spends
   // quota just to answer "what can run?".
   const eligible = []
+  const gated = []
   const blocked = []
   for (const { model, result } of probes) {
     if (!result.ok) {
-      blocked.push(`${model.id} (${model.execution})`)
+      if (model.resourceGated) {
+        gated.push(`${model.id} (${model.execution})`)
+      } else {
+        blocked.push(`${model.id} (${model.execution})`)
+      }
       continue
     }
     if (model.backend === 'colab-cli' && result.accelerator?.gpu === false) {
@@ -353,6 +362,9 @@ async function checkModelProbing(models, modelClient, record) {
   }
   if (eligible.length > 0) {
     record('info', 'lanes', `Eligible lanes: ${eligible.join(', ')}.`)
+  }
+  if (gated.length > 0) {
+    record('info', 'lanes', `Resource-gated lanes (on-demand, not running): ${gated.join(', ')}.`)
   }
   if (blocked.length > 0) {
     record('warn', 'lanes', `Lanes that cannot serve now: ${blocked.join(', ')}.`)
