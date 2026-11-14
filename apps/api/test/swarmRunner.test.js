@@ -1107,3 +1107,88 @@ test('single-agent routes refine-task, jobs, complete, and improve execute as mu
     await new Promise((resolvePromise) => server.close(resolvePromise))
   }
 })
+
+test('parallel self-improvement runs by default, detects portability gaps, deduplicates proposals, and can be disabled', async () => {
+  const models = makeSampleModels()
+  const budget = createModelBudget({
+    profiles: {},
+    now: () => Date.parse('2026-11-13T12:00:00Z')
+  })
+  const bus = createAgentBus({ database, models, modelBudget: budget })
+  database.ensureRepository('/nonexistent/portable-missing-repo-path')
+
+  const modelClient = {
+    async complete() {
+      return JSON.stringify({
+        summary: 'Completed primary slice.',
+        status: 'done',
+        proposals: [
+          {
+            title: 'Standardize env overrides across scripts',
+            description: 'Reuse shared helper for env defaults.',
+            priority: 'medium',
+            task_type: 'chore',
+            rationale: 'Portable configuration hygiene'
+          },
+          {
+            title: 'Standardize env overrides across scripts',
+            description: 'Duplicate entry that should be deduplicated.',
+            priority: 'low',
+            task_type: 'chore'
+          }
+        ]
+      })
+    }
+  }
+
+  const runner = createSwarmRunner({
+    database,
+    bus,
+    models,
+    modelClient,
+    modelBudget: budget
+  })
+
+  const defaultPlan = runner.planSwarm({
+    objective: 'Slice 1; Slice 2',
+    models: ['colab-3b', 'kaggle-3b']
+  })
+  assert.equal(defaultPlan.selfImprove, true)
+  assert.equal(defaultPlan.selfImprovementPlan.strategy, 'parallel')
+
+  const created = runner.createSwarm({
+    objective: 'Slice 1; Slice 2',
+    includeReviewer: false,
+    autoProposeSelfImprovement: true,
+    models: ['colab-3b', 'kaggle-3b']
+  })
+  const executed = await runner.executeSwarm(created.runId)
+  assert.equal(executed.state, 'completed')
+  assert.equal(executed.selfImprove, true)
+  assert.equal(executed.selfImprovement.strategy, 'parallel')
+  assert.equal(executed.selfImprovement.portabilityOk, false)
+  assert.ok(executed.selfImprovement.sensorFindingsCount >= 1)
+  assert.ok(
+    executed.selfImprovement.recommendations.some((line) => line.includes('portability'))
+  )
+
+  const proposals = database.listTaskProposals()
+  assert.equal(
+    proposals.filter((entry) => entry.title === 'Standardize env overrides across scripts').length,
+    1
+  )
+  assert.ok(
+    proposals.some((entry) => entry.title === 'Repair non-portable repository or worktree paths')
+  )
+
+  const disabledCreated = runner.createSwarm({
+    objective: 'Disabled self-improve slice',
+    includeReviewer: false,
+    selfImprove: false,
+    models: ['colab-3b']
+  })
+  const disabledExecuted = await runner.executeSwarm(disabledCreated.runId)
+  assert.equal(disabledExecuted.state, 'completed')
+  assert.equal(disabledExecuted.selfImprove, false)
+  assert.equal(disabledExecuted.selfImprovement.strategy, 'disabled')
+})

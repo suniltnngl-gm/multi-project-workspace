@@ -33,7 +33,8 @@ cp .env.example .env   # configure optional model/backend settings
 <summary>Portability notes & environment configuration</summary>
 
 - **Single launcher:** `./workspace` and `.\workspace.cmd` wrap `scripts/workspace-cli.mjs` in Node with no external `bash`/`curl`/`lsof` dependencies.
-- **Relocatable SQLite:** Relative `DATABASE_PATH` values anchor to the workspace root, and moving a workspace-local checkout automatically adopts the primary repository row (`id = 1`), worktrees, and environment paths.
+- **Relocatable SQLite:** Relative `DATABASE_PATH` values anchor to the workspace root, and moving a workspace-local checkout automatically adopts the primary repository row (`id = 1`), worktrees, `tasks.worktree_path`, and environment `cwd` paths.
+- **Parameterized backends:** Local model directories, Kaggle kernel/dataset slugs (`KAGGLE_AI_KERNEL_ID`, `KAGGLE_AI_DATASET_HANDLE`), server ports, and `WORKSPACE_TMP_DIR` are all overridable via `.env` without editing tracked files.
 - **Portable scratch & dependencies:** `.npmrc` keeps `npm install` toolchain-free; Python versions and packages are locked via `apps/python/.python-version` and `uv.lock`; temporary scratch files respect `WORKSPACE_TMP_DIR`.
 - Keep `.env`, SQLite files, and downloaded GGUF models out of Git.
 
@@ -60,7 +61,7 @@ cp .env.example .env   # configure optional model/backend settings
 ## Core Capabilities
 
 - **Structured Task & Workspace Tracking**: Tasks track planning registers (`objectives`, `requirements`, `decisions`, `relevant_files`, `important_context`), work state, activity trails, AI job provenance, and sibling Git worktrees alongside file headers, folders, tools, and environments.
-- **Multi-Agent Swarm & Control Plane**: Star-topology `agentBus` (`parent` + up to `6` workers + parent-side `reviewer`) with zero-token routing, `2+2+2` cross-pool diversity, 1-hop context hydration, pre-run register backfill, and multi-agent execution across all `/api/local-ai/*` and `/api/ai/*` routes.
+- **Parallel Swarm & Self-Improvement Strategy**: Star-topology `agentBus` (`parent` + up to `6` workers + parent-side `reviewer`) with zero-token routing, `2+2+2` cross-pool diversity, 1-hop context hydration, pre-run register backfill, and a default-on **parallel self-improvement lane** that audits portability/sensor gaps and run telemetry alongside worker slices.
 - **Resource & Quota Safety**: Live adaptive CPU, RAM, disk, GPU, and swap gating for local models plus persistent SQLite quota ledgers, pre-dispatch reservations, `observe429` learned cooldowns, and `402` billing circuit breakers.
 - **Deterministic Sensors**: Snapshot-based detectors catch workspace gaps without calling models or spending quota.
 

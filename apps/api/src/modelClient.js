@@ -163,7 +163,7 @@ function retrySecondsFromText(text) {
 }
 
 function isRateLimitText(text) {
-  return /\b429\b|rate.?limit|quota.?exhausted|RESOURCE_EXHAUSTED|too many requests/i.test(String(text ?? ''))
+  return /\b429\b|rate.?limit|quota.?exhausted|RESOURCE_EXHAUSTED|too many requests|\b(?:tokens|requests)\s+per\s+(?:minute|hour|day)\b|\b(?:TPM|RPM|TPD|RPD)\b[\s\S]{0,40}\bLimit\b/i.test(String(text ?? ''))
 }
 
 function estimateTokens(text) {

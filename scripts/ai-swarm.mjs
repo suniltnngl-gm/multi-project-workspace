@@ -37,6 +37,9 @@ const VALUE_OPTIONS = new Set([
 const FLAG_OPTIONS = new Set([
   '--no-reviewer',
   '--complete-task',
+  '--self-improve',
+  '--no-self-improve',
+  '--auto-propose',
   '--dry-run',
   '--json',
   '--help',
@@ -46,8 +49,8 @@ const FLAG_OPTIONS = new Set([
 function usageText() {
   return [
     'Usage:',
-    '  ./workspace ai swarm plan [objective] [--task ID] [--slices "s1;s2"] [--workers N] [--models m1,m2] [--parent-mode MODE] [--review-rounds N] [--no-reviewer] [--json]',
-    '  ./workspace ai swarm run [objective] [--task ID] [--slices "s1;s2"] [--workers N] [--models m1,m2] [--parent-mode MODE] [--review-rounds N] [--complete-task] [--no-reviewer] [--max-tokens N] [--max-calls N] [--max-steps N] [--dry-run] [--json]',
+    '  ./workspace ai swarm plan [objective] [--task ID] [--slices "s1;s2"] [--workers N] [--models m1,m2] [--parent-mode MODE] [--review-rounds N] [--no-reviewer] [--self-improve|--no-self-improve] [--auto-propose] [--json]',
+    '  ./workspace ai swarm run [objective] [--task ID] [--slices "s1;s2"] [--workers N] [--models m1,m2] [--parent-mode MODE] [--review-rounds N] [--complete-task] [--no-reviewer] [--self-improve|--no-self-improve] [--auto-propose] [--max-tokens N] [--max-calls N] [--max-steps N] [--dry-run] [--json]',
     '  ./workspace ai swarm board <runId> [--json]',
     '  ./workspace ai swarm step <runId> [--json]',
     '  ./workspace ai swarm list [--state STATE] [--json]'
@@ -135,6 +138,14 @@ function buildPlanOptions(objective, options) {
   if (options['--complete-task']) {
     planOptions.completeTask = true
   }
+  if (options['--no-self-improve']) {
+    planOptions.selfImprove = false
+  } else if (options['--self-improve']) {
+    planOptions.selfImprove = true
+  }
+  if (options['--auto-propose']) {
+    planOptions.autoProposeSelfImprovement = true
+  }
   if (options['--worktree']) {
     planOptions.worktreePath = resolve(options['--worktree'])
   }
@@ -154,7 +165,8 @@ function printPlan(plan) {
   if (plan.objective) console.log(`Objective: ${plan.objective}`)
   console.log(
     `Quota strategy: parentModelCalls=${plan.quotaSummary.parentModelCalls}, ` +
-    `distinctProviderDomains=${plan.quotaSummary.distinctProviderDomains}`
+    `distinctProviderDomains=${plan.quotaSummary.distinctProviderDomains}, ` +
+    `selfImprove=${plan.selfImprovementPlan?.strategy ?? (plan.selfImprove !== false ? 'parallel' : 'disabled')}`
   )
   console.log('Agents:')
   for (const agent of plan.agents) {
@@ -184,6 +196,17 @@ function printBoard(board) {
     `Usage: calls=${usage.calls ?? 0}, totalTokens=${usage.totalTokens ?? 0}, ` +
     `durationMs=${usage.durationMs ?? 0}`
   )
+  if (board.selfImprovement) {
+    const si = board.selfImprovement
+    console.log(
+      `Self-improvement [${si.strategy}]: portabilityOk=${si.portabilityOk ?? true}, ` +
+      `sensorFindings=${si.sensorFindingsCount ?? 0}, ` +
+      `modelSwitches=${si.telemetry?.modelSwitches ?? 0}`
+    )
+    for (const rec of si.recommendations ?? []) {
+      console.log(`  * ${rec}`)
+    }
+  }
   if (board.result?.summary) {
     console.log(`Result: ${board.result.summary}`)
   }

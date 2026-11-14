@@ -1,9 +1,9 @@
-// Objective: Coordinate a non-native, low-quota multi-agent swarm over the SQLite agent control plane with zero-token routing and optional AI parent/sibling hooks.
-// Requirements: Keep deterministic coordination as the default (0 parent model calls); isolate worker sessions via promptCacheKey; pass delta #seq references; hydrate taskId, worktreePath, and file/folder/session registers; backfill blank task registers; record agentTaskOps in finalizeSwarmRun; wrap execution in jobStore; support parentMode (deterministic/auto/ai), worker question answering, and maxReviewRounds retry rounds; handle HTTP 429 via observe429 and automatic model switching.
-// Decisions: State lives in agent_runs/agent_messages/agent_run_usage so runs survive pauses and inspect identically over CLI and API; callAgentWithFallback shares budget reservation, cooldown observation, and fallback switching; finalizeSwarmRun applies task ops before transitioning to terminal state and compacts outcomes into ai_sessions.
-// Relevant Files: apps/api/src/swarmRunner.js, apps/api/src/agentBus.js, apps/api/src/providerQuota.js, apps/api/src/modelBudget.js, apps/api/src/modelClient.js, apps/api/src/localAiPrompt.js, apps/api/src/routes/agents.js, apps/api/src/routes/aiDrafts.js, scripts/ai-swarm.mjs
-// Important Context: User file. Implements the non-native cross-pool swarm runner with task/worktree/jobStore integration, context hydration, and AI parent/sibling hooks.
-// Work State: Completed: Non-native 2+2+2 swarm runner, task/worktree/agentTaskOps/jobStore sync, AI parent/sibling hooks, context hydration & session compaction; Active: None; Blocked: None; Next Move: Maintain as needed.
+// Objective: Coordinate a non-native, low-quota multi-agent swarm over the SQLite agent control plane with zero-token routing, parallel self-improvement, and optional AI parent/sibling hooks.
+// Requirements: Keep deterministic coordination as the default (0 parent model calls); run parallel workspace sensor/portability/telemetry self-improvement on every swarm run by default; isolate worker sessions via promptCacheKey; pass delta #seq references; hydrate taskId, worktreePath, and file/folder/session registers; backfill blank task registers; deduplicate proposals and record agentTaskOps in finalizeSwarmRun; wrap execution in jobStore; support parentMode (deterministic/auto/ai), worker question answering, and maxReviewRounds retry rounds; handle HTTP 429 via observe429 and automatic model switching.
+// Decisions: State lives in agent_runs/agent_messages/agent_run_usage so runs survive pauses and inspect identically over CLI and API; callAgentWithFallback shares budget reservation, cooldown observation, and fallback switching; buildParallelSelfImprovement combines scanWorkspaceSensors portability/gap detection with run telemetry without extra model tokens; finalizeSwarmRun applies task ops before transitioning to terminal state and compacts outcomes into ai_sessions.
+// Relevant Files: apps/api/src/swarmRunner.js, apps/api/src/agentBus.js, apps/api/src/workspaceSensors.js, apps/api/src/providerQuota.js, apps/api/src/modelBudget.js, apps/api/src/modelClient.js, apps/api/src/localAiPrompt.js, apps/api/src/routes/agents.js, apps/api/src/routes/aiDrafts.js, scripts/ai-swarm.mjs
+// Important Context: User file. Implements the permanent parallel swarm + self-improvement workflow strategy over SQLite.
+// Work State: Completed: Non-native 2+2+2 swarm runner, parallel self-improvement lane, task/worktree/agentTaskOps/jobStore sync, AI parent/sibling hooks, context hydration & session compaction; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { isTerminalRunState } from './agentProtocol.js'
 import {
   backfillTaskRegisters,
@@ -22,6 +22,7 @@ import {
   resolveAgentModel
 } from './providerQuota.js'
 import { scanWorkspaceUserFiles } from './workspaceScan.js'
+import { scanWorkspaceSensors } from './workspaceSensors.js'
 
 const MAX_ARTIFACT_THRESHOLD = 500
 const DEFAULT_SWARM_MAX_TOKENS = 600
@@ -365,8 +366,11 @@ export function createSwarmRunner({
       contextBlock = '',
       sessionId = null,
       syncSession = true,
-      syncFiles = false
+      syncFiles = false,
+      selfImprove: rawSelfImprove = true,
+      autoProposeSelfImprovement = false
     } = hydrated
+    const selfImprove = rawSelfImprove !== false
     const parentMode = VALID_PARENT_MODES.has(rawParentMode) ? rawParentMode : 'deterministic'
     const maxReviewRounds = Math.max(0, Math.min(3, Math.floor(Number(rawMaxReviewRounds) || 0)))
     const effectiveResourceStatus = readSyncResourceStatus(resourceStatus)
@@ -445,6 +449,13 @@ export function createSwarmRunner({
       ...(sessionId !== null ? { sessionId } : {}),
       syncSession,
       syncFiles,
+      selfImprove,
+      autoProposeSelfImprovement: Boolean(autoProposeSelfImprovement),
+      selfImprovementPlan: {
+        enabled: selfImprove,
+        strategy: selfImprove ? 'parallel' : 'disabled',
+        combines: ['workspace_sensors', 'portability_audit', 'run_telemetry', 'worker_proposals']
+      },
       title: cleanTitle,
       objective: cleanObjective,
       includeReviewer: agentsForPlan.some((agent) => agent.role === 'reviewer'),
@@ -491,12 +502,18 @@ export function createSwarmRunner({
       ? database.listAgentTaskOps(run.id)
       : []
 
+    const selfImprovement = run.result?.selfImprovement
+      ?? run.checkpoint?.selfImprovement
+      ?? null
+
     return {
       runId: run.id,
       taskId: run.taskId ?? null,
       state: run.state,
       title: run.plan?.title ?? '',
       objective: run.plan?.objective ?? '',
+      selfImprove: run.plan?.selfImprove !== false,
+      ...(selfImprovement ? { selfImprovement } : {}),
       ...(run.plan?.worktreePath ? { worktreePath: run.plan.worktreePath } : {}),
       agents: run.agents,
       board,
@@ -578,6 +595,8 @@ export function createSwarmRunner({
         completeTask: Boolean(options.completeTask),
         syncSession: plan.syncSession !== false,
         syncFiles: Boolean(plan.syncFiles),
+        selfImprove: plan.selfImprove !== false,
+        autoProposeSelfImprovement: Boolean(plan.autoProposeSelfImprovement),
         ...(plan.contextBlock ? { contextBlock: plan.contextBlock } : {}),
         ...(plan.sessionId !== undefined && plan.sessionId !== null ? { sessionId: plan.sessionId } : {}),
         autoSlicePending: plan.autoSlicePending,
@@ -605,6 +624,7 @@ export function createSwarmRunner({
         reviewRound: 0,
         autoSlicePending: Boolean(plan.autoSlicePending),
         slices: plan.slices,
+        selfImprovement: null,
         stepCount: 0
       }
     })
@@ -712,9 +732,10 @@ export function createSwarmRunner({
     activeModel,
     excludedIds,
     attempt,
+    maxAttempts = 2,
     reason
   }) {
-    if (attempt !== 0) return null
+    if (attempt >= maxAttempts - 1) return null
     excludedIds.add(activeModel.id)
     const resourceStatus = await readAsyncResourceStatus()
     const nextModel = pickFallbackModel(activeModel.id, excludedIds, resourceStatus)
@@ -739,8 +760,9 @@ export function createSwarmRunner({
     const excludedIds = new Set()
     let activeAgent = database.getAgent(agent.id) ?? agent
     let activeModel = resolveCallableModel(activeAgent.model, activeAgent.backend)
+    const maxAttempts = Math.max(2, Math.min(4, models.length || 2))
 
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const baseId = activeModel.baseId ?? activeModel.id
       const scope = quotaScopeForModel(activeModel)
       let gate = null
@@ -754,6 +776,7 @@ export function createSwarmRunner({
               activeModel,
               excludedIds,
               attempt,
+              maxAttempts,
               reason: `${activeModel.label || activeModel.id} quota exhausted or cooling down.`
             })
             if (!switched) {
@@ -792,6 +815,7 @@ export function createSwarmRunner({
             activeModel,
             excludedIds,
             attempt,
+            maxAttempts,
             reason: gateReason
           })
           if (switched) {
@@ -871,6 +895,7 @@ export function createSwarmRunner({
             activeModel,
             excludedIds,
             attempt,
+            maxAttempts,
             reason: String(error?.message || `HTTP ${errorStatus || 'error'}`)
           })
           if (switched) {
@@ -1211,12 +1236,151 @@ export function createSwarmRunner({
     return Array.isArray(run?.plan?.slices) ? run.plan.slices : []
   }
 
-  function syncTaskAndProposals(run, parentAgent, checkpoint, { approved, summary, verdictResult }) {
+  function normalizeProposalKey(value) {
+    return String(value ?? '').replace(/\s+/g, ' ').trim().toLowerCase()
+  }
+
+  function buildParallelSelfImprovement(run, checkpoint, verdictResult = null) {
+    if (run?.plan?.selfImprove === false) {
+      return { enabled: false, strategy: 'disabled' }
+    }
+
+    let sensorFindings = []
+    try {
+      if (typeof database.listTasks === 'function' && typeof database.listSensorFindings === 'function') {
+        const scanned = scanWorkspaceSensors({ database, models, modelBudget, now: now() })
+        sensorFindings = Array.isArray(scanned?.findings) ? scanned.findings : []
+      }
+    } catch {
+      sensorFindings = []
+    }
+
+    const events = typeof database.listAgentEvents === 'function'
+      ? database.listAgentEvents(run.id, { limit: 500 })
+      : []
+    const switchedModels = events
+      .filter((event) => event.type === 'agent_model_switched')
+      .map((event) => ({
+        agentId: event.agentId ?? '',
+        fromModel: event.data?.fromModel ?? '',
+        toModel: event.data?.toModel ?? '',
+        reason: compactText(event.data?.reason ?? '', 200)
+      }))
+
+    const usage = typeof database.getAgentRunUsage === 'function'
+      ? database.getAgentRunUsage(run.id)
+      : { calls: 0, totalTokens: 0, durationMs: 0 }
+
+    const portabilityIssues = sensorFindings.filter((entry) =>
+      entry.sensorId === 'tracking.repository_root_missing'
+      || entry.sensorId === 'tracking.worktree_missing'
+    )
+    const portabilityOk = portabilityIssues.length === 0
+
+    const recommendations = []
+    const suggestedProposals = []
+
+    if (!portabilityOk) {
+      recommendations.push(
+        `Repair ${portabilityIssues.length} missing repository root or worktree path(s) to preserve portability.`
+      )
+      suggestedProposals.push({
+        title: 'Repair non-portable repository or worktree paths',
+        description: portabilityIssues.map((entry) => entry.summary).join(' '),
+        priority: 'high',
+        task_type: 'chore',
+        rationale: 'Detected by parallel swarm portability self-improvement lane.'
+      })
+    }
+
+    if (switchedModels.length > 0) {
+      recommendations.push(
+        `Inspect ${switchedModels.length} model fallback switch(es) recorded during this swarm run.`
+      )
+    }
+
+    const quotaGaps = sensorFindings.filter((entry) =>
+      entry.sensorId === 'provider.quota_blocked' || entry.sensorId === 'model.usage_without_profile'
+    )
+    if (quotaGaps.length > 0) {
+      recommendations.push(
+        `Tune quota profiles or fallback ordering for ${quotaGaps.length} provider/model sensor finding(s).`
+      )
+    }
+
+    const metadataGaps = sensorFindings.filter((entry) =>
+      entry.sensorId === 'tracking.files_without_objective'
+      || entry.sensorId === 'tracking.folders_without_objective'
+    )
+    if (metadataGaps.length > 0) {
+      recommendations.push(
+        'Backfill missing file/folder header objectives and run ./workspace files scan.'
+      )
+      suggestedProposals.push({
+        title: 'Backfill missing file and folder register objectives',
+        description: metadataGaps.map((entry) => entry.summary).join(' '),
+        priority: 'medium',
+        task_type: 'chore',
+        rationale: 'Detected by parallel swarm register self-improvement lane.'
+      })
+    }
+
+    if (verdictResult && verdictResult.approved === false) {
+      recommendations.push('Review rejected slice feedback before retrying execution.')
+    }
+
+    return {
+      enabled: true,
+      strategy: 'parallel',
+      evaluatedAt: new Date(now()).toISOString(),
+      portabilityOk,
+      sensorFindingsCount: sensorFindings.length,
+      sensorHighlights: sensorFindings.slice(0, 5).map((entry) => ({
+        sensorId: entry.sensorId,
+        severity: entry.severity,
+        title: entry.title
+      })),
+      telemetry: {
+        calls: Number(usage?.calls ?? 0),
+        totalTokens: Number(usage?.totalTokens ?? 0),
+        durationMs: Number(usage?.durationMs ?? 0),
+        completedSlices: (checkpoint.completedSlices ?? []).length,
+        failedSlices: (checkpoint.failedSlices ?? []).length,
+        modelSwitches: switchedModels.length,
+        switchedModels
+      },
+      recommendations,
+      suggestedProposals: suggestedProposals.slice(0, 2)
+    }
+  }
+
+  function syncTaskAndProposals(
+    run,
+    parentAgent,
+    checkpoint,
+    { approved, summary, verdictResult, selfImprovement = null }
+  ) {
     if (!parentAgent || typeof database.applyTaskOps !== 'function') return
-    const allProposals = [
+    const existingKeys = new Set(
+      (typeof database.listTaskProposals === 'function'
+        ? database.listTaskProposals({ status: 'proposed' })
+        : [])
+        .map((entry) => normalizeProposalKey(entry.title))
+        .filter(Boolean)
+    )
+    const rawProposals = [
       ...(checkpoint.completedSlices ?? []).flatMap((slice) => slice.proposals ?? []),
-      ...(verdictResult?.proposals ?? [])
-    ].slice(0, MAX_PROPOSALS_PER_TURN)
+      ...(verdictResult?.proposals ?? []),
+      ...(run.plan?.autoProposeSelfImprovement ? (selfImprovement?.suggestedProposals ?? []) : [])
+    ]
+    const allProposals = []
+    for (const proposal of rawProposals) {
+      const key = normalizeProposalKey(proposal?.title)
+      if (!key || existingKeys.has(key)) continue
+      existingKeys.add(key)
+      allProposals.push(proposal)
+      if (allProposals.length >= MAX_PROPOSALS_PER_TURN) break
+    }
 
     const ops = allProposals.map((proposal, index) => ({
       op_id: `propose-${run.id}-${index + 1}`,
@@ -1298,7 +1462,14 @@ export function createSwarmRunner({
   function finalizeSwarmRun(run, checkpoint, { approved, summary, verdictResult = null }) {
     const parentAgent = run.agents.find((agent) => agent.id === run.primaryAgentId)
       ?? run.agents.find((agent) => agent.role === 'parent')
-    syncTaskAndProposals(run, parentAgent, checkpoint, { approved, summary, verdictResult })
+    const selfImprovement = buildParallelSelfImprovement(run, checkpoint, verdictResult)
+    checkpoint.selfImprovement = selfImprovement
+    syncTaskAndProposals(run, parentAgent, checkpoint, {
+      approved,
+      summary,
+      verdictResult,
+      selfImprovement
+    })
     bus.checkpointRun({ agentId: run.primaryAgentId, runId: run.id, checkpoint })
     database.updateAgent(run.primaryAgentId, { state: approved ? 'done' : 'failed' })
     bus.transitionRun(
@@ -1309,6 +1480,7 @@ export function createSwarmRunner({
           result: {
             summary,
             ...(verdictResult ? { verdict: verdictResult.verdict } : {}),
+            ...(selfImprovement ? { selfImprovement } : {}),
             slices: checkpoint.completedSlices
           }
         }
@@ -1316,6 +1488,7 @@ export function createSwarmRunner({
           error: summary,
           result: {
             ...(verdictResult ? { verdict: verdictResult.verdict } : {}),
+            ...(selfImprovement ? { selfImprovement } : {}),
             slices: checkpoint.completedSlices,
             ...(checkpoint.failedSlices?.length > 0 ? { failedSlices: checkpoint.failedSlices } : {})
           }
@@ -1492,6 +1665,7 @@ export function createSwarmRunner({
       reviewRound: Number(run.checkpoint?.reviewRound ?? 0),
       autoSlicePending: Boolean(run.checkpoint?.autoSlicePending),
       slices: effectiveSlicesFor(run, run.checkpoint),
+      selfImprovement: run.checkpoint?.selfImprovement ?? null,
       stepCount: Number(run.checkpoint?.stepCount ?? 0) + 1
     }
 
@@ -1519,21 +1693,28 @@ export function createSwarmRunner({
       }
     }
 
-    // Phase B: Run all ready workers in parallel across providers.
+    // Phase B: Run all ready workers and the parallel self-improvement lane together.
     const workers = run.agents.filter((agent) => agent.role === 'worker')
     const readyWorkers = workers.filter((worker) =>
       run.messages.some((message) => message.toAgentId === worker.id && message.state === 'queued')
     )
+    const selfImproveTask = run.plan?.selfImprove !== false
+      ? Promise.resolve().then(() => buildParallelSelfImprovement(run, checkpoint))
+      : Promise.resolve(checkpoint.selfImprovement)
     if (readyWorkers.length > 0) {
       didWork = true
-      await Promise.all(
-        readyWorkers.map(async (worker) => {
+      const [parallelAudit] = await Promise.all([
+        selfImproveTask,
+        ...readyWorkers.map(async (worker) => {
           const claimed = bus.claimInbox({ agentId: worker.id, runId, limit: 10 })
           for (const message of claimed.messages ?? []) {
             await runWorkerMessage(run, worker, message)
           }
         })
-      )
+      ])
+      checkpoint.selfImprovement = parallelAudit
+    } else if (run.plan?.selfImprove !== false && !checkpoint.selfImprovement) {
+      checkpoint.selfImprovement = await selfImproveTask
     }
 
     // Phase C: Parent inbox processing (results, worker questions, errors, verdicts).

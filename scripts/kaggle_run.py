@@ -22,11 +22,31 @@ except ImportError:  # Executed directly or loaded by file path.
 ROOT_DIR = Path(__file__).resolve().parents[1]
 NOTEBOOK_PATH = ROOT_DIR / "notebooks" / "kaggle-qwen-coder.ipynb"
 METADATA_PATH = ROOT_DIR / "notebooks" / "kernel-metadata.json"
+DEFAULT_KERNEL_ID = "edmundrosariosunil/kaggle-qwen-coder"
+DEFAULT_DATASET_HANDLE = "edmundrosariosunil/qwen2-5-coder-3b-instruct"
 REQUIRED_TASK_FIELDS = (
     "title",
     "project",
     "task_type",
 )
+
+
+def resolve_kaggle_config(metadata, kernel_id=None, dataset_handle=None):
+    resolved_kernel_id = (
+        (kernel_id or "").strip()
+        or os.environ.get("KAGGLE_AI_KERNEL_ID", "").strip()
+        or str(metadata.get("id") or "").strip()
+        or DEFAULT_KERNEL_ID
+    )
+    metadata_sources = metadata.get("dataset_sources") or []
+    default_source = str(metadata_sources[0]).strip() if metadata_sources else ""
+    resolved_dataset_handle = (
+        (dataset_handle or "").strip()
+        or os.environ.get("KAGGLE_AI_DATASET_HANDLE", "").strip()
+        or default_source
+        or DEFAULT_DATASET_HANDLE
+    )
+    return resolved_kernel_id, resolved_dataset_handle
 
 
 def load_task(task_path):
@@ -58,11 +78,31 @@ def load_task(task_path):
     return task
 
 
-def prepare_run_directory(task, run_dir):
+def prepare_run_directory(task, run_dir, kernel_id=None, dataset_handle=None):
     with NOTEBOOK_PATH.open(encoding="utf-8") as notebook_file:
         notebook = json.load(notebook_file)
     with METADATA_PATH.open(encoding="utf-8") as metadata_file:
         metadata = json.load(metadata_file)
+
+    effective_kernel_id, effective_dataset_handle = resolve_kaggle_config(
+        metadata, kernel_id=kernel_id, dataset_handle=dataset_handle
+    )
+    metadata["id"] = effective_kernel_id
+    metadata["dataset_sources"] = [effective_dataset_handle]
+
+    if effective_dataset_handle != DEFAULT_DATASET_HANDLE:
+        for paths_cell in notebook["cells"]:
+            if paths_cell.get("id") != "kaggle-paths":
+                continue
+            paths_source = "".join(paths_cell.get("source", []))
+            paths_lines = paths_source.splitlines(keepends=True)
+            for idx, line in enumerate(paths_lines):
+                if line.startswith("DATASET_HANDLE = "):
+                    paths_lines[idx] = (
+                        f"DATASET_HANDLE = {json.dumps(effective_dataset_handle)}\n"
+                    )
+                    break
+            paths_cell["source"] = paths_lines
 
     inference_cells = [
         cell
@@ -93,8 +133,11 @@ def prepare_run_directory(task, run_dir):
         json.dumps(notebook, ensure_ascii=False, indent=1) + "\n",
         encoding="utf-8",
     )
-    shutil.copyfile(METADATA_PATH, metadata_target)
-    return metadata["id"], notebook_target
+    metadata_target.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return effective_kernel_id, notebook_target
 
 
 def run_kaggle(arguments, timeout=60):
@@ -240,6 +283,8 @@ def execute(
     poll_interval,
     cancel_fallback="none",
     manifest_dir=None,
+    kernel_id_override=None,
+    dataset_handle_override=None,
 ):
     if shutil.which("kaggle") is None:
         raise FileNotFoundError(
@@ -270,7 +315,12 @@ def execute(
 
     with tempfile.TemporaryDirectory(prefix="kaggle-qwen-run-") as temporary_dir:
         if not kernel_id:
-            kernel_id, _ = prepare_run_directory(task, Path(temporary_dir))
+            kernel_id, _ = prepare_run_directory(
+                task,
+                Path(temporary_dir),
+                kernel_id=kernel_id_override,
+                dataset_handle=dataset_handle_override,
+            )
             print(f"Submitting one private Kaggle notebook run: {kernel_id}", flush=True)
             print(
                 run_kaggle(
@@ -459,6 +509,16 @@ def parse_arguments(argv=None):
             "(default: $KAGGLE_AI_MANIFEST_DIR or none)"
         ),
     )
+    parser.add_argument(
+        "--kernel-id",
+        default=None,
+        help="Override Kaggle kernel slug (<owner>/<slug>; defaults to $KAGGLE_AI_KERNEL_ID or notebooks/kernel-metadata.json).",
+    )
+    parser.add_argument(
+        "--dataset-handle",
+        default=None,
+        help="Override Kaggle dataset handle (<owner>/<dataset>; defaults to $KAGGLE_AI_DATASET_HANDLE or notebooks/kernel-metadata.json).",
+    )
     arguments = parser.parse_args(argv)
     if arguments.timeout < 1 or arguments.poll_interval < 1:
         parser.error("--timeout and --poll-interval must be positive integers")
@@ -485,6 +545,8 @@ def main(argv=None):
             arguments.poll_interval,
             arguments.cancel_fallback,
             arguments.manifest_dir,
+            kernel_id_override=arguments.kernel_id,
+            dataset_handle_override=arguments.dataset_handle,
         )
     except KeyboardInterrupt:
         print("Kaggle inference cancelled.", file=sys.stderr)

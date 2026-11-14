@@ -63,6 +63,12 @@ function normalizeSwarmBody(body = {}) {
       : {}),
     ...(input.complete_task !== undefined && input.completeTask === undefined
       ? { completeTask: input.complete_task }
+      : {}),
+    ...(input.self_improve !== undefined && input.selfImprove === undefined
+      ? { selfImprove: Boolean(input.self_improve) }
+      : {}),
+    ...(input.auto_propose_self_improvement !== undefined && input.autoProposeSelfImprovement === undefined
+      ? { autoProposeSelfImprovement: Boolean(input.auto_propose_self_improvement) }
       : {})
   }
 }

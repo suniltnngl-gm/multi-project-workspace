@@ -611,6 +611,7 @@ export function runMigrations(connection, { rootDir, databasePath, defaultDataba
   // (id 1). Callers pass their workspace root via rootDir; when a legacy
   // database needs a backfill target and no root was given, the process
   // working directory stands in so backfilled rows never dangle.
+  let relocatedRoot = null
   const hasAnyRepository =
     connection.prepare('SELECT 1 FROM repositories LIMIT 1').get() !== undefined
   if (!hasAnyRepository && (rootDir !== undefined || repositoryBackfillNeeded)) {
@@ -650,6 +651,7 @@ export function runMigrations(connection, { rootDir, databasePath, defaultDataba
         primary.root_path !== primaryRoot &&
         !existsSync(primary.root_path)
       if (relocate) {
+        relocatedRoot = { from: primary.root_path, to: primaryRoot, now }
         connection.transaction(() => {
           connection.prepare(
             'UPDATE repositories SET root_path = ?, updated_at = ? WHERE id = ?'
@@ -805,6 +807,13 @@ export function runMigrations(connection, { rootDir, databasePath, defaultDataba
     if (!existingColumns.has(column)) {
       connection.exec(`ALTER TABLE tasks ADD COLUMN ${column} ${definition}`)
     }
+  }
+  if (relocatedRoot) {
+    connection.prepare(
+      `UPDATE tasks
+       SET worktree_path = ?, updated_at = ?
+       WHERE worktree_path = ?`
+    ).run(relocatedRoot.to, relocatedRoot.now, relocatedRoot.from)
   }
   connection.exec(`
     CREATE INDEX IF NOT EXISTS idx_tasks_parent

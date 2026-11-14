@@ -75,6 +75,7 @@ Among ready candidates, automatic selection prefers healthy models with fewer fa
 ### Kaggle 3B Batch Runner
 
 - Explicit finite private kernel submission via [../scripts/kaggle_run.py](../scripts/kaggle_run.py) (`KAGGLE_AI_TIMEOUT_MS`, `KAGGLE_AI_POLL_INTERVAL_SECONDS=30`, manifests in `KAGGLE_AI_MANIFEST_DIR`).
+- Override `KAGGLE_AI_KERNEL_ID` (`--kernel-id`) and `KAGGLE_AI_DATASET_HANDLE` (`--dataset-handle`) via `.env` or CLI flags so any account can submit its own Kaggle kernel and private model dataset without modifying tracked files.
 - Notebook templates live at [../notebooks/kaggle-qwen-coder.ipynb](../notebooks/kaggle-qwen-coder.ipynb) and [../notebooks/kaggle-prepare-qwen-dataset.ipynb](../notebooks/kaggle-prepare-qwen-dataset.ipynb).
 - Cleanup is best-effort (`KAGGLE_AI_CANCEL_FALLBACK=delete` deletes the private kernel if queued cancellation is unsupported).
 

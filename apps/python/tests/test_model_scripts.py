@@ -600,6 +600,40 @@ class ModelScriptTests(unittest.TestCase):
         result = json.loads(output[len(RESULT_SENTINEL):])
         self.assertEqual(result["choices"][0]["message"]["content"], "draft")
 
+    def test_kaggle_prepare_run_directory_honors_env_overrides(self):
+        module = load_module("kaggle_run_env_overrides", KAGGLE_PATH)
+        task = sample_task()
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "KAGGLE_AI_KERNEL_ID": "portable-user/custom-kernel",
+                    "KAGGLE_AI_DATASET_HANDLE": "portable-user/custom-qwen-dataset",
+                },
+                clear=False,
+            ):
+                kernel_id, notebook_path = module.prepare_run_directory(
+                    task, Path(directory)
+                )
+
+            self.assertEqual(kernel_id, "portable-user/custom-kernel")
+            metadata = json.loads(
+                (Path(directory) / "kernel-metadata.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(metadata["id"], "portable-user/custom-kernel")
+            self.assertEqual(
+                metadata["dataset_sources"],
+                ["portable-user/custom-qwen-dataset"],
+            )
+            prepared = json.loads(notebook_path.read_text(encoding="utf-8"))
+            paths_cell = next(
+                cell for cell in prepared["cells"] if cell.get("id") == "kaggle-paths"
+            )
+            self.assertIn(
+                'DATASET_HANDLE = "portable-user/custom-qwen-dataset"',
+                "".join(paths_cell["source"]),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

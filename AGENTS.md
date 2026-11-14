@@ -27,7 +27,17 @@ Supported multi-agent request fields on draft routes: `workers` / `worker_count`
 
 ---
 
-## 2. Swarm & Parent/Sibling Workflows
+## 2. Permanent Workflow Strategy: Parallel Swarm + Self-Improvement
+
+Every multi-step engineering, refactoring, portability, or review task should use the **parallel swarm + parallel self-improvement strategy** (`selfImprove: true` by default in `swarmRunner.js`, `POST /api/agents/swarm`, and `./workspace ai swarm`):
+
+1. **Primary Worker Fan-Out (`2+2+2`)**: Independent slices execute in parallel across isolated quota domains (`local`, `cli`, `remote`) with isolated `promptCacheKey` sessions and `#seq` delta pointers.
+2. **Parallel Self-Improvement Lane**: During `stepSwarm` and `finalizeSwarmRun`, a zero-token self-improvement audit runs in parallel with the worker pool (`buildParallelSelfImprovement`), combining:
+   - Deterministic `scanWorkspaceSensors` gap and portability checks (`tracking.repository_root_missing`, `tracking.worktree_missing`, missing file/folder objectives, quota blocks),
+   - Live run telemetry (`agent.model_switched` fallback transitions, token/call usage, slice completion/failure counts), and
+   - Deduplicated worker/reviewer `proposals` (plus optional `--auto-propose` / `auto_propose_self_improvement` conversion of sensor/portability findings into `task_proposals`).
+3. **Structured Persistence**: Every completed or failed run records `selfImprovement` on the board/checkpoint/result, syncs task registers and `work_completed`/`next_move` via `agent_task_ops`, and compacts outcomes into `ai_sessions` for subsequent agents.
+4. **Portability Guarantee**: Never hardcode local machine paths, OS-specific separators, or personal cloud/Kaggle handles in source files or docs; parameterize machine/account settings via `.env` and keep workspace-local SQLite state relocatable.
 
 ### CLI & HTTP Surfaces
 
@@ -37,8 +47,8 @@ Supported multi-agent request fields on draft routes: `workers` / `worker_count`
 | **HTTP Swarm API** ([apps/api/src/routes/agents.js](apps/api/src/routes/agents.js)) | `POST /api/agents/swarm/plan`, `POST /api/agents/swarm`, `GET /api/agents/runs/:id/board`, `POST /api/agents/runs/:id/step`, `POST /api/agents/runs/:id/execute` |
 
 Key options:
-- **CLI flags**: `--task ID`, `--slices "s1;s2"`, `--workers N`, `--models m1,m2`, `--opencode-models ...`, `--parent-mode deterministic|auto|ai`, `--review-rounds N`, `--complete-task`, `--no-reviewer`, `--max-tokens N`, `--max-calls N`, `--max-steps N`, `--worktree PATH`, `--title TITLE`, `--database PATH`, `--dry-run`, `--json`.
-- **HTTP body fields**: `objective`, `title`, `task_id` (`taskId`), `slices`, `worker_count` (`workerCount`), `models`, `opencode_models`, `include_reviewer`, `worktree_path`, `parent_mode` (`parentMode`), `max_review_rounds` (`maxReviewRounds`), `sync_task` (`syncTask`), `complete_task` (`completeTask`), `execute`, `max_steps` (`maxSteps`).
+- **CLI flags**: `--task ID`, `--slices "s1;s2"`, `--workers N`, `--models m1,m2`, `--opencode-models ...`, `--parent-mode deterministic|auto|ai`, `--review-rounds N`, `--complete-task`, `--no-reviewer`, `--self-improve|--no-self-improve`, `--auto-propose`, `--max-tokens N`, `--max-calls N`, `--max-steps N`, `--worktree PATH`, `--title TITLE`, `--database PATH`, `--dry-run`, `--json`.
+- **HTTP body fields**: `objective`, `title`, `task_id` (`taskId`), `slices`, `worker_count` (`workerCount`), `models`, `opencode_models`, `include_reviewer`, `worktree_path`, `parent_mode` (`parentMode`), `max_review_rounds` (`maxReviewRounds`), `sync_task` (`syncTask`), `complete_task` (`completeTask`), `self_improve` (`selfImprove`), `auto_propose_self_improvement`, `execute`, `max_steps` (`maxSteps`).
 
 ### In-Process AI Parent / Sibling Hooks
 

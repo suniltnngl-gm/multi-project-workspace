@@ -81,6 +81,10 @@ test('a workspace-local database adopts the primary repository after the checkou
     original.prepare(
       'INSERT INTO environments (name, value, source, checked_at) VALUES (?, ?, ?, ?)'
     ).run('cwd', oldRoot, 'os.getcwd', now)
+    original.prepare(
+      `INSERT INTO tasks (title, worktree_path, created_at, updated_at)
+       VALUES (?, ?, ?, ?)`
+    ).run('Relocatable task', oldRoot, now, now)
     original.close()
 
     const moved = new Database(databasePath)
@@ -100,6 +104,10 @@ test('a workspace-local database adopts the primary repository after the checkou
     )
     assert.equal(
       moved.prepare("SELECT value FROM environments WHERE name = 'cwd'").get().value,
+      newRoot
+    )
+    assert.equal(
+      moved.prepare("SELECT worktree_path FROM tasks WHERE title = 'Relocatable task'").get().worktree_path,
       newRoot
     )
     moved.close()
