@@ -382,6 +382,7 @@ export function createSwarmRunner({
       autoProposeSelfImprovement = false,
       isolateWorktrees = false,
       mergeWorktrees = false,
+      reviewerModel = null,
       budget: runBudget
     } = hydrated
     const parseCsvOrEnv = (value, envValue) => (
@@ -425,7 +426,8 @@ export function createSwarmRunner({
       geminiApiModels: resolvedGeminiApiModels,
       geminiApiPaidModels: resolvedGeminiApiPaidModels,
       allowPaidEscalation: resolvedAllowPaidEscalation,
-      requiresLocalTools
+      requiresLocalTools,
+      reviewerModel
     })
 
     const agentsForPlan = Array.isArray(customAgents) && customAgents.length > 0

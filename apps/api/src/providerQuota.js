@@ -532,7 +532,8 @@ export function buildSwarmRoster({
   geminiApiModels = [],
   geminiApiPaidModels = [],
   allowPaidEscalation = false,
-  requiresLocalTools = false
+  requiresLocalTools = false,
+  reviewerModel = null
 } = {}) {
   const resourceMap = normalizeResourceMap(resourceStatus)
   const count = Math.max(1, Math.min(6, Math.floor(Number(workerCount) || 2)))
@@ -671,25 +672,41 @@ export function buildSwarmRoster({
   )
 
   let reviewer = null
-  if (includeReviewer !== false && selectionPool.length > 0) {
-    const reviewerCandidate = selectionPool.find(
-      (entry) => entry.ok
-        && !usedDomains.has(entry.groupKey)
-        && entry.utilizationTier === 1
-        && !entry.aheadOfPace
-        && entry.harvestableSession
-    )
-      ?? selectionPool.find(
+  if (includeReviewer !== false) {
+    if (typeof reviewerModel === 'string' && reviewerModel.trim()) {
+      const trimmedReviewer = reviewerModel.trim()
+      const resolvedReviewer = resolveAgentModel(models, trimmedReviewer)
+      if (!resolvedReviewer) {
+        throw new Error(`Unknown reviewer model: ${trimmedReviewer}`)
+      }
+      reviewer = toAgentEntry('reviewer', 'reviewer', toRosterCandidate(resolvedReviewer, modelBudget, resourceMap))
+    } else if (selectionPool.length > 0) {
+      const isNonLocal = (entry) => entry.provider !== 'local'
+      const reviewerCandidate = selectionPool.find(
         (entry) => entry.ok
+          && isNonLocal(entry)
           && !usedDomains.has(entry.groupKey)
           && entry.utilizationTier === 1
           && !entry.aheadOfPace
+          && entry.harvestableSession
       )
-      ?? rankedPool.find((entry) => entry.ok && !usedDomains.has(entry.groupKey))
-      ?? selectionPool.find((entry) => entry.ok && !usedDomains.has(entry.groupKey))
-      ?? rankedPool.find((entry) => entry.ok)
-      ?? selectionPool[0]
-    reviewer = toAgentEntry('reviewer', 'reviewer', reviewerCandidate)
+        ?? selectionPool.find(
+          (entry) => entry.ok
+            && isNonLocal(entry)
+            && !usedDomains.has(entry.groupKey)
+            && entry.utilizationTier === 1
+            && !entry.aheadOfPace
+        )
+        ?? rankedPool.find((entry) => entry.ok && isNonLocal(entry) && !usedDomains.has(entry.groupKey))
+        ?? selectionPool.find((entry) => entry.ok && isNonLocal(entry) && !usedDomains.has(entry.groupKey))
+        ?? rankedPool.find((entry) => entry.ok && isNonLocal(entry))
+        ?? selectionPool.find((entry) => entry.ok && isNonLocal(entry))
+        ?? rankedPool.find((entry) => entry.ok && !usedDomains.has(entry.groupKey))
+        ?? selectionPool.find((entry) => entry.ok && !usedDomains.has(entry.groupKey))
+        ?? rankedPool.find((entry) => entry.ok)
+        ?? selectionPool[0]
+      reviewer = toAgentEntry('reviewer', 'reviewer', reviewerCandidate)
+    }
   }
 
   const parentCandidate = rankedPool.find((entry) => entry.id === 'local-0.5b')

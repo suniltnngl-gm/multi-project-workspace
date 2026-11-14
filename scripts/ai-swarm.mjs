@@ -21,6 +21,7 @@ const VALUE_OPTIONS = new Set([
   '--slices',
   '--workers',
   '--models',
+  '--reviewer-model',
   '--opencode-models',
   '--agy-models',
   '--gemini-api-models',
@@ -55,8 +56,8 @@ const FLAG_OPTIONS = new Set([
 function usageText() {
   return [
     'Usage:',
-    '  ./workspace ai swarm plan [objective] [--task ID] [--slices "s1;s2"] [--workers N] [--models m1,m2] [--opencode-models m1,m2] [--agy-models m1,m2] [--gemini-api-models m1,m2] [--parent-mode MODE] [--review-rounds N] [--no-reviewer] [--self-improve|--no-self-improve] [--auto-propose] [--json]',
-    '  ./workspace ai swarm run [objective] [--task ID] [--slices "s1;s2"] [--workers N] [--models m1,m2] [--opencode-models m1,m2] [--agy-models m1,m2] [--gemini-api-models m1,m2] [--parent-mode MODE] [--review-rounds N] [--complete-task] [--no-reviewer] [--self-improve|--no-self-improve] [--auto-propose] [--max-tokens N] [--max-calls N] [--max-steps N] [--dry-run] [--json]',
+    '  ./workspace ai swarm plan [objective] [--task ID] [--slices "s1;s2"] [--workers N] [--models m1,m2] [--reviewer-model m] [--opencode-models m1,m2] [--agy-models m1,m2] [--gemini-api-models m1,m2] [--parent-mode MODE] [--review-rounds N] [--no-reviewer] [--self-improve|--no-self-improve] [--auto-propose] [--json]',
+    '  ./workspace ai swarm run [objective] [--task ID] [--slices "s1;s2"] [--workers N] [--models m1,m2] [--reviewer-model m] [--opencode-models m1,m2] [--agy-models m1,m2] [--gemini-api-models m1,m2] [--parent-mode MODE] [--review-rounds N] [--complete-task] [--no-reviewer] [--self-improve|--no-self-improve] [--auto-propose] [--max-tokens N] [--max-calls N] [--max-steps N] [--dry-run] [--json]',
     '  ./workspace ai swarm board <runId> [--json]',
     '  ./workspace ai swarm step <runId> [--json]',
     '  ./workspace ai swarm list [--state STATE] [--json]'
@@ -123,6 +124,9 @@ function buildPlanOptions(objective, options) {
   }
   if (options['--models']) {
     planOptions.models = splitCsv(options['--models'])
+  }
+  if (options['--reviewer-model']) {
+    planOptions.reviewerModel = String(options['--reviewer-model']).trim()
   }
   if (options['--opencode-models']) {
     planOptions.opencodeModels = splitCsv(options['--opencode-models'])

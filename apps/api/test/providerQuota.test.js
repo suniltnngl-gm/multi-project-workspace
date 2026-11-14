@@ -897,3 +897,43 @@ test('capability-aware worker routing prefers supportsLocalTools backends for re
   assert.equal(modelSupportsLocalTools(roster.workers[0]), true)
   assert.equal(roster.workers[0]?.provider, 'agy')
 })
+
+test('buildSwarmRoster pins explicit reviewerModel and rejects unknown reviewerModel', () => {
+  const models = createModelRegistry({ env: {} })
+  const budget = createModelBudget({
+    profiles: resolveQuotaProfiles({ env: {} })
+  })
+  const roster = buildSwarmRoster({
+    models,
+    modelBudget: budget,
+    workerCount: 1,
+    agyModels: ['gemini-3.8-flash-medium', 'claude-sonnet-5-5-medium'],
+    reviewerModel: 'agy@claude-sonnet-5-5-medium'
+  })
+  assert.equal(roster.reviewer?.model, 'agy@claude-sonnet-5-5-medium')
+
+  assert.throws(
+    () => buildSwarmRoster({
+      models,
+      modelBudget: budget,
+      workerCount: 1,
+      reviewerModel: 'nonexistent-model-xyz'
+    }),
+    /Unknown reviewer model/
+  )
+})
+
+test('buildSwarmRoster prefers non-local reviewer over local-* when reviewerModel is omitted', () => {
+  const models = createModelRegistry({ env: {} })
+  const budget = createModelBudget({
+    profiles: resolveQuotaProfiles({ env: {} })
+  })
+  const roster = buildSwarmRoster({
+    models,
+    modelBudget: budget,
+    workerCount: 1,
+    agyModels: ['gemini-3.8-flash-medium'],
+    geminiApiModels: ['gemini-3.8-flash']
+  })
+  assert.notEqual(roster.reviewer?.provider, 'local')
+})
