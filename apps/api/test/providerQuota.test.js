@@ -589,7 +589,7 @@ test('buildSwarmRoster prefers harvestable 5h session pools and demotes ahead-of
   assert.equal(roster.reviewer?.groupKey, 'agy:claude-gpt')
 })
 
-test('console-google API key models share one GCP project domain while failing over per model and running with agy', () => {
+test('console-google API key models share one GCP project domain while running concurrently with agy OAuth', () => {
   const clock = clockAt('2026-11-14T07:00:00Z')
   const budget = createModelBudget({
     env: {
@@ -618,12 +618,12 @@ test('console-google API key models share one GCP project domain while failing o
   ]
 
   const g38 = resolveAgentModel(models, 'opencode@console-google/gemini-3.8-flash')
-  const lite = resolveAgentModel(models, 'opencode@console-google/gemini-3.5-flash-lite')
+  const g25 = resolveAgentModel(models, 'opencode@console-google/gemini-2.5-flash')
   const agyGem = resolveAgentModel(models, 'agy@gemini-3.8-flash-medium')
   const deepseek = resolveAgentModel(models, 'opencode@opencode/deepseek-v4.1-flash-free')
 
   assert.equal(modelProviderKey(g38), 'opencode:console-google')
-  assert.equal(modelProviderKey(lite), 'opencode:console-google')
+  assert.equal(modelProviderKey(g25), 'opencode:console-google')
   assert.equal(modelProviderKey(agyGem), 'agy:gemini')
   assert.equal(modelProviderKey(deepseek), 'opencode:opencode/deepseek-v4.1-flash-free')
 
@@ -634,25 +634,29 @@ test('console-google API key models share one GCP project domain while failing o
     modelBudget: budget,
     workerCount: 2,
     includeReviewer: false,
-    opencodeModels: ['console-google/gemini-3.8-flash', 'console-google/gemini-3.5-flash-lite'],
+    opencodeModels: ['console-google/gemini-3.8-flash', 'console-google/gemini-2.5-flash'],
     agyModels: ['gemini-3.8-flash-medium']
   })
 
   const groupKeys = roster.workers.map((worker) => worker.groupKey).sort()
   assert.deepEqual(groupKeys, ['agy:gemini', 'opencode:console-google'])
 
-  // When console-google/gemini-3.8-flash hits a 429, Flash-Lite in the same GCP project
-  // still has independent RPD headroom and takes over the opencode:console-google slot.
-  budget.observe429('opencode', { scope: 'console-google/gemini-3.8-flash', retryAfter: 300 })
+  // Exhausting one model in console-google fails over to healthy siblings in the same GCP
+  // project while keeping concurrency serialized under opencode:console-google.
+  budget.record('opencode', 50, 'console-google/gemini-3.8-flash')
   const failoverRoster = buildSwarmRoster({
     models,
     modelBudget: budget,
     workerCount: 2,
     includeReviewer: false,
-    opencodeModels: ['console-google/gemini-3.8-flash', 'console-google/gemini-3.5-flash-lite'],
+    opencodeModels: ['console-google/gemini-3.8-flash', 'console-google/gemini-2.5-flash'],
     agyModels: ['gemini-3.8-flash-medium']
   })
-
-  const googleWorker = failoverRoster.workers.find((worker) => worker.groupKey === 'opencode:console-google')
-  assert.equal(googleWorker?.model, 'opencode@console-google/gemini-3.5-flash-lite')
+  assert.equal(failoverRoster.workers.length, 2)
+  assert.ok(
+    failoverRoster.workers.some((worker) => worker.model === 'opencode@console-google/gemini-2.5-flash')
+  )
+  assert.ok(
+    failoverRoster.workers.some((worker) => worker.model === 'agy@gemini-3.8-flash-medium')
+  )
 })
