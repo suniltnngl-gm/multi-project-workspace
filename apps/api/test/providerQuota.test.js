@@ -618,12 +618,14 @@ test('console-google API key models share one GCP project domain while running c
   ]
 
   const g38 = resolveAgentModel(models, 'opencode@console-google/gemini-3.8-flash')
-  const g25 = resolveAgentModel(models, 'opencode@console-google/gemini-2.5-flash')
+  const g35Lite = resolveAgentModel(models, 'opencode@console-google/gemini-3.5-flash-lite')
+  const gemma4 = resolveAgentModel(models, 'opencode@console-google/gemma-4-31b-it')
   const agyGem = resolveAgentModel(models, 'agy@gemini-3.8-flash-medium')
   const deepseek = resolveAgentModel(models, 'opencode@opencode/deepseek-v4.1-flash-free')
 
   assert.equal(modelProviderKey(g38), 'opencode:console-google')
-  assert.equal(modelProviderKey(g25), 'opencode:console-google')
+  assert.equal(modelProviderKey(g35Lite), 'opencode:console-google')
+  assert.equal(modelProviderKey(gemma4), 'opencode:console-google')
   assert.equal(modelProviderKey(agyGem), 'agy:gemini')
   assert.equal(modelProviderKey(deepseek), 'opencode:opencode/deepseek-v4.1-flash-free')
 
@@ -634,29 +636,33 @@ test('console-google API key models share one GCP project domain while running c
     modelBudget: budget,
     workerCount: 2,
     includeReviewer: false,
-    opencodeModels: ['console-google/gemini-3.8-flash', 'console-google/gemini-2.5-flash'],
+    opencodeModels: [
+      'console-google/gemini-3.8-flash',
+      'console-google/gemini-3.5-flash-lite',
+      'console-google/gemma-4-31b-it'
+    ],
     agyModels: ['gemini-3.8-flash-medium']
   })
 
   const groupKeys = roster.workers.map((worker) => worker.groupKey).sort()
   assert.deepEqual(groupKeys, ['agy:gemini', 'opencode:console-google'])
 
-  // Exhausting one model in console-google fails over to healthy siblings in the same GCP
-  // project while keeping concurrency serialized under opencode:console-google.
-  budget.record('opencode', 50, 'console-google/gemini-3.8-flash')
+  // A 429 on gemini-3.8-flash automatically fails over the opencode:console-google slot to
+  // console-google/gemini-3.5-flash-lite while keeping agy:gemini concurrent.
+  budget.observe429('opencode', { scope: 'console-google/gemini-3.8-flash', retryAfter: 300 })
   const failoverRoster = buildSwarmRoster({
     models,
     modelBudget: budget,
     workerCount: 2,
     includeReviewer: false,
-    opencodeModels: ['console-google/gemini-3.8-flash', 'console-google/gemini-2.5-flash'],
+    opencodeModels: [
+      'console-google/gemini-3.8-flash',
+      'console-google/gemini-3.5-flash-lite',
+      'console-google/gemma-4-31b-it'
+    ],
     agyModels: ['gemini-3.8-flash-medium']
   })
-  assert.equal(failoverRoster.workers.length, 2)
-  assert.ok(
-    failoverRoster.workers.some((worker) => worker.model === 'opencode@console-google/gemini-2.5-flash')
-  )
-  assert.ok(
-    failoverRoster.workers.some((worker) => worker.model === 'agy@gemini-3.8-flash-medium')
-  )
+
+  const googleWorker = failoverRoster.workers.find((worker) => worker.groupKey === 'opencode:console-google')
+  assert.equal(googleWorker?.model, 'opencode@console-google/gemini-3.5-flash-lite')
 })

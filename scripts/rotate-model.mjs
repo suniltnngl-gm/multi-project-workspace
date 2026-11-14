@@ -14,8 +14,8 @@ export const OPENCODE_PROVIDERS = {
   'console-google': [
     'console-google/gemini-3.8-flash',
     'console-google/gemini-2.5-flash',
-    'console-google/gemini-3.5-flash',
     'console-google/gemini-3.5-flash-lite',
+    'console-google/gemini-3.5-flash',
     'console-google/gemma-4-31b-it'
   ],
   'console-groq': [

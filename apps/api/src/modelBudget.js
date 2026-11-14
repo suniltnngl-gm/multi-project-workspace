@@ -291,17 +291,15 @@ export function resolveQuotaTarget(configs, id, scope) {
     }
   }
 
-  // Google AI Studio / Gemini API keys on OpenCode (console-google/*) enforce
-  // RPM/TPM/RPD and 429 cooldowns per model (ledgerId = opencode@<scope>)
-  // under a shared GCP project limit template (opencode@console-google), and
-  // reset daily RPD at midnight US Pacific Time (America/Los_Angeles).
+  // Google AI Studio / Gemini API keys on OpenCode (console-google/*) serialize
+  // swarm concurrency per GCP project (`opencode:console-google`) while keeping
+  // per-model ledgers (`opencode@console-google/<model>`) so a 429 on one model
+  // can fail over cleanly until midnight US Pacific Time (America/Los_Angeles).
   if (id === 'opencode' && isConsoleGoogleScope(scope)) {
-    const exactKey = `opencode@${scope}`
-    if (configs?.has(exactKey)) {
-      return { ledgerId: exactKey, limits: configs.get(exactKey), pool: 'console-google' }
-    }
-    const poolKey = 'opencode@console-google'
-    let limits = configs?.get(poolKey) ?? configs?.get('console-google')
+    const ledgerId = `opencode@${scope}`
+    let limits = configs?.get(ledgerId)
+      ?? configs?.get('opencode@console-google')
+      ?? configs?.get('console-google')
     if (!limits && configs?.has('opencode')) {
       limits = configs.get('opencode').map((entry) => (
         entry.window === 'day' && entry.timezone === 'UTC'
@@ -309,7 +307,7 @@ export function resolveQuotaTarget(configs, id, scope) {
           : entry
       ))
     }
-    return { ledgerId: exactKey, limits, pool: 'console-google' }
+    return { ledgerId, limits, pool: 'console-google' }
   }
 
   const ledgerId = scope ? `${id}@${scope}` : id

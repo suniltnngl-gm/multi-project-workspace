@@ -705,7 +705,7 @@ test('AGY dual 5-hour session and weekly limits keep harvestableSession and pers
   }
 })
 
-test('opencode console-google tracks per-model RPD/429 inside a GCP project template, stays isolated from agy, and resets at Pacific midnight', () => {
+test('opencode console-google keeps per-model failover ledgers, stays isolated from agy, and resets at Pacific midnight', () => {
   // Winter PST is UTC-8: 2026-01-14T23:55:00Z is 15:55 PST on Jan 14.
   const clock = clockAt('2026-01-14T23:55:00Z')
   const budget = createModelBudget({
@@ -717,18 +717,19 @@ test('opencode console-google tracks per-model RPD/429 inside a GCP project temp
     now: clock.now
   })
 
-  budget.record('opencode', 2, 'console-google/gemini-3.8-flash')
+  // Recording & 429 on console-google/gemini-3.8-flash leaves sibling flash-lite and OAuth agy ready for failover.
+  budget.record('opencode', 1, 'console-google/gemini-3.8-flash')
   budget.observe429('opencode', { scope: 'console-google/gemini-3.8-flash', retryAfter: 30 })
-  // Sibling Free-tier Flash/Flash-Lite models in the same GCP project keep their own independent
-  // RPD/cooldown ledgers, and OAuth agy remains untouched.
+  budget.record('opencode', 1, 'console-google/gemini-3.8-flash')
+
   assert.equal(budget.check('opencode', 'console-google/gemini-3.8-flash').ok, false)
-  assert.equal(budget.snapshot('opencode', 'console-google/gemini-2.5-flash').used, 0)
-  assert.equal(budget.check('opencode', 'console-google/gemini-2.5-flash').ok, true)
   assert.equal(budget.snapshot('opencode', 'console-google/gemini-3.5-flash-lite').used, 0)
+  assert.equal(budget.check('opencode', 'console-google/gemini-3.5-flash-lite').ok, true)
   assert.equal(budget.snapshot('agy', 'gemini-3.8-flash-medium').used, 0)
 
-  // Daily RPD and learned 429 buckets ignore UTC midnight (00:05Z = 16:05 PST) until PT midnight (08:00Z).
-  clock.set('2026-01-15T00:05:00Z') // Past UTC midnight, still Jan 14 in America/Los_Angeles
+  // Configured daily RPD and learned 429 cap stay active past cooldown & UTC midnight (00:05Z = 16:05 PST)
+  // until midnight America/Los_Angeles (08:00Z in winter PST).
+  clock.set('2026-01-15T00:05:00Z')
   assert.equal(budget.check('opencode', 'console-google/gemini-3.8-flash').ok, false)
 
   clock.set('2026-01-15T07:59:00Z') // 23:59 PST on Jan 14
