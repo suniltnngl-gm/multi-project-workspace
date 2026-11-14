@@ -569,14 +569,14 @@ async function aiLocal(args) {
     fail(`Unknown local model target: ${target}. Expected all, 0.5b, or 1.5b.`, 2)
   }
 
-  const targets = [
-    ...(target === 'all' || target === '0.5b'
-      ? [{ id: 'local-0.5b', key: '0.5b', port: Number(process.env.LOCAL_AI_0_5B_PORT || 8080) }]
-      : []),
-    ...(target === 'all' || target === '1.5b'
-      ? [{ id: 'local-1.5b', key: '1.5b', port: Number(process.env.LOCAL_AI_1_5B_PORT || 8081) }]
-      : [])
-  ]
+  const { LOCAL_MODEL_DEFINITIONS } = await import('../apps/api/src/modelRegistry.js')
+  const targets = LOCAL_MODEL_DEFINITIONS
+    .filter((def) => target === 'all' || def.launchKey === target)
+    .map((def) => ({
+      id: def.id,
+      key: def.launchKey,
+      port: Number(process.env[def.portEnv] || def.defaultPort)
+    }))
 
   if (action === 'up') {
     return runNodeScript('local-models.mjs', [target])
