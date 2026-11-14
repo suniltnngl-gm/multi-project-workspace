@@ -1038,6 +1038,7 @@ export function publicModelDefinition(model) {
     provider: model.provider,
     execution: model.execution,
     backend: model.backend,
+    supportsLocalTools: model.supportsLocalTools ?? (model.backend === 'agy-cli' || model.backend === 'opencode-cli'),
     callable: model.callable,
     autoSelect: model.autoSelect ?? true,
     ...(model.escalationOnly ? { escalationOnly: true } : {}),

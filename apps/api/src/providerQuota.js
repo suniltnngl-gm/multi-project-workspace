@@ -530,7 +530,8 @@ export function buildSwarmRoster({
   agyModels = [],
   geminiApiModels = [],
   geminiApiPaidModels = [],
-  allowPaidEscalation = false
+  allowPaidEscalation = false,
+  requiresLocalTools = false
 } = {}) {
   const resourceMap = normalizeResourceMap(resourceStatus)
   const count = Math.max(1, Math.min(6, Math.floor(Number(workerCount) || 2)))
@@ -626,6 +627,9 @@ export function buildSwarmRoster({
     seenSpecs.add(entry.modelSpec)
     selectionPool.push(entry)
   }
+  if (requiresLocalTools && preferredModels.length === 0) {
+    selectionPool.sort((a, b) => Number(modelSupportsLocalTools(b)) - Number(modelSupportsLocalTools(a)))
+  }
 
   const pickedWorkers = []
   const usedDomains = new Set()
@@ -708,6 +712,20 @@ export function buildSwarmRoster({
     workers,
     agents: [parent, ...(reviewer ? [reviewer] : []), ...workers]
   }
+}
+
+export function modelSupportsLocalTools(model) {
+  if (!model) return false
+  if (typeof model.supportsLocalTools === 'boolean') return model.supportsLocalTools
+  return model.backend === 'agy-cli' || model.backend === 'opencode-cli'
+}
+
+export function sliceRequiresLocalTools(text) {
+  const clean = String(text ?? '')
+  if (!clean.trim()) return false
+  return /\b(?:verify|audit|run|inspect|edit|patch|test|check)\b/i.test(clean)
+    || /(?:^|\s)\.?\/workspace\b/.test(clean)
+    || /\b(?:apps|scripts|docs|notebooks)\/[\w.-]+/.test(clean)
 }
 
 const KNOWN_MODEL_TPM_LIMITS = Object.freeze({

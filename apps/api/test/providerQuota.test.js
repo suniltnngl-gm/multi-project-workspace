@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { createModelBudget } from '../src/modelBudget.js'
+import { createModelBudget, resolveQuotaProfiles } from '../src/modelBudget.js'
 import { createModelRegistry } from '../src/modelRegistry.js'
 import { createModelScheduler } from '../src/modelScheduler.js'
 import {
@@ -862,4 +862,37 @@ test('prompt-size TPM guard rejects 8000-TPM Groq models for large prompts while
   // Even a tiny 100-token prompt + 8500 opencode CLI overhead = 8600 * 1.15 = 9890 > 8000
   assert.equal(fitsPromptTpmLimit(groqOss120b, 100), false)
   assert.equal(fitsPromptTpmLimit(highTpmOpencode, largePromptTokens), true)
+})
+
+test('capability-aware worker routing prefers supportsLocalTools backends for repo/CLI slices', async () => {
+  const {
+    modelSupportsLocalTools,
+    sliceRequiresLocalTools
+  } = await import('../src/providerQuota.js')
+
+  assert.equal(sliceRequiresLocalTools('Verify CLI help outputs for ./workspace ai quota'), true)
+  assert.equal(sliceRequiresLocalTools('Audit docs/ai-backends-and-quotas.md'), true)
+  assert.equal(sliceRequiresLocalTools('Summarize key takeaways from the provided notes'), false)
+
+  const models = createModelRegistry({ env: {} })
+  const agy = models.find((m) => m.id === 'agy')
+  const opencode = models.find((m) => m.id === 'opencode')
+  const geminiApi = models.find((m) => m.id === 'gemini-api')
+  assert.equal(modelSupportsLocalTools(agy), true)
+  assert.equal(modelSupportsLocalTools(opencode), true)
+  assert.equal(modelSupportsLocalTools(geminiApi), false)
+
+  const budget = createModelBudget({
+    profiles: resolveQuotaProfiles({ env: {} })
+  })
+  const roster = buildSwarmRoster({
+    models,
+    modelBudget: budget,
+    workerCount: 1,
+    includeReviewer: false,
+    agyModels: ['gemini-3.8-flash-medium'],
+    geminiApiModels: ['gemini-3.8-flash'],
+    requiresLocalTools: true
+  })
+  assert.equal(modelSupportsLocalTools(roster.workers[0]), true)
 })

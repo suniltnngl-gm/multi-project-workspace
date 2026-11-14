@@ -23,7 +23,8 @@ import {
   fitsPromptTpmLimit,
   planAgentDispatch,
   quotaScopeForModel,
-  resolveAgentModel
+  resolveAgentModel,
+  sliceRequiresLocalTools
 } from './providerQuota.js'
 import { scanWorkspaceUserFiles } from './workspaceScan.js'
 import { scanWorkspaceSensors } from './workspaceSensors.js'
@@ -407,6 +408,7 @@ export function createSwarmRunner({
       ? Number(workerCount)
       : normalizedSlices.length
     const effectiveWorkerCount = Math.min(6, Math.max(1, Math.floor(explicitWorkerCount)))
+    const requiresLocalTools = normalizedSlices.some((slice) => sliceRequiresLocalTools(slice.goal))
     const roster = buildSwarmRoster({
       models,
       modelBudget,
@@ -418,7 +420,8 @@ export function createSwarmRunner({
       agyModels: resolvedAgyModels,
       geminiApiModels: resolvedGeminiApiModels,
       geminiApiPaidModels: resolvedGeminiApiPaidModels,
-      allowPaidEscalation: resolvedAllowPaidEscalation
+      allowPaidEscalation: resolvedAllowPaidEscalation,
+      requiresLocalTools
     })
 
     const agentsForPlan = Array.isArray(customAgents) && customAgents.length > 0
