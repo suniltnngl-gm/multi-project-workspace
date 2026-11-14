@@ -13,7 +13,7 @@
     "build": "npm run build --workspace apps/web",
     "test": "npm test --workspace apps/web && npm test --workspace apps/api && node scripts/run-python.mjs -m unittest discover -s apps/python/tests",
     "test:python": "node scripts/run-python.mjs -m unittest discover -s apps/python/tests",
-    "lint": "npm run lint --workspace apps/web",
+    "lint": "npm run lint --workspace apps/web && eslint apps/api/src scripts",
     "start:api": "npm run start --workspace apps/api"
   },
   "engines": {
