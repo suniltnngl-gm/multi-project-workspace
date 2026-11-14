@@ -970,11 +970,20 @@ export function createModelBudget({
     const rawSyncedResetAt = latestBucket(observedId, SYNCED_WEEK_RESET_POLICY)
     const lastSyncedAt = latestBucket(observedId, SYNCED_AT_POLICY)
     const syncedWeekResetExpired = Boolean(rawSyncedResetAt !== null && rawSyncedResetAt <= at)
+    const syncedSessionResetExpired = Boolean(
+      lastSyncedAt !== null
+      && limitConfigs?.some((limit) => {
+        if (limit?.window !== 'session' || !limit.windowMs) return false
+        const latestSession = latestBucket(observedId, limit.policy)
+        return latestSession !== null && latestSession <= lastSyncedAt && at >= latestSession + limit.windowMs
+      })
+    )
     const syncAgeSeconds = lastSyncedAt !== null
       ? Math.max(0, Math.floor((at - lastSyncedAt) / 1000))
       : null
     const staleCalibration = Boolean(
       syncedWeekResetExpired
+      || syncedSessionResetExpired
       || (lastSyncedAt !== null && at - lastSyncedAt > 24 * HOUR)
     )
     const syncAudit = (lastSyncedAt !== null || rawSyncedResetAt !== null)
@@ -982,7 +991,9 @@ export function createModelBudget({
         ...(lastSyncedAt !== null ? { lastSyncedAt, syncAgeSeconds } : {}),
         ...(rawSyncedResetAt !== null ? { syncedResetAt: rawSyncedResetAt } : {}),
         syncedWeekResetExpired,
-        staleCalibration
+        syncedSessionResetExpired,
+        staleCalibration,
+        needsSync: staleCalibration
       }
       : undefined
 
@@ -1580,5 +1591,54 @@ export function createModelBudget({
     syncPoolState,
     snapshot,
     prune
+  }
+}
+
+/**
+ * Inspect calibrated quota pools for expired 5h/weekly reset timers or >24h staleness.
+ */
+export function collectSyncAuditWarnings(
+  budget,
+  targets = [],
+  { includeUncalibrated = false, formatAge = (seconds) => `${Math.floor(seconds / 3600)}h` } = {}
+) {
+  const expiredResets = []
+  const stalePools = []
+
+  for (const entry of targets) {
+    const hr = budget?.headroom?.(entry.id, entry.scope)
+    if (!hr?.configured) continue
+    const audit = hr.syncAudit
+    if (audit?.syncedWeekResetExpired || audit?.syncedSessionResetExpired) {
+      expiredResets.push(entry.target)
+    }
+    if (audit?.needsSync || audit?.staleCalibration) {
+      const reason = audit.syncedWeekResetExpired
+        ? 'synced weekly reset timer elapsed; re-run `./workspace ai quota sync`'
+        : audit.syncedSessionResetExpired
+          ? 'synced 5h window reset timer elapsed; re-run `./workspace ai quota sync`'
+          : `calibrated ${formatAge(audit.syncAgeSeconds ?? 0)} ago (>24h); re-run \`./workspace ai quota sync\``
+      stalePools.push({
+        target: entry.target,
+        label: entry.label,
+        reason,
+        syncAudit: audit
+      })
+    } else if (!audit && includeUncalibrated) {
+      stalePools.push({
+        target: entry.target,
+        label: entry.label,
+        reason: 'never calibrated via `./workspace ai quota sync`',
+        syncAudit: null
+      })
+    }
+  }
+
+  return {
+    expiredResets,
+    stalePools: stalePools.map((entry) => entry.target),
+    details: stalePools,
+    needsSync: stalePools.length > 0,
+    warnings: stalePools.map((entry) => `${entry.target}: ${entry.reason}`)
   }
 }

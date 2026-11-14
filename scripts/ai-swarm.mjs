@@ -195,6 +195,12 @@ function printPlan(plan) {
   console.log(
     `Exposure estimate: calls=${qs.estimatedCalls ?? 0}, tokens~=${qs.estimatedTokens ?? 0}, estCost=${usdLabel}`
   )
+  if (qs.syncAudit?.needsSync) {
+    console.log('Quota Drift Warning:')
+    for (const warning of qs.syncAudit.warnings ?? []) {
+      console.log(`  ! ${warning}`)
+    }
+  }
   const estByName = new Map((qs.agentEstimates ?? []).map((entry) => [entry.agent, entry]))
   console.log('Agents:')
   for (const agent of plan.agents) {

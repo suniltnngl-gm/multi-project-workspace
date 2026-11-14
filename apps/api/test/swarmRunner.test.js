@@ -7,9 +7,10 @@ import { after, before, test } from 'node:test'
 import { createAgentBus } from '../src/agentBus.js'
 import { createApp } from '../src/app.js'
 import { createDatabase } from '../src/database.js'
-import { createModelBudget } from '../src/modelBudget.js'
+import { createModelBudget, resolveQuotaProfiles } from '../src/modelBudget.js'
 import { ModelCallError } from '../src/modelClient.js'
 import { createModelMetrics } from '../src/modelMetrics.js'
+import { createModelRegistry, modelQuotaProfiles } from '../src/modelRegistry.js'
 import { createModelScheduler } from '../src/modelScheduler.js'
 import { buildSwarmRoster, planAgentDispatch, resolveAgentModel } from '../src/providerQuota.js'
 import { createSwarmRunner } from '../src/swarmRunner.js'
@@ -1324,4 +1325,63 @@ test('planSwarm and --dry-run compute token/call and USD exposure estimates acro
   assert.equal(dryRunJson.dryRun, true)
   assert.equal(dryRunJson.quotaSummary.paidEscalationActive, true)
   assert.ok(dryRunJson.quotaSummary.estimatedPaidUsd > 0)
+})
+
+test('planSwarm and createSwarm surface syncAudit drift warnings when an AGY window has expired', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'swarm-sync-audit-'))
+  const db = createDatabase(join(tempDir, 'workspace.sqlite'))
+  try {
+    const models = createModelRegistry({ env: {} })
+    const profiles = resolveQuotaProfiles({ env: {}, profiles: modelQuotaProfiles(models) })
+    let clockMs = Date.parse('2026-11-14T12:00:00Z')
+    const budget = createModelBudget({
+      repository: db,
+      profiles,
+      now: () => clockMs
+    })
+    budget.syncPoolState('agy', {
+      scope: 'gemini-3.8-flash-medium',
+      weeklyRemainingPercent: 80,
+      weeklyResetSeconds: 150 * 3600,
+      sessionRemainingPercent: 60,
+      sessionResetSeconds: 10 * 60
+    })
+
+    // Advance past the 10-minute 5-hour session window
+    clockMs += 15 * 60_000
+
+    const runner = createSwarmRunner({
+      database: db,
+      bus: createAgentBus({ database: db }),
+      models,
+      modelBudget: budget,
+      modelClient: { generate: async () => ({ text: 'ok' }) },
+      rootDir: tempDir
+    })
+
+    const plan = runner.planSwarm({
+      objective: 'Slice 1; Slice 2',
+      agyModels: ['gemini-3.8-flash-medium']
+    })
+    assert.equal(plan.quotaSummary.syncAudit.needsSync, true)
+    assert.ok(plan.quotaSummary.syncAudit.expiredResets.includes('agy@gemini'))
+    assert.ok(plan.quotaSummary.syncAudit.warnings.some((w) => /agy@gemini: synced 5h window reset timer elapsed/.test(w)))
+
+    const warnings = []
+    const origWarn = console.warn
+    console.warn = (...args) => warnings.push(args.join(' '))
+    try {
+      const created = runner.createSwarm({
+        objective: 'Slice 1; Slice 2',
+        agyModels: ['gemini-3.8-flash-medium']
+      })
+      assert.ok(created.runId)
+    } finally {
+      console.warn = origWarn
+    }
+    assert.ok(warnings.some((w) => /\[swarm pre-flight\] Quota calibration drift: agy@gemini: synced 5h window reset timer elapsed/.test(w)))
+  } finally {
+    db.close()
+    await rm(tempDir, { recursive: true, force: true })
+  }
 })

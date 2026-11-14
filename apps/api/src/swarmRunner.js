@@ -13,8 +13,9 @@ import {
   resolveTaskSessionContext,
   splitFileRefs
 } from './localAiPrompt.js'
-import { estimateGeminiPaidCostMicros } from './modelBudget.js'
+import { collectSyncAuditWarnings, estimateGeminiPaidCostMicros } from './modelBudget.js'
 import { isFallbackEligible } from './modelFallback.js'
+import { AGY_POOL_DEFAULT_MODELS, AGY_QUOTA_POOLS } from './modelRegistry.js'
 import {
   billingRank,
   buildSwarmRoster,
@@ -521,6 +522,15 @@ export function createSwarmRunner({
     const paidEscalationActive = agentsForPlan.some(
       (agent) => agent.provider === 'gemini-api-paid' || agent.billingCategory === 'payg'
     )
+    const agyTargets = AGY_QUOTA_POOLS.map((pool) => ({
+      id: 'agy',
+      scope: AGY_POOL_DEFAULT_MODELS[pool],
+      target: `agy@${pool}`,
+      label: pool
+    }))
+    const syncAudit = collectSyncAuditWarnings(modelBudget, agyTargets, {
+      includeUncalibrated: false
+    })
 
     return {
       ...(taskId !== undefined ? { taskId } : {}),
@@ -553,7 +563,8 @@ export function createSwarmRunner({
         estimatedTokens,
         estimatedPaidUsd: Number((estimatedPaidMicros / 1_000_000).toFixed(6)),
         paidEscalationActive,
-        agentEstimates
+        agentEstimates,
+        syncAudit
       }
     }
   }
@@ -647,6 +658,11 @@ export function createSwarmRunner({
     if (plan.error) return plan
     if (!plan.objective) {
       return bus.errorResult(400, 'Swarm objective or taskId is required.')
+    }
+    if (plan.quotaSummary?.syncAudit?.needsSync && options.quiet !== true) {
+      for (const warning of plan.quotaSummary.syncAudit.warnings ?? []) {
+        console.warn(`[swarm pre-flight] Quota calibration drift: ${warning}`)
+      }
     }
     const agents = (Array.isArray(options.agents) && options.agents.length > 0
       ? options.agents

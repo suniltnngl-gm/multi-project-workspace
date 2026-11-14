@@ -878,15 +878,26 @@ test('syncAudit tracks calibration timestamp and flags elapsed synced reset or >
 
   const fresh = budget.headroom('agy', 'gemini-3.8-flash-medium')
   assert.equal(fresh.syncAudit.syncedWeekResetExpired, false)
+  assert.equal(fresh.syncAudit.syncedSessionResetExpired, false)
   assert.equal(fresh.syncAudit.staleCalibration, false)
+  assert.equal(fresh.syncAudit.needsSync, false)
   assert.equal(fresh.syncAudit.syncAgeSeconds, 0)
 
+  // Advance 5h 1m to expire the synced 5-hour session window before weekly expires
+  clock.advance(5 * HOUR + 60_000)
+  const sessionExpired = budget.headroom('agy', 'gemini-3.8-flash-medium')
+  assert.equal(sessionExpired.syncAudit.syncedWeekResetExpired, false)
+  assert.equal(sessionExpired.syncAudit.syncedSessionResetExpired, true)
+  assert.equal(sessionExpired.syncAudit.staleCalibration, true)
+  assert.equal(sessionExpired.syncAudit.needsSync, true)
+
   // Advance past the synced 6h weekly reset timer
-  clock.advance(7 * HOUR)
+  clock.advance(2 * HOUR)
   const expired = budget.headroom('agy', 'gemini-3.8-flash-medium')
   assert.equal(expired.syncAudit.syncedWeekResetExpired, true)
   assert.equal(expired.syncAudit.staleCalibration, true)
-  assert.equal(expired.syncAudit.syncAgeSeconds, 7 * 3600)
+  assert.equal(expired.syncAudit.needsSync, true)
+  assert.equal(expired.syncAudit.syncAgeSeconds, 7 * 3600 + 60)
 
   // Re-sync with a long reset window and advance >24h to check age-based staleness
   budget.syncPoolState('agy', {
@@ -898,5 +909,6 @@ test('syncAudit tracks calibration timestamp and flags elapsed synced reset or >
   const staleByAge = budget.headroom('agy', 'gemini-3.8-flash-medium')
   assert.equal(staleByAge.syncAudit.syncedWeekResetExpired, false)
   assert.equal(staleByAge.syncAudit.staleCalibration, true)
+  assert.equal(staleByAge.syncAudit.needsSync, true)
   assert.equal(staleByAge.syncAudit.syncAgeSeconds, 25 * 3600)
 })

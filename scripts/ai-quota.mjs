@@ -6,7 +6,7 @@
 // Important Context: User file. Implements ./workspace ai quota [status|sync|recommend].
 // Work State: Completed: Initial implementation of 5-hour + weekly quota inspection and calibration CLI; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { createDatabase } from '../apps/api/src/database.js'
-import { createModelBudget } from '../apps/api/src/modelBudget.js'
+import { collectSyncAuditWarnings, createModelBudget } from '../apps/api/src/modelBudget.js'
 import {
   AGY_POOL_DEFAULT_MODELS,
   AGY_QUOTA_POOLS,
@@ -322,27 +322,16 @@ export function buildQuotaReport(budget, env = process.env) {
     ? `./workspace ai swarm run "<objective>" ${[agyArg, geminiApiArg].filter(Boolean).join(' ')}`
     : './workspace ai swarm run "<objective>" --opencode-models opencode/deepseek-v4.1-flash-free,opencode/glm-5.3-flash-free'
 
-  const expiredResets = agyPools
-    .filter((pool) => pool.syncAudit?.syncedWeekResetExpired)
-    .map((pool) => pool.target)
-  const stalePools = agyPools
-    .filter((pool) => pool.configured && (!pool.syncAudit || pool.syncAudit.staleCalibration))
-    .map((pool) => ({
-      target: pool.target,
-      label: pool.label,
-      reason: pool.syncAudit?.syncedWeekResetExpired
-        ? 'synced weekly reset timer elapsed; re-run `./workspace ai quota sync`'
-        : pool.syncAudit
-          ? `calibrated ${formatDuration(pool.syncAudit.syncAgeSeconds)} ago (>24h)`
-          : 'never calibrated via `./workspace ai quota sync`'
-    }))
-  const driftAudit = {
-    expiredResets,
-    stalePools: stalePools.map((entry) => entry.target),
-    details: stalePools,
-    needsSync: stalePools.length > 0,
-    warnings: stalePools.map((entry) => `${entry.target}: ${entry.reason}`)
-  }
+  const agyTargets = AGY_QUOTA_POOLS.map((pool, index) => ({
+    id: 'agy',
+    scope: AGY_POOL_DEFAULT_MODELS[pool],
+    target: agyPools[index]?.target ?? `agy@${pool}`,
+    label: agyPools[index]?.label ?? pool
+  }))
+  const driftAudit = collectSyncAuditWarnings(budget, agyTargets, {
+    includeUncalibrated: true,
+    formatAge: formatDuration
+  })
 
   return {
     agyPools,
@@ -394,7 +383,7 @@ function printQuotaReport(report) {
       const age = pool.syncAudit.syncAgeSeconds !== undefined
         ? `${formatDuration(pool.syncAudit.syncAgeSeconds)} ago`
         : 'previously'
-      const state = pool.syncAudit.syncedWeekResetExpired
+      const state = (pool.syncAudit.syncedWeekResetExpired || pool.syncAudit.syncedSessionResetExpired)
         ? 'EXPIRED RESET — run `./workspace ai quota sync`'
         : pool.syncAudit.staleCalibration
           ? 'STALE (>24h) — consider `./workspace ai quota sync`'

@@ -1,10 +1,15 @@
 import { accessSync, constants, existsSync, statSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
+import { createDatabase } from '../apps/api/src/database.js'
 import {
+  AGY_POOL_DEFAULT_MODELS,
+  AGY_QUOTA_POOLS,
   createModelRegistry,
   modelQuotaProfiles
 } from '../apps/api/src/modelRegistry.js'
 import {
+  collectSyncAuditWarnings,
+  createModelBudget,
   resolveLimitsForScope,
   resolveQuotaProfiles
 } from '../apps/api/src/modelBudget.js'
@@ -80,6 +85,60 @@ export function checkQuotaConfiguration(models, { env = process.env } = {}) {
     })
   }
   return checks
+}
+
+/**
+ * Warn when an AGY 5-hour or weekly window has expired (or aged >24h) since the
+ * last `./workspace ai quota sync` calibration recorded in SQLite.
+ */
+export function checkAgySyncCalibration(
+  models,
+  { env = process.env, databasePath = DEFAULT_DATABASE_PATH, now } = {}
+) {
+  if (!databasePath || !existsSync(databasePath)) return []
+  let profiles
+  try {
+    profiles = resolveQuotaProfiles({ env, profiles: modelQuotaProfiles(models) })
+  } catch {
+    return []
+  }
+
+  let db
+  try {
+    db = createDatabase(databasePath)
+    const budget = createModelBudget({
+      repository: db,
+      profiles,
+      ...(now ? { now } : {})
+    })
+    const targets = AGY_QUOTA_POOLS.map((pool) => ({
+      id: 'agy',
+      scope: AGY_POOL_DEFAULT_MODELS[pool],
+      target: `agy@${pool}`,
+      label: pool
+    }))
+    const calibratedCount = targets.filter(
+      (entry) => budget.headroom(entry.id, entry.scope)?.syncAudit
+    ).length
+    if (calibratedCount === 0) return []
+    const audit = collectSyncAuditWarnings(budget, targets, { includeUncalibrated: false })
+    if (audit.needsSync) {
+      return audit.warnings.map((message) => ({
+        level: 'warn',
+        area: 'quota',
+        message
+      }))
+    }
+    return [{
+      level: 'ok',
+      area: 'quota',
+      message: `AGY quota calibration is current (${calibratedCount} synced pools).`
+    }]
+  } catch {
+    return []
+  } finally {
+    db?.close?.()
+  }
 }
 
 /**
@@ -332,6 +391,7 @@ export async function runDoctorChecks({
   }
 
   checks.push(...checkQuotaConfiguration(models, { env }))
+  checks.push(...checkAgySyncCalibration(models, { env, databasePath }))
   checks.push(...checkServerlessConfiguration(models))
   checkRemoteSelection(models, record)
   checkSafetyOptions(models, env, record)

@@ -6,11 +6,15 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import {
+  checkAgySyncCalibration,
   checkQuotaConfiguration,
   checkServerlessConfiguration,
   describeQuotaLimiter,
   runDoctorChecks
 } from '../../../scripts/ai-doctor-checks.mjs'
+import { createDatabase } from '../src/database.js'
+import { createModelBudget, resolveQuotaProfiles } from '../src/modelBudget.js'
+import { createModelRegistry, modelQuotaProfiles } from '../src/modelRegistry.js'
 
 test('quota diagnostics report configured slot windows and missing limits', () => {
   const models = [
@@ -507,6 +511,50 @@ test('doctor flags repo-internal or loose-permission GEMINI_API_PAID_CONFIG_HOME
     const tightSafety = tight.checks.filter((check) => check.area === 'safety')
     assert.equal(tightSafety.some((check) => check.level === 'error' || check.level === 'warn'), false)
     assert.ok(tightSafety.some((check) => check.level === 'ok' && /private permissions/.test(check.message)))
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('doctor warns when a synced AGY 5h or weekly window has expired and passes when current', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'doctor-sync-audit-'))
+  try {
+    const dbPath = join(dir, 'doctor.sqlite')
+    const models = createModelRegistry({ env: {} })
+    const profiles = resolveQuotaProfiles({ env: {}, profiles: modelQuotaProfiles(models) })
+    let clockMs = Date.parse('2026-11-14T12:00:00Z')
+    const db = createDatabase(dbPath)
+    try {
+      const budget = createModelBudget({ repository: db, profiles, now: () => clockMs })
+      budget.syncPoolState('agy', {
+        scope: 'gemini-3.8-flash-medium',
+        weeklyRemainingPercent: 80,
+        weeklyResetSeconds: 150 * 3600,
+        sessionRemainingPercent: 60,
+        sessionResetSeconds: 15 * 60
+      })
+    } finally {
+      db.close()
+    }
+
+    const freshChecks = checkAgySyncCalibration(models, {
+      env: {},
+      databasePath: dbPath,
+      now: () => clockMs + 5 * 60_000
+    })
+    assert.equal(freshChecks.length, 1)
+    assert.equal(freshChecks[0].level, 'ok')
+    assert.match(freshChecks[0].message, /AGY quota calibration is current/)
+
+    const expiredChecks = checkAgySyncCalibration(models, {
+      env: {},
+      databasePath: dbPath,
+      now: () => clockMs + 20 * 60_000
+    })
+    assert.equal(expiredChecks.length, 1)
+    assert.equal(expiredChecks[0].level, 'warn')
+    assert.equal(expiredChecks[0].area, 'quota')
+    assert.match(expiredChecks[0].message, /agy@gemini: synced 5h window reset timer elapsed/)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
