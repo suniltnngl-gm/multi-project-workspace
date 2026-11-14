@@ -841,16 +841,27 @@ test('prompt-size TPM guard rejects 8000-TPM Groq models for large prompts while
 
   const groqOss120b = {
     id: 'opencode',
+    provider: 'opencode',
+    backend: 'opencode-cli',
     cli: { model: 'console-groq/openai/gpt-oss-120b' }
   }
   const groqScout = {
     id: 'opencode',
+    provider: 'opencode',
+    backend: 'opencode-cli',
     cli: { model: 'console-groq/meta-llama/llama-4-scout-17b-16e-instruct' }
   }
 
   assert.equal(knownModelTpmLimit(groqOss120b), 8000)
   assert.equal(knownModelTpmLimit(groqScout), 30000)
+  assert.equal(knownModelTpmLimit({ cli: { model: 'console-groq/qwen/qwen3.8-27b' } }), 8000)
+  assert.equal(knownModelTpmLimit({ cli: { model: 'console-groq/openai/gpt-oss-safeguard-20b' } }), 2000)
+  assert.equal(knownModelTpmLimit({ cli: { model: 'console-groq/meta-llama/llama-3.1-8b-instant' } }), 6000)
+  assert.equal(knownModelTpmLimit({ cli: { model: 'console-groq/meta-llama/llama-3.3-70b-versatile' } }), 12000)
   assert.equal(fitsPromptTpmLimit(groqOss120b, largePromptTokens), false)
+  // 5000 raw tokens + 2500 opencode CLI overhead = 7500 * 1.15 = 8625 > 8000
+  assert.equal(fitsPromptTpmLimit(groqOss120b, 5000), false)
+  // 3500 raw tokens + 2500 opencode CLI overhead = 6000 * 1.15 = 6900 <= 8000
+  assert.equal(fitsPromptTpmLimit(groqOss120b, 3500), true)
   assert.equal(fitsPromptTpmLimit(groqScout, largePromptTokens), true)
-  assert.equal(fitsPromptTpmLimit(groqOss120b, 4000), true)
 })

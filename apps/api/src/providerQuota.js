@@ -711,10 +711,18 @@ export function buildSwarmRoster({
 }
 
 const KNOWN_MODEL_TPM_LIMITS = Object.freeze({
+  'console-groq/openai/gpt-oss-safeguard-20b': 2000,
+  'openai/gpt-oss-safeguard-20b': 2000,
+  'console-groq/meta-llama/llama-3.1-8b-instant': 6000,
+  'meta-llama/llama-3.1-8b-instant': 6000,
   'console-groq/openai/gpt-oss-120b': 8000,
   'console-groq/openai/gpt-oss-20b': 8000,
+  'console-groq/qwen/qwen3.8-27b': 8000,
   'openai/gpt-oss-120b': 8000,
   'openai/gpt-oss-20b': 8000,
+  'qwen/qwen3.8-27b': 8000,
+  'console-groq/meta-llama/llama-3.3-70b-versatile': 12000,
+  'meta-llama/llama-3.3-70b-versatile': 12000,
   'console-groq/meta-llama/llama-4-scout-17b-16e-instruct': 30000,
   'meta-llama/llama-4-scout-17b-16e-instruct': 30000
 })
@@ -745,9 +753,16 @@ export function knownModelTpmLimit(model) {
   return null
 }
 
-export function fitsPromptTpmLimit(model, estimatedPromptTokens, { headroomRatio = 1.15 } = {}) {
+export function fitsPromptTpmLimit(
+  model,
+  estimatedPromptTokens,
+  { headroomRatio = 1.15, opencodeOverheadTokens = 2500 } = {}
+) {
   if (!Number.isFinite(estimatedPromptTokens) || estimatedPromptTokens <= 0) return true
   const tpmLimit = knownModelTpmLimit(model)
   if (!Number.isFinite(tpmLimit) || tpmLimit <= 0) return true
-  return estimatedPromptTokens * headroomRatio <= tpmLimit
+  const overhead = (model?.backend === 'opencode-cli' || model?.provider === 'opencode')
+    ? opencodeOverheadTokens
+    : 0
+  return (estimatedPromptTokens + overhead) * headroomRatio <= tpmLimit
 }
