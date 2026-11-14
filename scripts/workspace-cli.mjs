@@ -967,6 +967,10 @@ async function dispatch(argv) {
       // The database is gitignored, so a fresh clone has no tracking rows.
       // Scan first so the checks below verify a healthy baseline instead of
       // failing every file as untracked.
+      const doctorArgs = ['--strict']
+      if (process.env.CI || rest.includes('--offline')) {
+        doctorArgs.push('--offline')
+      }
       const steps = [
         ['lint'],
         ['test'],
@@ -981,7 +985,7 @@ async function dispatch(argv) {
         ['git-context', 'check'],
         ['tools', 'check'],
         ['environment', 'check'],
-        ['ai-doctor.mjs', '--strict']
+        ['ai-doctor.mjs', ...doctorArgs]
       ]
       for (const step of steps) {
         try {

@@ -8,6 +8,7 @@
 import argparse
 import os
 import platform
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -36,8 +37,9 @@ def connect(database):
 
 
 def command_version(command):
+    resolved = shutil.which(command) or command
     try:
-        output = subprocess.check_output([command, "--version"], text=True, stderr=subprocess.STDOUT)
+        output = subprocess.check_output([resolved, "--version"], text=True, stderr=subprocess.STDOUT)
         return output.strip().splitlines()[0] if output.strip() else ""
     except Exception:
         return ""

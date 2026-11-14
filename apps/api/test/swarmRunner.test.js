@@ -486,6 +486,7 @@ test('local resource gate busy blocks local-1.5b, switches to healthy fallback, 
       : { ...entry, minAvailableMemoryMb: entry.id === 'local-1.5b' ? 1792 : 1024 }
   ))
   const budget = createModelBudget({
+    env: {},
     repository: database,
     profiles: {
       'colab-3b': [{ unit: 'requests', limit: 10, window: 'day', reset: 'fixed' }]

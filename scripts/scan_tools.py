@@ -26,6 +26,8 @@ TOOLS = [
     ("agy", "agy"),
 ]
 
+REQUIRED_TOOLS = {"node", "npm", "uv", "python", "git"}
+
 
 def connect(database):
     path = Path(database)
@@ -50,10 +52,11 @@ def connect(database):
 
 
 def tool_version(command):
-    if shutil.which(command) is None:
+    resolved = shutil.which(command)
+    if resolved is None:
         return False, ""
     try:
-        output = subprocess.check_output([command, "--version"], text=True, stderr=subprocess.STDOUT)
+        output = subprocess.check_output([resolved, "--version"], text=True, stderr=subprocess.STDOUT)
         return True, output.strip().splitlines()[0] if output.strip() else ""
     except Exception:
         return True, ""
@@ -102,12 +105,19 @@ def main():
     elif args.command == "check":
         rows = connection.execute("SELECT name, available FROM tools").fetchall()
         missing = [name for name, available in rows if not available]
-        if missing:
-            print("Unavailable tools:")
-            for name in missing:
+        missing_required = [name for name in missing if name in REQUIRED_TOOLS]
+        missing_optional = [name for name in missing if name not in REQUIRED_TOOLS]
+        if missing_optional:
+            print("Optional tools unavailable:")
+            for name in missing_optional:
+                print(f"  {name}")
+        if missing_required:
+            print("Unavailable required tools:")
+            for name in missing_required:
                 print(f"  {name}")
             raise SystemExit(1)
-        print(f"All {len(rows)} tracked tools are available.")
+        available_count = len(rows) - len(missing)
+        print(f"All {len(REQUIRED_TOOLS)} required tools are available ({available_count}/{len(rows)} tracked tools present).")
 
     connection.close()
 

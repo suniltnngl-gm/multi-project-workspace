@@ -640,6 +640,16 @@ export function createSwarmRunner({
     const dispatchById = new Map(
       snapshotPlan.agents.map((entry) => [entry.model, entry])
     )
+    const headroomById = new Map(
+      callableModels.map((model) => {
+        const baseId = model.baseId ?? model.id
+        const scope = quotaScopeForModel(model)
+        const result = typeof modelBudget?.headroom === 'function'
+          ? modelBudget.headroom(baseId, scope)
+          : null
+        return [model.id, result]
+      })
+    )
     const rankedRegistryIds = [...callableModels]
       .sort((a, b) => {
         const billing = billingRank(a) - billingRank(b)
@@ -647,9 +657,17 @@ export function createSwarmRunner({
         const aAuto = a.autoSelect !== false && a.execution !== 'batch'
         const bAuto = b.autoSelect !== false && b.execution !== 'batch'
         if (aAuto !== bAuto) return aAuto ? -1 : 1
+        const aHead = headroomById.get(a.id)
+        const bHead = headroomById.get(b.id)
+        const aConfigured = Boolean(aHead?.configured || !a.remote)
+        const bConfigured = Boolean(bHead?.configured || !b.remote)
+        if (aConfigured !== bConfigured) return aConfigured ? -1 : 1
         const aHeadroom = dispatchById.get(a.id)?.headroom ?? 1
         const bHeadroom = dispatchById.get(b.id)?.headroom ?? 1
         if (aHeadroom !== bHeadroom) return bHeadroom - aHeadroom
+        const aObserved = Number(aHead?.observedRequests ?? 0)
+        const bObserved = Number(bHead?.observedRequests ?? 0)
+        if (aObserved !== bObserved) return aObserved - bObserved
         const aRemote = a.remote === true && a.limitKind !== 'resource'
         const bRemote = b.remote === true && b.limitKind !== 'resource'
         if (aRemote !== bRemote) return aRemote ? -1 : 1
