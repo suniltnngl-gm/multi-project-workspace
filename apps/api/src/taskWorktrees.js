@@ -5,12 +5,39 @@
 // Important Context: User file. The opencode CLI has no worktree subcommand, so the workspace manages git worktrees directly and runs the OpenCode CLI inside them.
 // Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { execFile } from 'node:child_process'
+import { existsSync, realpathSync } from 'node:fs'
 import { promisify } from 'node:util'
 import { basename, dirname, join, resolve } from 'node:path'
 
 const execFileAsync = promisify(execFile)
 const DEFAULT_GIT_TIMEOUT_MS = 60000
 const MAX_SLUG_LENGTH = 40
+
+function canonicalizePath(targetPath) {
+  const resolved = resolve(String(targetPath))
+  try {
+    return realpathSync.native(resolved)
+  } catch {
+    const parent = dirname(resolved)
+    if (parent !== resolved) {
+      try {
+        return join(realpathSync.native(parent), basename(resolved))
+      } catch {
+        return resolved
+      }
+    }
+    return resolved
+  }
+}
+
+function normalizePorcelainPath(rawPath) {
+  const value = String(rawPath ?? '')
+  if (!value) return value
+  if (/^[A-Za-z]:[\\/]/.test(value) || existsSync(value)) {
+    return canonicalizePath(value)
+  }
+  return value
+}
 
 /**
  * Turn a task title into a filesystem-safe slug fragment.
@@ -31,12 +58,16 @@ export function slugifyTaskTitle(title) {
  * lifecycle and the scan route never drift apart.
  */
 export function parseWorktreePorcelain(output, repositoryRoot) {
+  const normalizedRoot = normalizePorcelainPath(String(repositoryRoot))
   const entries = []
   let current = {}
   for (const line of String(output ?? '').split(/\r?\n/)) {
     if (line.startsWith('worktree ')) {
       if (current.worktreePath) entries.push(current)
-      current = { repositoryRoot: String(repositoryRoot), worktreePath: line.slice(9).trim() }
+      current = {
+        repositoryRoot: normalizedRoot,
+        worktreePath: normalizePorcelainPath(line.slice(9).trim())
+      }
     } else if (line.startsWith('HEAD ')) {
       current.headCommit = line.slice(5).trim()
     } else if (line.startsWith('branch ')) {
@@ -76,8 +107,10 @@ export function createTaskWorktrees({
   if (!repoRoot || typeof repoRoot !== 'string') {
     throw new Error('Task worktrees require a repository root.')
   }
-  const root = resolve(repoRoot)
-  const resolvedWorktreeRoot = resolve(worktreeRoot ?? env.WORKSPACE_TASK_WORKTREE_ROOT ?? defaultWorktreeRoot(root))
+  const root = canonicalizePath(repoRoot)
+  const resolvedWorktreeRoot = canonicalizePath(
+    worktreeRoot ?? env.WORKSPACE_TASK_WORKTREE_ROOT ?? defaultWorktreeRoot(root)
+  )
 
   async function git(args, options = {}) {
     const { stdout } = await execFileImpl('git', ['-C', root, ...args], {

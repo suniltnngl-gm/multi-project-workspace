@@ -339,7 +339,7 @@ test('the snapshot builder captures model budgets, run usage, and paths', () => 
       now: NOW,
       env: {},
       pathExists: (path) => {
-        if (String(path).startsWith('/throw')) throw new Error('filesystem exploded')
+        if (String(path).includes('throw')) throw new Error('filesystem exploded')
         return !String(path).includes('missing')
       }
     })

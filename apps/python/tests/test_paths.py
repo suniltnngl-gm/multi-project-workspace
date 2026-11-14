@@ -17,32 +17,35 @@ import paths  # noqa: E402
 
 class PathsTest(unittest.TestCase):
     def test_relative_database_path_is_anchored_to_the_root(self):
+        root = Path("/workspace").resolve()
         resolved = paths.resolve_database_path(
-            "apps/api/data/workspace.sqlite", root_dir=Path("/workspace")
+            "apps/api/data/workspace.sqlite", root_dir=root
         )
-        self.assertEqual(resolved, Path("/workspace/apps/api/data/workspace.sqlite"))
+        self.assertEqual(resolved, root / "apps" / "api" / "data" / "workspace.sqlite")
 
     def test_absolute_database_path_is_preserved(self):
-        absolute = Path("/var/lib/workspace.sqlite")
+        absolute = Path("/var/lib/workspace.sqlite").resolve()
         self.assertEqual(paths.resolve_database_path(str(absolute)), absolute)
 
     def test_environment_database_path_is_used(self):
         previous = os.environ.get("DATABASE_PATH")
+        root = Path("/workspace").resolve()
         os.environ["DATABASE_PATH"] = "relative.sqlite"
         try:
-            resolved = paths.resolve_database_path(root_dir=Path("/workspace"))
+            resolved = paths.resolve_database_path(root_dir=root)
         finally:
             if previous is None:
                 os.environ.pop("DATABASE_PATH", None)
             else:
                 os.environ["DATABASE_PATH"] = previous
-        self.assertEqual(resolved, Path("/workspace/relative.sqlite"))
+        self.assertEqual(resolved, root / "relative.sqlite")
 
     def test_workspace_tmp_dir_honors_override(self):
         previous = os.environ.get("WORKSPACE_TMP_DIR")
-        os.environ["WORKSPACE_TMP_DIR"] = "/custom/tmp"
+        custom = Path("/custom/tmp").resolve()
+        os.environ["WORKSPACE_TMP_DIR"] = str(custom)
         try:
-            self.assertEqual(paths.workspace_tmp_dir(), Path("/custom/tmp"))
+            self.assertEqual(paths.workspace_tmp_dir(), custom)
         finally:
             if previous is None:
                 os.environ.pop("WORKSPACE_TMP_DIR", None)
