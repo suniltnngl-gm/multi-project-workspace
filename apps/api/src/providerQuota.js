@@ -709,3 +709,45 @@ export function buildSwarmRoster({
     agents: [parent, ...(reviewer ? [reviewer] : []), ...workers]
   }
 }
+
+const KNOWN_MODEL_TPM_LIMITS = Object.freeze({
+  'console-groq/openai/gpt-oss-120b': 8000,
+  'console-groq/openai/gpt-oss-20b': 8000,
+  'openai/gpt-oss-120b': 8000,
+  'openai/gpt-oss-20b': 8000,
+  'console-groq/meta-llama/llama-4-scout-17b-16e-instruct': 30000,
+  'meta-llama/llama-4-scout-17b-16e-instruct': 30000
+})
+
+export function estimatePromptTokensForMessages(messages = []) {
+  let totalChars = 0
+  for (const message of messages) {
+    if (typeof message?.content === 'string') {
+      totalChars += message.content.length
+    }
+  }
+  return totalChars > 0 ? Math.ceil(totalChars / 3.5) : 0
+}
+
+export function knownModelTpmLimit(model) {
+  if (!model) return null
+  if (Array.isArray(model.limits)) {
+    const tpm = model.limits.find((limit) => limit?.unit === 'tokens' && limit?.window === 'minute' && Number.isFinite(limit.limit))
+    if (tpm) return tpm.limit
+  }
+  const candidates = [model.cli?.model, model.id].filter((v) => typeof v === 'string' && v.trim())
+  for (const key of candidates) {
+    const normalized = key.trim().toLowerCase()
+    if (Object.hasOwn(KNOWN_MODEL_TPM_LIMITS, normalized)) {
+      return KNOWN_MODEL_TPM_LIMITS[normalized]
+    }
+  }
+  return null
+}
+
+export function fitsPromptTpmLimit(model, estimatedPromptTokens, { headroomRatio = 1.15 } = {}) {
+  if (!Number.isFinite(estimatedPromptTokens) || estimatedPromptTokens <= 0) return true
+  const tpmLimit = knownModelTpmLimit(model)
+  if (!Number.isFinite(tpmLimit) || tpmLimit <= 0) return true
+  return estimatedPromptTokens * headroomRatio <= tpmLimit
+}

@@ -19,6 +19,8 @@ import { AGY_POOL_DEFAULT_MODELS, AGY_QUOTA_POOLS } from './modelRegistry.js'
 import {
   billingRank,
   buildSwarmRoster,
+  estimatePromptTokensForMessages,
+  fitsPromptTpmLimit,
   planAgentDispatch,
   quotaScopeForModel,
   resolveAgentModel
@@ -743,7 +745,7 @@ export function createSwarmRunner({
     }
   }
 
-  function pickFallbackModel(currentModelId, excludedIds, resourceStatus = null) {
+  function pickFallbackModel(currentModelId, excludedIds, resourceStatus = null, { estimatedPromptTokens = 0 } = {}) {
     const callableModels = models.filter((model) => model && model.callable !== false)
     const snapshotPlan = callableModels.length > 0
       ? planAgentDispatch({
@@ -808,6 +810,9 @@ export function createSwarmRunner({
         continue
       }
       seen.add(cand.id)
+      if (!fitsPromptTpmLimit(cand, estimatedPromptTokens)) {
+        continue
+      }
       const baseId = cand.baseId ?? cand.id
       const scope = quotaScopeForModel(cand)
       const check = modelBudget?.check?.(baseId, scope)
@@ -834,12 +839,13 @@ export function createSwarmRunner({
     excludedIds,
     attempt,
     maxAttempts = 2,
-    reason
+    reason,
+    estimatedPromptTokens = 0
   }) {
     if (attempt >= maxAttempts - 1) return null
     excludedIds.add(activeModel.id)
     const resourceStatus = await readAsyncResourceStatus()
-    const nextModel = pickFallbackModel(activeModel.id, excludedIds, resourceStatus)
+    const nextModel = pickFallbackModel(activeModel.id, excludedIds, resourceStatus, { estimatedPromptTokens })
     if (!nextModel) return null
 
     const switched = bus.switchAgentModel({
@@ -878,7 +884,8 @@ export function createSwarmRunner({
               excludedIds,
               attempt,
               maxAttempts,
-              reason: `${activeModel.label || activeModel.id} quota exhausted or cooling down.`
+              reason: `${activeModel.label || activeModel.id} quota exhausted or cooling down.`,
+              estimatedPromptTokens: estimatePromptTokensForMessages(messages)
             })
             if (!switched) {
               return {
@@ -917,7 +924,8 @@ export function createSwarmRunner({
             excludedIds,
             attempt,
             maxAttempts,
-            reason: gateReason
+            reason: gateReason,
+            estimatedPromptTokens: estimatePromptTokensForMessages(messages)
           })
           if (switched) {
             activeAgent = switched.agent
@@ -997,7 +1005,8 @@ export function createSwarmRunner({
             excludedIds,
             attempt,
             maxAttempts,
-            reason: String(error?.message || `HTTP ${errorStatus || 'error'}`)
+            reason: String(error?.message || `HTTP ${errorStatus || 'error'}`),
+            estimatedPromptTokens: estimatePromptTokensForMessages(messages)
           })
           if (switched) {
             activeAgent = switched.agent

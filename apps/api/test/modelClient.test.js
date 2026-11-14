@@ -1618,6 +1618,54 @@ Credentials:
   }
 })
 
+test('completeGeminiApi retries once on a healthy Free-tier sibling before failing over', async () => {
+  const attemptedModels = []
+  const client = createModelClient({
+    runCommand: async (_cmd, args) => {
+      const modelIdx = args.indexOf('--model')
+      const requestedModel = modelIdx >= 0 ? args[modelIdx + 1] : ''
+      attemptedModels.push(requestedModel)
+      if (requestedModel === 'gemini-3.8-flash') {
+        return {
+          stdout: JSON.stringify({
+            status: 'failed',
+            error_message: 'gemini-api exited with status failed.'
+          }),
+          stderr: ''
+        }
+      }
+      return {
+        stdout: JSON.stringify({
+          id: 'v1_sibling_ok',
+          status: 'completed',
+          steps: [{ type: 'model_output', content: [{ type: 'text', text: 'SIBLING_OK' }] }]
+        }),
+        stderr: ''
+      }
+    }
+  })
+
+  const model = {
+    id: 'gemini-api',
+    label: 'Gemini API CLI',
+    provider: 'gemini-api',
+    backend: 'gemini-api-cli',
+    callable: true,
+    remote: true,
+    cli: {
+      command: 'gemini-api',
+      model: 'gemini-3.8-flash',
+      models: ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-3.5-flash-lite']
+    }
+  }
+
+  const reply = await client.complete(model, {
+    messages: [{ role: 'user', content: 'Audit docs' }]
+  })
+  assert.equal(reply, 'SIBLING_OK')
+  assert.deepEqual(attemptedModels, ['gemini-3.8-flash', 'gemini-2.5-flash'])
+})
+
 test('gemini-api-paid isolates HOME/XDG_CONFIG_HOME, enforces --no-keyring [config ], allows gemini-4-argon, and strips GEMINI_API_KEY', async () => {
   const calls = []
   const prevEnvKey = process.env.GEMINI_API_KEY
@@ -1737,4 +1785,52 @@ test('gemini-api-paid isolates HOME/XDG_CONFIG_HOME, enforces --no-keyring [conf
     if (prevEnvKey === undefined) delete process.env.GEMINI_API_KEY
     else process.env.GEMINI_API_KEY = prevEnvKey
   }
+})
+
+test('completeGeminiApi retries once on a healthy Free-tier sibling before failing over', async () => {
+  const attemptedModels = []
+  const client = createModelClient({
+    runCommand: async (_cmd, args) => {
+      const modelIdx = args.indexOf('--model')
+      const requestedModel = modelIdx >= 0 ? args[modelIdx + 1] : ''
+      attemptedModels.push(requestedModel)
+      if (requestedModel === 'gemini-3.8-flash') {
+        return {
+          stdout: JSON.stringify({
+            status: 'failed',
+            error_message: 'gemini-api exited with status failed.'
+          }),
+          stderr: ''
+        }
+      }
+      return {
+        stdout: JSON.stringify({
+          id: 'v1_sibling_ok',
+          status: 'completed',
+          steps: [{ type: 'model_output', content: [{ type: 'text', text: 'SIBLING_OK' }] }]
+        }),
+        stderr: ''
+      }
+    }
+  })
+
+  const model = {
+    id: 'gemini-api',
+    label: 'Gemini API CLI',
+    provider: 'gemini-api',
+    backend: 'gemini-api-cli',
+    callable: true,
+    remote: true,
+    cli: {
+      command: 'gemini-api',
+      model: 'gemini-3.8-flash',
+      models: ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-3.5-flash-lite']
+    }
+  }
+
+  const reply = await client.complete(model, {
+    messages: [{ role: 'user', content: 'Audit docs' }]
+  })
+  assert.equal(reply, 'SIBLING_OK')
+  assert.deepEqual(attemptedModels, ['gemini-3.8-flash', 'gemini-2.5-flash'])
 })

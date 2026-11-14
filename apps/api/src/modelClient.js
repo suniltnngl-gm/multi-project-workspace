@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { createHash } from 'node:crypto'
-import { isProOnlyGeminiModel } from './modelRegistry.js'
+import { GEMINI_API_FREE_TIER_MODELS, isProOnlyGeminiModel } from './modelRegistry.js'
 
 const execFileAsync = promisify(execFile)
 const RESULT_SENTINEL = '__WORKSPACE_MODEL_RESULT__'
@@ -1245,8 +1245,8 @@ export function createModelClient({
     const sessionKey = geminiApiSessionKey(model, request)
     const cachedInteractionId = geminiApiSessions.get(sessionKey) || model.cli?.previousInteractionId || ''
 
-    const buildArgs = (interactionId) => {
-      const args = ['generate', prompt, '--model', targetModel, '--stream=false', '--output-format', 'json']
+    const buildArgs = (interactionId, activeModel = targetModel) => {
+      const args = ['generate', prompt, '--model', activeModel, '--stream=false', '--output-format', 'json']
       if (model.cli?.noKeyring) {
         args.push('--no-keyring')
       }
@@ -1262,8 +1262,8 @@ export function createModelClient({
       return args
     }
 
-    const runGeminiApiOnce = async (interactionId) => {
-      const { stdout, stderr } = await runCommand(model.cli.command, buildArgs(interactionId), {
+    const runGeminiApiOnce = async (interactionId, activeModel = targetModel) => {
+      const { stdout, stderr } = await runCommand(model.cli.command, buildArgs(interactionId, activeModel), {
         timeoutMs,
         env: geminiApiKeyringEnv(process.env, model),
         ...(request.worktreePath ? { cwd: request.worktreePath } : {}),
@@ -1326,12 +1326,33 @@ export function createModelClient({
       if (parsed.code === 'free_tier_verification_required' || isFreeTierVerificationError(errorMessage)) {
         throw new ModelCallError(errorMessage, 403, { code: 'free_tier_verification_required' })
       }
-      if (isRateLimitText(errorMessage)) {
-        throw new ModelCallError(errorMessage, 429, {
-          retryAfter: retrySecondsFromText(errorMessage) ?? undefined
-        })
+      const isHardClientError = parsed.status === 400 || parsed.status === 401 || parsed.status === 403
+      if (!isHardClientError) {
+        const siblingPool = Array.isArray(model.cli?.models) && model.cli.models.length > 0
+          ? model.cli.models
+          : GEMINI_API_FREE_TIER_MODELS
+        const siblingModel = siblingPool.find(
+          (candidate) => candidate && candidate !== targetModel && (allowPro || !isProOnlyGeminiModel(candidate))
+        )
+        if (siblingModel) {
+          try {
+            const siblingParsed = await runGeminiApiOnce('', siblingModel)
+            if (!siblingParsed.error && siblingParsed.text) {
+              parsed = siblingParsed
+            }
+          } catch {
+            // Fall through and surface the primary error below.
+          }
+        }
       }
-      throw new ModelCallError(errorMessage, parsed.status && parsed.status >= 400 ? parsed.status : 502)
+      if (parsed.error || !parsed.text) {
+        if (isRateLimitText(errorMessage)) {
+          throw new ModelCallError(errorMessage, 429, {
+            retryAfter: retrySecondsFromText(errorMessage) ?? undefined
+          })
+        }
+        throw new ModelCallError(errorMessage, parsed.status && parsed.status >= 400 ? parsed.status : 502)
+      }
     }
 
     const nextInteractionId = parsed.interactionId || cachedInteractionId

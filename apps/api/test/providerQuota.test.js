@@ -825,3 +825,32 @@ test('gemini-api-paid is excluded from routine swarms and unlocks only via expli
   assert.equal(escalatedRoster.workers[0]?.provider, 'gemini-api-paid')
   assert.equal(escalatedRoster.workers[0]?.scope, 'gemini-4-argon')
 })
+
+test('prompt-size TPM guard rejects 8000-TPM Groq models for large prompts while allowing 30000-TPM alternatives', async () => {
+  const {
+    estimatePromptTokensForMessages,
+    fitsPromptTpmLimit,
+    knownModelTpmLimit
+  } = await import('../src/providerQuota.js')
+
+  const largePromptTokens = estimatePromptTokensForMessages([
+    { role: 'system', content: 's'.repeat(3500) },
+    { role: 'user', content: 'u'.repeat(31500) }
+  ])
+  assert.equal(largePromptTokens, 10000)
+
+  const groqOss120b = {
+    id: 'opencode',
+    cli: { model: 'console-groq/openai/gpt-oss-120b' }
+  }
+  const groqScout = {
+    id: 'opencode',
+    cli: { model: 'console-groq/meta-llama/llama-4-scout-17b-16e-instruct' }
+  }
+
+  assert.equal(knownModelTpmLimit(groqOss120b), 8000)
+  assert.equal(knownModelTpmLimit(groqScout), 30000)
+  assert.equal(fitsPromptTpmLimit(groqOss120b, largePromptTokens), false)
+  assert.equal(fitsPromptTpmLimit(groqScout, largePromptTokens), true)
+  assert.equal(fitsPromptTpmLimit(groqOss120b, 4000), true)
+})
