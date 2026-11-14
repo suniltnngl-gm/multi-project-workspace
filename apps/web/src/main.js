@@ -143,7 +143,10 @@ app.innerHTML = `
             <h3 id="telemetry-heading">Quota &amp; Swarm Telemetry</h3>
             <p>Live quota ledger windows, sync audit status, and recent swarm worktree runs.</p>
           </div>
-          <span id="telemetry-status" class="satellite-status" aria-live="polite">Loading…</span>
+          <div class="telemetry-actions">
+            <span id="telemetry-status" class="satellite-status" aria-live="polite">Loading…</span>
+            <button id="refresh-telemetry" type="button" class="secondary-button">Refresh</button>
+          </div>
         </div>
         <div id="telemetry-panel" class="telemetry-panel">
           <div class="telemetry-group">
@@ -268,8 +271,11 @@ const draftModel = document.querySelector('#draft-model')
 const modelRoster = document.querySelector('#model-roster')
 const modelRosterStatus = document.querySelector('#model-roster-status')
 const telemetryStatus = document.querySelector('#telemetry-status')
+const refreshTelemetryButton = document.querySelector('#refresh-telemetry')
 const quotaTelemetryList = document.querySelector('#quota-telemetry-list')
 const swarmTelemetryList = document.querySelector('#swarm-telemetry-list')
+let telemetryInFlight = false
+let telemetryPollTimer = null
 let tasks = []
 let files = []
 let folders = []
@@ -407,17 +413,58 @@ function renderTelemetry(providerData, runsData) {
 }
 
 async function loadTelemetry() {
-  const [providersResult, runsResult] = await Promise.allSettled([
-    request('/api/models/providers'),
-    request('/api/agents/runs?limit=5')
-  ])
-  const providerData = providersResult.status === 'fulfilled' ? providersResult.value : null
-  const runsData = runsResult.status === 'fulfilled' ? runsResult.value : null
-  renderTelemetry(providerData, runsData)
+  if (telemetryInFlight) return
+  telemetryInFlight = true
+  refreshTelemetryButton.disabled = true
+  refreshTelemetryButton.textContent = 'Refreshing…'
+  try {
+    const [providersResult, runsResult] = await Promise.allSettled([
+      request('/api/models/providers'),
+      request('/api/agents/runs?limit=5')
+    ])
+    const providerData = providersResult.status === 'fulfilled' ? providersResult.value : null
+    const runsData = runsResult.status === 'fulfilled' ? runsResult.value : null
+    renderTelemetry(providerData, runsData)
+  } finally {
+    telemetryInFlight = false
+    refreshTelemetryButton.disabled = false
+    refreshTelemetryButton.textContent = 'Refresh'
+  }
 }
+
+function handleVisibilityChange() {
+  if (!document.hidden) {
+    void loadTelemetry()
+  }
+}
+
+function stopTelemetryPolling() {
+  if (telemetryPollTimer !== null) {
+    clearInterval(telemetryPollTimer)
+    telemetryPollTimer = null
+  }
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+}
+
+function startTelemetryPolling() {
+  stopTelemetryPolling()
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  telemetryPollTimer = setInterval(() => {
+    if (!document.hidden) {
+      void loadTelemetry()
+    }
+  }, 15_000)
+}
+
+refreshTelemetryButton.addEventListener('click', () => {
+  void loadTelemetry()
+})
+
+window.addEventListener('beforeunload', stopTelemetryPolling)
 
 async function loadModels() {
   void loadTelemetry()
+  startTelemetryPolling()
   try {
     const models = await request('/api/models')
     renderModelRoster(models)

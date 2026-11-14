@@ -571,4 +571,64 @@ describe('user files and folders sections', () => {
     expect(document.querySelector('#swarm-telemetry-list').textContent).toContain('run_123')
     expect(document.querySelector('#swarm-telemetry-list').textContent).toContain('worktree')
   })
+
+  it('refreshes telemetry on manual click and visibilitychange while skipping hidden ticks', async () => {
+    vi.useFakeTimers()
+    let providerCalls = 0
+    vi.mocked(fetch).mockImplementation(async (path) => {
+      if (path === '/api/models/providers') {
+        providerCalls += 1
+        return jsonResponse({
+          ok: true,
+          providers: [{
+            provider: 'agy',
+            ok: true,
+            headroomPercent: providerCalls === 1 ? 85 : 80,
+            windows: { '5h': {} },
+            syncAudit: { status: 'fresh' }
+          }]
+        })
+      }
+      if (path === '/api/agents/runs?limit=5') {
+        return jsonResponse({ runs: [] })
+      }
+      if (path === '/api/models') return jsonResponse([])
+      if (path === '/api/tasks') return jsonResponse([])
+      if (path === '/api/files') return jsonResponse([])
+      if (path === '/api/folders') return jsonResponse([])
+      return jsonResponse({})
+    })
+
+    document.body.innerHTML = '<div id="app"></div>'
+    vi.resetModules()
+    await import('./main.js')
+
+    await vi.waitFor(() => {
+      expect(providerCalls).toBe(1)
+    })
+
+    // Hidden tab should skip scheduled 15s interval ticks
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true })
+    await vi.advanceTimersByTimeAsync(15_000)
+    expect(providerCalls).toBe(1)
+
+    // Returning to visible triggers an immediate refresh
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false })
+    const callsBeforeVisible = providerCalls
+    document.dispatchEvent(new Event('visibilitychange'))
+    await vi.waitFor(() => {
+      expect(providerCalls).toBeGreaterThan(callsBeforeVisible)
+      expect(document.querySelector('#quota-telemetry-list').textContent).toContain('80% headroom')
+    })
+
+    // Manual Refresh button triggers a fetch
+    const callsBeforeClick = providerCalls
+    document.querySelector('#refresh-telemetry').click()
+    await vi.waitFor(() => {
+      expect(providerCalls).toBeGreaterThan(callsBeforeClick)
+    })
+
+    window.dispatchEvent(new Event('beforeunload'))
+    vi.useRealTimers()
+  })
 })
