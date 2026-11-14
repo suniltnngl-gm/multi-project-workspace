@@ -219,16 +219,31 @@ function summarizePool(budget, id, scope, label) {
   }
 }
 
-export function buildQuotaReport(budget) {
+export function hasExplicitConsoleGoogleConfig(env = process.env) {
+  return Boolean(
+    env.OPENCODE_AI_GOOGLE_MAX_REQUESTS_PER_DAY
+    || env.OPENCODE_AI_GOOGLE_MAX_REQUESTS_PER_MINUTE
+    || env.OPENCODE_AI_GOOGLE_MAX_TOKENS_PER_MINUTE
+    || String(env.OPENCODE_AI_MODEL ?? '').startsWith('console-google/')
+    || String(env.AI_QUOTA_PROFILES ?? '').includes('console-google')
+  )
+}
+
+export function buildQuotaReport(budget, env = process.env) {
   const agyPools = [
     summarizePool(budget, 'agy', AGY_POOL_DEFAULT_MODELS.gemini, 'AGY Gemini (Hydrogen / 3.8 Flash)'),
     summarizePool(budget, 'agy', AGY_POOL_DEFAULT_MODELS['claude-gpt'], 'AGY Claude & GPT-OSS'),
     summarizePool(budget, 'agy', AGY_POOL_DEFAULT_MODELS['gemini-4-argon'], 'AGY Gemini 4 Argon')
   ]
-  const opencodeGoogle = budget.snapshot('opencode', 'console-google/gemini-3.8-flash') ?? null
+  const showConsoleGoogle = hasExplicitConsoleGoogleConfig(env)
+  const opencodeGoogle = showConsoleGoogle
+    ? (budget.snapshot('opencode', 'console-google/gemini-3.8-flash') ?? null)
+    : null
   const otherBackends = [
     summarizePool(budget, 'opencode', undefined, 'OpenCode headless (4+1 daily/RPM pools)'),
-    summarizePool(budget, 'opencode', 'console-google/gemini-3.8-flash', 'OpenCode console-google (GCP project API key, PT reset)'),
+    ...(showConsoleGoogle
+      ? [summarizePool(budget, 'opencode', 'console-google/gemini-3.8-flash', 'OpenCode console-google (GCP project API key, PT reset)')]
+      : []),
     summarizePool(budget, 'colab-3b', undefined, 'Colab 3B (12h GPU session + daily)'),
     summarizePool(budget, 'kaggle-3b', undefined, 'Kaggle 3B (weekly batch compute)')
   ].filter((entry) => entry.configured)

@@ -11,13 +11,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { workspaceTmpDir } from './env.mjs'
 
 export const OPENCODE_PROVIDERS = {
-  'console-google': [
-    'console-google/gemini-3.8-flash',
-    'console-google/gemini-2.5-flash',
-    'console-google/gemini-3.5-flash-lite',
-    'console-google/gemini-3.5-flash',
-    'console-google/gemma-4-31b-it'
-  ],
   'console-groq': [
     'console-groq/openai/gpt-oss-120b',
     'console-groq/qwen/qwen3.8-27b',
@@ -49,7 +42,6 @@ export const OPENCODE_PROVIDERS = {
 }
 
 export const OPENCODE_PROVIDER_ORDER = Object.freeze([
-  'console-google',
   'console-groq',
   'console-nvidia',
   'console-openrouter',
