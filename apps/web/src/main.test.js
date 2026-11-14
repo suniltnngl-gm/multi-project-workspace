@@ -525,4 +525,50 @@ describe('user files and folders sections', () => {
     expect(document.querySelector('.folder-item .folder-objective').textContent).toBe('Applications')
     expect(document.querySelectorAll('.folder-item button[data-action="edit-folder"]')).toHaveLength(1)
   })
+
+  it('renders live quota and swarm worktree telemetry', async () => {
+    vi.mocked(fetch).mockImplementation(async (path) => {
+      if (path === '/api/models/providers') {
+        return jsonResponse({
+          ok: true,
+          providers: [{
+            provider: 'agy',
+            ok: true,
+            headroomPercent: 85,
+            windows: { '5h': {}, weekly: {} },
+            syncAudit: { status: 'fresh' }
+          }]
+        })
+      }
+      if (path === '/api/agents/runs?limit=5') {
+        return jsonResponse({
+          runs: [{
+            id: 'run_123',
+            status: 'completed',
+            isolateWorktrees: true,
+            goal: 'Verify telemetry panel'
+          }]
+        })
+      }
+      if (path === '/api/models') return jsonResponse([])
+      if (path === '/api/tasks') return jsonResponse([])
+      if (path === '/api/files') return jsonResponse([])
+      if (path === '/api/folders') return jsonResponse([])
+      return jsonResponse({})
+    })
+
+    document.body.innerHTML = '<div id="app"></div>'
+    vi.resetModules()
+    await import('./main.js')
+
+    await vi.waitFor(() => {
+      expect(document.querySelector('#telemetry-status').textContent).toBe('1 providers · 1 runs')
+    })
+
+    expect(document.querySelector('#quota-telemetry-list').textContent).toContain('agy')
+    expect(document.querySelector('#quota-telemetry-list').textContent).toContain('85% headroom')
+    expect(document.querySelector('#quota-telemetry-list').textContent).toContain('syncAudit: fresh')
+    expect(document.querySelector('#swarm-telemetry-list').textContent).toContain('run_123')
+    expect(document.querySelector('#swarm-telemetry-list').textContent).toContain('worktree')
+  })
 })

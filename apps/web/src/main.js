@@ -137,6 +137,26 @@ app.innerHTML = `
         <ul id="model-roster" class="model-list"></ul>
       </section>
 
+      <section class="telemetry-section" aria-labelledby="telemetry-heading">
+        <div class="section-heading">
+          <div>
+            <h3 id="telemetry-heading">Quota &amp; Swarm Telemetry</h3>
+            <p>Live quota ledger windows, sync audit status, and recent swarm worktree runs.</p>
+          </div>
+          <span id="telemetry-status" class="satellite-status" aria-live="polite">Loading…</span>
+        </div>
+        <div id="telemetry-panel" class="telemetry-panel">
+          <div class="telemetry-group">
+            <h4>Provider Quota</h4>
+            <ul id="quota-telemetry-list" class="model-list"></ul>
+          </div>
+          <div class="telemetry-group">
+            <h4>Swarm Runs</h4>
+            <ul id="swarm-telemetry-list" class="model-list"></ul>
+          </div>
+        </div>
+      </section>
+
       <form id="filter-form" class="filter-form" aria-label="Filter development tasks">
         <label class="search-field">
           <span class="sr-only">Search tasks</span>
@@ -247,6 +267,9 @@ const draftTaskButton = document.querySelector('#draft-task')
 const draftModel = document.querySelector('#draft-model')
 const modelRoster = document.querySelector('#model-roster')
 const modelRosterStatus = document.querySelector('#model-roster-status')
+const telemetryStatus = document.querySelector('#telemetry-status')
+const quotaTelemetryList = document.querySelector('#quota-telemetry-list')
+const swarmTelemetryList = document.querySelector('#swarm-telemetry-list')
 let tasks = []
 let files = []
 let folders = []
@@ -320,7 +343,81 @@ function populateDraftModels(models) {
   }
 }
 
+function renderTelemetry(providerData, runsData) {
+  const providers = Array.isArray(providerData?.providers) ? providerData.providers : []
+  const runs = Array.isArray(runsData?.runs) ? runsData.runs : (Array.isArray(runsData) ? runsData : [])
+
+  quotaTelemetryList.replaceChildren()
+  if (providers.length === 0) {
+    const empty = document.createElement('li')
+    empty.className = 'telemetry-item'
+    empty.textContent = 'No provider quota data.'
+    quotaTelemetryList.append(empty)
+  } else {
+    for (const provider of providers) {
+      const item = document.createElement('li')
+      item.className = 'telemetry-item'
+      const name = document.createElement('strong')
+      name.textContent = provider.provider || provider.id || 'provider'
+      const details = document.createElement('span')
+      details.className = 'model-meta'
+      const parts = []
+      if (provider.headroomPercent !== undefined && provider.headroomPercent !== null) {
+        parts.push(`${provider.headroomPercent}% headroom`)
+      }
+      if (provider.windows && typeof provider.windows === 'object') {
+        const winKeys = Object.keys(provider.windows)
+        if (winKeys.length > 0) parts.push(`windows: ${winKeys.join(', ')}`)
+      }
+      if (provider.syncAudit?.status) {
+        parts.push(`syncAudit: ${provider.syncAudit.status}`)
+      }
+      details.textContent = parts.length > 0 ? parts.join(' · ') : (provider.ok ? 'ok' : 'unavailable')
+      item.append(name, details)
+      quotaTelemetryList.append(item)
+    }
+  }
+
+  swarmTelemetryList.replaceChildren()
+  if (runs.length === 0) {
+    const empty = document.createElement('li')
+    empty.className = 'telemetry-item'
+    empty.textContent = 'No recent swarm runs.'
+    swarmTelemetryList.append(empty)
+  } else {
+    for (const run of runs.slice(0, 5)) {
+      const item = document.createElement('li')
+      item.className = 'telemetry-item'
+      const name = document.createElement('strong')
+      name.textContent = run.id || 'run'
+      const details = document.createElement('span')
+      details.className = 'model-meta'
+      const parts = [run.status || 'unknown']
+      if (run.isolateWorktrees || run.worktree) parts.push('worktree')
+      if (run.goal) parts.push(String(run.goal).slice(0, 60))
+      details.textContent = parts.join(' · ')
+      item.append(name, details)
+      swarmTelemetryList.append(item)
+    }
+  }
+
+  const hasData = providers.length > 0 || runs.length > 0
+  telemetryStatus.textContent = hasData ? `${providers.length} providers · ${runs.length} runs` : 'Unavailable'
+  telemetryStatus.classList.toggle('is-error', !hasData)
+}
+
+async function loadTelemetry() {
+  const [providersResult, runsResult] = await Promise.allSettled([
+    request('/api/models/providers'),
+    request('/api/agents/runs?limit=5')
+  ])
+  const providerData = providersResult.status === 'fulfilled' ? providersResult.value : null
+  const runsData = runsResult.status === 'fulfilled' ? runsResult.value : null
+  renderTelemetry(providerData, runsData)
+}
+
 async function loadModels() {
+  void loadTelemetry()
   try {
     const models = await request('/api/models')
     renderModelRoster(models)
