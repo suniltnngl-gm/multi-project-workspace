@@ -726,7 +726,7 @@ export function createSwarmRunner({
 
     const workerWorktrees = {}
     if (plan.isolateWorktrees) {
-      const baseRoot = resolvedWorktreePath || rootDir || process.cwd()
+      const baseRoot = resolvedWorktreePath || process.cwd()
       for (const agent of agents) {
         if (agent.role !== 'worker') continue
         const provisioned = provisionWorkerWorktree({
