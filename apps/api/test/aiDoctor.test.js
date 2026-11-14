@@ -215,7 +215,7 @@ test('offline doctor runs configuration checks without probing anything', async 
     assert.match(marker.message, /skipped/)
     for (const area of areas) {
       assert.ok(
-        !/^(local-|colab|kaggle|serverless|opencode|ollama)/.test(area),
+        !/^(local-|colab|kaggle|serverless|opencode|agy|ollama)/.test(area),
         `offline run reported a probe result for ${area}`
       )
     }
@@ -404,7 +404,7 @@ test('the doctor CLI skips probing in offline mode', async () => {
       )
     }
     assert.ok(!parsed.checks.some(
-      (check) => /^(local-|colab-|kaggle-|groq$|opencode$)/.test(check.area)
+      (check) => /^(local-|colab-|kaggle-|groq$|opencode$|agy$)/.test(check.area)
     ))
   } finally {
     await rm(directory, { recursive: true, force: true })

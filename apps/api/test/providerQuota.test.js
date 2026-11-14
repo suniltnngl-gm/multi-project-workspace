@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createModelBudget } from '../src/modelBudget.js'
+import { createModelRegistry } from '../src/modelRegistry.js'
 import { createModelScheduler } from '../src/modelScheduler.js'
 import {
+  buildSwarmRoster,
   groupModelsByProvider,
   modelProviderKey,
   planAgentDispatch,
-  providerSnapshots
+  providerSnapshots,
+  resolveAgentModel
 } from '../src/providerQuota.js'
 
 const MINUTE = 60000
@@ -210,4 +213,150 @@ test('automatic selection skips a provider with no quota headroom', async () => 
   assert.equal(selected.error, undefined)
   assert.equal(selected.model.id, 'model-b')
   selected.release({ inferenceStarted: false })
+})
+
+test('scoped billing overrides propagate and scheduler prefers free over subscription/payg', async () => {
+  const models = createModelRegistry({
+    env: {
+      OPENCODE_AI_MODEL: 'opencode/qwen3.6-plus-free',
+      AI_BILLING_CATEGORIES: JSON.stringify({
+        opencode: 'free',
+        'opencode@paid/pro-model': 'payg',
+        'agy@claude': 'subscription'
+      })
+    }
+  })
+
+  const opencodeDefault = resolveAgentModel(models, 'opencode')
+  assert.equal(opencodeDefault.billingCategory, 'free')
+
+  const opencodePaid = resolveAgentModel(models, 'opencode@paid/pro-model')
+  assert.equal(opencodePaid.billingCategory, 'payg')
+
+  const agyClaude = resolveAgentModel(models, 'agy@claude')
+  assert.equal(agyClaude.billingCategory, 'subscription')
+
+  const candidates = [
+    model({ id: 'paid-fast', provider: 'paid', billingCategory: 'payg', priority: 100 }),
+    model({ id: 'sub-model', provider: 'sub', billingCategory: 'subscription', priority: 80 }),
+    model({ id: 'free-model', provider: 'free', billingCategory: 'free', priority: 5 })
+  ]
+  const scheduler = createModelScheduler({
+    models: candidates,
+    getResourceMetrics: async () => ({
+      loadAverage: 0.1,
+      availableMemoryMb: 4096,
+      diskBusyPercent: 5
+    }),
+    getCpuLoadLimit: () => 1,
+    minAvailableMemoryMb: 1024,
+    maxDiskBusyPercent: 30,
+    turnCooldownMs: 0,
+    probeModel: async () => ({ ok: true })
+  })
+
+  const selected = await scheduler.select()
+  assert.equal(selected.error, undefined)
+  assert.equal(selected.model.id, 'free-model')
+  selected.release({ inferenceStarted: false })
+})
+
+test('local resource gate busy state marks local snapshots and dispatch plans blocked', () => {
+  const models = [
+    model({
+      id: 'local-1.5b',
+      provider: 'local',
+      remote: false,
+      limitKind: 'resource',
+      billingCategory: 'free',
+      priority: 20
+    }),
+    model({
+      id: 'colab-3b',
+      provider: 'colab',
+      remote: true,
+      limitKind: 'compute_utilization',
+      billingCategory: 'free',
+      priority: 8
+    })
+  ]
+
+  const resourceStatus = {
+    models: [
+      {
+        id: 'local-1.5b',
+        state: 'busy',
+        available: false,
+        busyReasons: ['available memory 900 MB is below 1792 MB']
+      },
+      {
+        id: 'colab-3b',
+        state: 'ready',
+        available: true
+      }
+    ]
+  }
+
+  const snapshots = providerSnapshots({ models, resourceStatus })
+  const localProvider = snapshots.find((entry) => entry.provider === 'local')
+  assert.equal(localProvider.ok, false)
+  assert.equal(localProvider.headroom, 0)
+  assert.equal(localProvider.models[0].resourceBlocked, true)
+
+  const plan = planAgentDispatch({
+    models,
+    resourceStatus,
+    agents: [
+      { id: 'a1', role: 'worker', name: 'worker-1', model: 'local-1.5b' },
+      { id: 'a2', role: 'worker', name: 'worker-2', model: 'colab-3b' }
+    ]
+  })
+  assert.equal(plan.ok, false)
+  assert.equal(plan.agents[0].ok, false)
+  assert.equal(plan.agents[0].resourceBlocked, true)
+  assert.equal(plan.agents[1].ok, true)
+})
+
+test('buildSwarmRoster prefers configured free live pools over batch or unprofiled remote optimism', () => {
+  const models = [
+    model({
+      id: 'kaggle-3b',
+      provider: 'kaggle',
+      execution: 'batch',
+      autoSelect: false,
+      limitKind: 'compute_utilization',
+      priority: 90
+    }),
+    model({
+      id: 'unprofiled-remote',
+      provider: 'other',
+      execution: 'live',
+      autoSelect: true,
+      limitKind: 'provider_model',
+      priority: 80
+    }),
+    model({
+      id: 'colab-3b',
+      provider: 'colab',
+      execution: 'live',
+      autoSelect: true,
+      limitKind: 'compute_utilization',
+      priority: 10
+    })
+  ]
+
+  const budget = createModelBudget({
+    profiles: {
+      'colab-3b': [{ unit: 'requests', limit: 10, window: 'day', reset: 'fixed' }]
+    }
+  })
+
+  const roster = buildSwarmRoster({
+    models,
+    modelBudget: budget,
+    workerCount: 1,
+    includeReviewer: false
+  })
+  assert.equal(roster.workers.length, 1)
+  assert.equal(roster.workers[0].model, 'colab-3b')
 })

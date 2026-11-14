@@ -12,9 +12,14 @@ import { after, before, test } from 'node:test'
 import { createApp } from '../src/app.js'
 import { createDatabase } from '../src/database.js'
 import {
+  OPENCODE_CONSOLE_PROVIDERS,
+  createAgyRosterCache,
+  createAgyRosterCacheFromEnv,
   createOpenCodeRosterCache,
   createOpenCodeRosterCacheFromEnv,
-  discoverOpenCodeModels
+  discoverAgyModels,
+  discoverOpenCodeModels,
+  groupOpenCodeModelsByProvider
 } from '../src/opencodeDiscovery.js'
 
 let directory
@@ -27,12 +32,16 @@ before(async () => {
   database = createDatabase(join(directory, 'discovery.sqlite'))
   const roster = ['console-nvidia/nvidia/nemotron-3-ultra-550b-a55b', 'console-google/gemini-2.5-flash']
   let discoveryCalls = 0
+  const agyRoster = ['gemini-3.8-flash-medium', 'claude-sonnet-5-5-medium']
   server = createApp(database, {
     opencodeRosterCache: createOpenCodeRosterCache({
       discover: async () => {
         discoveryCalls += 1
         return { ok: true, models: roster, error: null }
       }
+    }),
+    agyRosterCache: createAgyRosterCache({
+      discover: async () => ({ ok: true, models: agyRoster, error: null })
     })
   }).listen(0, '127.0.0.1')
   await new Promise((resolve, reject) => {
@@ -181,7 +190,7 @@ test('the roster cache reads its bounds from the environment', () => {
   }), /non-negative/)
 })
 
-test('the opencode roster endpoint reports the effective model and live roster', async () => {
+test('the opencode roster endpoint reports the effective model, 4+1 providers, and live roster', async () => {
   const response = await fetch(`${baseUrl}/api/models/opencode`)
   assert.equal(response.status, 200)
   const body = await response.json()
@@ -190,6 +199,10 @@ test('the opencode roster endpoint reports the effective model and live roster',
   assert.equal(body.inRoster, body.availableModels.includes(body.model))
   assert.ok(body.availableModels.includes('console-google/gemini-2.5-flash'))
   assert.equal(body.count, 2)
+  assert.equal(typeof body.activeProvider, 'string')
+  assert.deepEqual(Object.keys(body.providers), [...OPENCODE_CONSOLE_PROVIDERS])
+  assert.deepEqual(body.providers['console-google'], ['console-google/gemini-2.5-flash'])
+  assert.deepEqual(body.providers['console-nvidia'], ['console-nvidia/nvidia/nemotron-3-ultra-550b-a55b'])
   assert.equal(typeof body.fetchedAt, 'number')
   assert.equal(body.stale, false)
   assert.equal(body.source, 'cli')
@@ -204,4 +217,49 @@ test('the opencode roster endpoint reports the effective model and live roster',
   const refreshedBody = await refreshResponse.json()
   assert.equal(server.discoveryState.calls(), callsAfterFirst + 1)
   assert.ok(refreshedBody.fetchedAt >= body.fetchedAt)
+})
+
+test('groupOpenCodeModelsByProvider buckets models across the 4+1 OpenCode providers', () => {
+  const grouped = groupOpenCodeModelsByProvider([
+    'console-google/gemini-3.8-flash',
+    'console-groq/openai/gpt-oss-120b',
+    'console-nvidia/deepseek-ai/deepseek-v4.1-flash',
+    'console-openrouter/openrouter/free',
+    'opencode/big-pickle'
+  ])
+  assert.deepEqual(Object.keys(grouped), [...OPENCODE_CONSOLE_PROVIDERS])
+  assert.deepEqual(grouped['console-google'], ['console-google/gemini-3.8-flash'])
+  assert.deepEqual(grouped['console-groq'], ['console-groq/openai/gpt-oss-120b'])
+  assert.deepEqual(grouped['console-nvidia'], ['console-nvidia/deepseek-ai/deepseek-v4.1-flash'])
+  assert.deepEqual(grouped['console-openrouter'], ['console-openrouter/openrouter/free'])
+  assert.deepEqual(grouped.opencode, ['opencode/big-pickle'])
+})
+
+test('agy discovery strips spinner frames and parses tab-separated models', async () => {
+  const execFileImpl = (command, args, options, callback) => {
+    assert.equal(command, 'agy')
+    assert.deepEqual(args, ['models'])
+    callback(
+      null,
+      'Fetching available models...\rgemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n' +
+      'claude-sonnet-5-5-medium\tClaude Sonnet 5.5 (Medium)\n' +
+      'gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n'
+    )
+  }
+  const result = await discoverAgyModels({ execFileImpl })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.models, ['claude-sonnet-5-5-medium', 'gemini-3.8-flash-medium'])
+  assert.equal(result.error, null)
+})
+
+test('the agy roster endpoint reports the effective model and roster', async () => {
+  const cache = createAgyRosterCacheFromEnv({ AGY_AI_DISCOVERY_TTL_MS: '60000' })
+  assert.equal(typeof cache.get, 'function')
+  const response = await fetch(`${baseUrl}/api/models/agy`)
+  assert.equal(response.status, 200)
+  const body = await response.json()
+  assert.equal(typeof body.model, 'string')
+  assert.deepEqual(body.availableModels, ['gemini-3.8-flash-medium', 'claude-sonnet-5-5-medium'])
+  assert.equal(body.inRoster, true)
+  assert.equal(body.count, 2)
 })

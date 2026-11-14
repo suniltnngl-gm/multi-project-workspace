@@ -172,10 +172,10 @@ test('tools can be scanned and accumulate outcome counters', async () => {
   const scanResponse = await fetch(`${baseUrl}/api/tools/scan`, { method: 'POST' })
   assert.equal(scanResponse.status, 200)
   const scanned = await scanResponse.json()
-  assert.equal(scanned.total, 7)
+  assert.equal(scanned.total, 9)
   assert.deepEqual(
     scanned.entries.map((entry) => entry.name).sort(),
-    ['colab', 'git', 'kaggle', 'node', 'npm', 'python', 'uv']
+    ['agy', 'colab', 'git', 'kaggle', 'node', 'npm', 'opencode', 'python', 'uv']
   )
   for (const entry of scanned.entries) {
     assert.equal(typeof entry.command, 'string')
@@ -186,7 +186,7 @@ test('tools can be scanned and accumulate outcome counters', async () => {
   const listResponse = await fetch(`${baseUrl}/api/tools`)
   assert.equal(listResponse.status, 200)
   const listed = await listResponse.json()
-  assert.equal(listed.length, 7)
+  assert.equal(listed.length, 9)
   const byName = new Map(listed.map((tool) => [tool.name, tool]))
   assert.equal(byName.get('node').available, true)
   assert.equal(byName.get('git').available, true)

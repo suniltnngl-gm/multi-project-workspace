@@ -418,12 +418,20 @@ export function createAgentRunsStore(connection) {
     listAgents(runId) {
       return listAgentsStatement.all(runId).map((row) => toAgent(row))
     },
-    updateAgent(id, { state, leaseUntil, heartbeatAt, finishedAt, promptCacheKey } = {}) {
+    updateAgent(id, { state, model, backend, leaseUntil, heartbeatAt, finishedAt, promptCacheKey } = {}) {
       const sets = []
       const params = { id }
       if (state !== undefined) {
         sets.push('state = @state')
         params.state = state
+      }
+      if (model !== undefined) {
+        sets.push('model = @model')
+        params.model = model
+      }
+      if (backend !== undefined) {
+        sets.push('backend = @backend')
+        params.backend = backend
       }
       if (leaseUntil !== undefined) {
         sets.push('lease_until = @leaseUntil')

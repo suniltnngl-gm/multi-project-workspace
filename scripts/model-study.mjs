@@ -34,10 +34,12 @@ async function getAvailableModels() {
   })
 }
 
-async function testModel(modelId, testNumber, total) {
+async function testModel(modelId, testNumber, total, sessionId) {
   return new Promise((resolve) => {
     const start = Date.now()
-    const child = spawn('opencode', ['run', TEST_PROMPT, '--format', 'json', '--model', modelId], {
+    const args = ['run', TEST_PROMPT, '--format', 'json', '--archived', '--model', modelId]
+    if (sessionId) args.push('--session', sessionId)
+    const child = spawn('opencode', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: TIMEOUT_MS
     })
@@ -48,6 +50,22 @@ async function testModel(modelId, testNumber, total) {
 
     child.on('close', (code) => {
       const latencyMs = Date.now() - start
+      let textContent = ''
+      let observedSessionId = ''
+      for (const line of stdout.trim().split('\n')) {
+        if (!line.trim()) continue
+        try {
+          const event = JSON.parse(line.trim())
+          const eventSessionId = typeof event.sessionID === 'string' && event.sessionID
+            ? event.sessionID
+            : (typeof event.part?.sessionID === 'string' && event.part.sessionID ? event.part.sessionID : '')
+          if (eventSessionId) observedSessionId = eventSessionId
+          if (event.type === 'text' && event.part?.text) {
+            textContent += event.part.text
+          }
+        } catch {}
+      }
+
       const result = {
         model: modelId,
         testNumber,
@@ -59,20 +77,11 @@ async function testModel(modelId, testNumber, total) {
         response: '',
         error: null,
         quotaExhausted: false,
-        retryAfter: null
+        retryAfter: null,
+        sessionId: observedSessionId || sessionId || null
       }
 
       if (code === 0) {
-        // Parse JSON events for text response
-        let textContent = ''
-        for (const line of stdout.trim().split('\n')) {
-          try {
-            const event = JSON.parse(line.trim())
-            if (event.type === 'text' && event.part?.text) {
-              textContent += event.part.text
-            }
-          } catch {}
-        }
         result.success = true
         result.response = textContent.slice(0, 500)
       } else {
@@ -102,7 +111,8 @@ async function testModel(modelId, testNumber, total) {
         response: '',
         error: err.message,
         quotaExhausted: false,
-        retryAfter: null
+        retryAfter: null,
+        sessionId: sessionId || null
       })
     })
   })
@@ -111,9 +121,11 @@ async function testModel(modelId, testNumber, total) {
 async function loadState() {
   try {
     const content = await import('node:fs/promises').then(fs => fs.readFile(STATE_FILE, 'utf8'))
-    return JSON.parse(content)
+    const parsed = JSON.parse(content)
+    parsed.sessions ??= {}
+    return parsed
   } catch {
-    return { lastRun: null, runs: [] }
+    return { lastRun: null, runs: [], sessions: {} }
   }
 }
 
@@ -166,18 +178,31 @@ function printSummary(results) {
 async function main() {
   const args = process.argv.slice(2)
   const dryRun = args.includes('--dry-run')
-  const onlyFree = !args.includes('--all') // default to free models only
-  
+  const includeAll = args.includes('--all')
+  let provider = ''
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === '--provider' && args[index + 1]) {
+      provider = args[index + 1]
+      index += 1
+    } else if (args[index].startsWith('--provider=')) {
+      provider = args[index].slice('--provider='.length)
+    }
+  }
+  const onlyFree = !includeAll && !provider // default to free models unless --all or --provider is given
+
   console.log('🔬 Starting daily model study...')
-  console.log(`Mode: ${onlyFree ? 'free models only' : 'all models'}`)
-  
+  console.log(`Mode: ${provider ? `provider=${provider}` : (onlyFree ? 'free models only' : 'all models')}`)
+
   const models = await getAvailableModels()
   console.log(`Found ${models.length} models`)
-  
-  // Filter free models if requested
-  const testModels = onlyFree 
-    ? models.filter(m => m.includes(':free') || m.startsWith('opencode/') && m.endsWith('-free'))
+
+  // Filter by provider prefix and/or free models if requested
+  let testModels = provider
+    ? models.filter((m) => m.startsWith(`${provider}/`))
     : models
+  if (onlyFree) {
+    testModels = testModels.filter((m) => m.includes(':free') || m.startsWith('opencode/'))
+  }
   
   console.log(`Testing ${testModels.length} models${dryRun ? ' (dry run)' : ''}`)
   
@@ -186,11 +211,12 @@ async function main() {
     return
   }
   
+  const state = await loadState()
   const results = []
   for (let i = 0; i < testModels.length; i++) {
     const model = testModels[i]
     process.stdout.write(`\r[${i+1}/${testModels.length}] Testing ${model}... `)
-    const result = await testModel(model, i+1, testModels.length)
+    const result = await testModel(model, i+1, testModels.length, state.sessions[model])
     results.push(result)
     if (result.success) process.stdout.write('✅')
     else if (result.quotaExhausted) process.stdout.write('⚠️')
@@ -201,7 +227,14 @@ async function main() {
   printSummary(results)
   
   // Save results
-  const state = await loadState()
+  state.sessions ??= {}
+  for (const r of results) {
+    if (r.error && /session.*not found|SessionNotFoundError/i.test(r.error)) {
+      delete state.sessions[r.model]
+    } else if (r.sessionId) {
+      state.sessions[r.model] = r.sessionId
+    }
+  }
   state.lastRun = new Date().toISOString()
   state.runs.push({ timestamp: state.lastRun, results })
   // Keep last 30 runs

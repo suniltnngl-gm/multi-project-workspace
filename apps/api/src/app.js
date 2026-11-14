@@ -37,6 +37,7 @@ import { createProposalsRouter } from './routes/proposals.js'
 import { createSensorsRouter } from './routes/sensors.js'
 import { createAgentBus } from './agentBus.js'
 import { createAgentsRouter } from './routes/agents.js'
+import { createSwarmRunner } from './swarmRunner.js'
 
 const LOCAL_AI_MIN_LOAD = Number(process.env.LOCAL_AI_MIN_LOAD ?? 0.5)
 const LOCAL_AI_MAX_LOAD = Number(process.env.LOCAL_AI_MAX_LOAD ?? 1.0)
@@ -88,6 +89,7 @@ export function createApp(database, {
   }),
   verifier,
   opencodeRosterCache,
+  agyRosterCache,
   taskWorktrees,
   mcpDiscovery,
   fallbackChain = AI_FALLBACK_CHAIN,
@@ -100,7 +102,7 @@ export function createApp(database, {
     getResourceMetrics,
     getCpuLoadLimit,
     fetchImpl,
-    probeModel: modelClient.probe,
+    probeModel: typeof modelClient.probe === 'function' ? modelClient.probe : async () => ({ ok: true }),
     apiKey: localAiApiKey,
     minAvailableMemoryMb: LOCAL_AI_MIN_AVAILABLE_MEMORY_MB,
     minCpuLoad: LOCAL_AI_MIN_LOAD,
@@ -112,6 +114,17 @@ export function createApp(database, {
   })
   const jobStore = createTaskJobStore({ repository: database })
   const agentBus = createAgentBus({ database, models, modelBudget })
+  const swarmRunner = createSwarmRunner({
+    database,
+    bus: agentBus,
+    models,
+    modelClient,
+    modelBudget,
+    scheduler,
+    modelMetrics,
+    fallbackChain,
+    jobStore
+  })
 
   // The local verifier resolves the repository root on first use, mirroring
   // the scan endpoints, so the API works from any cwd inside the repository.
@@ -187,7 +200,14 @@ export function createApp(database, {
   app.use(createVerifyRouter({ getVerifier }))
   app.use(createTasksRouter({ database, jobStore, getTaskWorktrees }))
   app.use(createProposalsRouter({ database }))
-  app.use(createModelsRouter({ models, modelMetrics, modelBudget, scheduler, opencodeRosterCache }))
+  app.use(createModelsRouter({
+    models,
+    modelMetrics,
+    modelBudget,
+    scheduler,
+    opencodeRosterCache,
+    agyRosterCache
+  }))
   app.use(createAiDraftsRouter({
     database,
     jobStore,
@@ -196,7 +216,10 @@ export function createApp(database, {
     modelMetrics,
     modelBudget,
     fallbackChain,
-    fallbackAllowSessions
+    fallbackAllowSessions,
+    agentBus,
+    swarmRunner,
+    models
   }))
   app.use(createRepositoriesRouter({ database, repositoryScope }))
   app.use(createFilesRouter({ database, repositoryScope }))
@@ -208,7 +231,7 @@ export function createApp(database, {
   app.use(createAiSessionsRouter({ database }))
   app.use(createPromptTemplatesRouter({ database }))
   app.use(createRunsRouter({ database }))
-  app.use(createAgentsRouter({ database, bus: agentBus }))
+  app.use(createAgentsRouter({ database, bus: agentBus, swarmRunner }))
   app.use(createSensorsRouter({ database, models, modelBudget }))
 
   app.use((error, _request, response, _next) => {

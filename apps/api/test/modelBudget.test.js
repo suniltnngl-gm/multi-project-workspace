@@ -486,3 +486,67 @@ test('observation never overwrites configured profiles', () => {
   assert.equal(observed.ok, false)
   assert.equal(budget.check('api').ok, false)
 })
+
+test('cloud compute-utilization shorthands track compute_seconds per session and week', () => {
+  const clock = clockAt('2026-01-15T10:00:00Z')
+  const budget = createModelBudget({
+    env: {
+      COLAB_AI_MAX_COMPUTE_SECONDS_PER_SESSION: '600',
+      COLAB_AI_SESSION_HOURS: '12',
+      KAGGLE_AI_MAX_COMPUTE_SECONDS_PER_WEEK: '1200'
+    },
+    now: clock.now
+  })
+
+  assert.equal(budget.snapshot('colab-3b').unit, 'compute_seconds')
+  assert.equal(budget.snapshot('colab-3b').window, 'session')
+  budget.recordUsage('colab-3b', { computeSeconds: 600 })
+  assert.equal(budget.check('colab-3b').ok, false)
+
+  clock.advance(12 * HOUR + 1000)
+  assert.equal(budget.check('colab-3b').ok, true)
+
+  assert.equal(budget.snapshot('kaggle-3b').unit, 'compute_seconds')
+  assert.equal(budget.snapshot('kaggle-3b').window, 'week')
+  budget.recordUsage('kaggle-3b', { computeSeconds: 1200 })
+  assert.equal(budget.check('kaggle-3b').ok, false)
+})
+
+test('provider/model scoped limiters isolate request and token usage across models', () => {
+  const clock = clockAt('2026-01-15T10:00:00Z')
+  const budget = createModelBudget({
+    env: {
+      OPENCODE_AI_MAX_REQUESTS_PER_DAY: '5',
+      AI_QUOTA_PROFILES: JSON.stringify({
+        'opencode@console-groq': [
+          { policy: 'rpm', unit: 'requests', limit: 2, window: 'minute', reset: 'rolling' },
+          { policy: 'tpm', unit: 'tokens', limit: 500, window: 'minute', reset: 'rolling' }
+        ],
+        'opencode@console-nvidia': [
+          { policy: 'rpm', unit: 'requests', limit: 4, window: 'minute', reset: 'rolling' }
+        ]
+      })
+    },
+    now: clock.now
+  })
+
+  const groqModel = 'console-groq/openai/gpt-oss-120b'
+  const nvidiaModel = 'console-nvidia/deepseek-ai/deepseek-v4.1-flash'
+
+  budget.record('opencode', 1, groqModel)
+  budget.recordUsage('opencode', { promptTokens: 200, completionTokens: 300, totalTokens: 500 }, groqModel)
+
+  const groqCheck = budget.check('opencode', groqModel)
+  assert.equal(groqCheck.ok, false)
+  assert.equal(groqCheck.budget.limiters.find((l) => l.policy === 'tpm').used, 500)
+
+  const nvidiaCheck = budget.check('opencode', nvidiaModel)
+  assert.equal(nvidiaCheck.ok, true)
+  assert.equal(nvidiaCheck.budget.limiters.find((l) => l.policy === 'rpm').limit, 4)
+  assert.equal(nvidiaCheck.budget.limiters.find((l) => l.policy === 'rpm').used, 0)
+
+  // Models without an explicit provider profile still isolate their counters on the base model limiter.
+  budget.record('opencode', 1, 'opencode/big-pickle')
+  assert.equal(budget.snapshot('opencode', 'opencode/big-pickle').used, 1)
+  assert.equal(budget.snapshot('opencode', 'opencode/beam-free').used, 0)
+})

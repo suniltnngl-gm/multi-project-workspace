@@ -22,6 +22,7 @@ export const LOCAL_MODEL_DEFINITIONS = Object.freeze([
     backend: 'http',
     callable: true,
     remote: false,
+    limitKind: 'resource',
     launchKey: '0.5b',
     priority: 10,
     billingCategory: 'free',
@@ -44,6 +45,7 @@ export const LOCAL_MODEL_DEFINITIONS = Object.freeze([
     backend: 'http',
     callable: true,
     remote: false,
+    limitKind: 'resource',
     launchKey: '1.5b',
     priority: 20,
     billingCategory: 'free',
@@ -100,7 +102,7 @@ export function normalizeBillingCategory(value, label = 'billing') {
   return category
 }
 
-function parseBillingCategories(env) {
+export function parseBillingCategories(env = {}) {
   const raw = env.AI_BILLING_CATEGORIES
   if (raw === undefined || raw === '') return new Map()
 
@@ -121,11 +123,55 @@ function parseBillingCategories(env) {
   return categories
 }
 
-function resolveBillingCategory({ env, categories, id, definition, explicit, label }) {
+function coerceBillingCategories(billingCategories) {
+  if (!billingCategories) return new Map()
+  if (billingCategories instanceof Map) return billingCategories
+  if (typeof billingCategories === 'string') {
+    return parseBillingCategories({ AI_BILLING_CATEGORIES: billingCategories })
+  }
+  if (typeof billingCategories === 'object' && !Array.isArray(billingCategories)) {
+    const categories = new Map()
+    for (const [key, value] of Object.entries(billingCategories)) {
+      const normalized = normalizeBillingCategory(value, `AI_BILLING_CATEGORIES.${key}`)
+      if (normalized) categories.set(key, normalized)
+    }
+    return categories
+  }
+  return new Map()
+}
+
+function findScopedBillingMatch(categories, id, scope) {
+  if (!categories || categories.size === 0) return undefined
+  const scopeText = typeof scope === 'string' ? scope.trim() : ''
+  const slash = scopeText.indexOf('/')
+  const provider = slash > 0 ? scopeText.slice(0, slash) : ''
+  const candidates = [
+    id && scopeText ? `${id}@${scopeText}` : null,
+    scopeText || null,
+    id && provider ? `${id}@${provider}` : null,
+    provider || null,
+    id || null
+  ].filter(Boolean)
+  for (const key of candidates) {
+    if (categories.has(key)) return categories.get(key)
+  }
+  return undefined
+}
+
+export function resolveBillingCategoryForScope(billingCategories, id, scope, fallback = 'free') {
+  const categories = coerceBillingCategories(billingCategories)
+  const matched = findScopedBillingMatch(categories, id, scope)
+  if (matched) return matched
+  if (fallback === undefined || fallback === null || fallback === '') return undefined
+  return normalizeBillingCategory(fallback, 'billing') ?? fallback
+}
+
+function resolveBillingCategory({ env, categories, id, scope, definition, explicit, label }) {
   if (explicit !== undefined && explicit !== null && explicit !== '') {
     return normalizeBillingCategory(explicit, label)
   }
-  if (categories.has(id)) return categories.get(id)
+  const matched = findScopedBillingMatch(categories, id, scope)
+  if (matched) return matched
   const configured = definition.billingEnv ? env[definition.billingEnv] : undefined
   if (configured !== undefined && configured !== '') {
     return normalizeBillingCategory(configured, definition.billingEnv)
@@ -147,6 +193,7 @@ export const SERVERLESS_MODEL_DEFINITION = Object.freeze({
   backend: 'http',
   callable: true,
   remote: true,
+  limitKind: 'provider_model',
   priority: 9,
   urlEnv: 'SERVERLESS_AI_URL',
   apiKeyEnv: 'SERVERLESS_AI_API_KEY',
@@ -163,6 +210,14 @@ export const SERVERLESS_MODEL_DEFINITION = Object.freeze({
   notes: 'OpenAI-compatible endpoint configured by SERVERLESS_AI_URL; set SERVERLESS_AI_MODEL to the provider model slug.'
 })
 
+export const OPENCODE_PROVIDERS = Object.freeze([
+  'console-google',
+  'console-groq',
+  'console-nvidia',
+  'console-openrouter',
+  'opencode'
+])
+
 /**
  * Web models call the Colab/Kaggle CLIs by default. Setting an HTTP URL opts
  * the model into a faster live endpoint instead; the CLI backend is skipped.
@@ -176,6 +231,7 @@ export const EXTERNAL_MODEL_DEFINITIONS = Object.freeze([
     backend: 'colab-cli',
     callable: true,
     remote: true,
+    limitKind: 'compute_utilization',
     priority: 8,
     billingEnv: 'COLAB_AI_BILLING',
     billingCategory: 'free',
@@ -195,6 +251,7 @@ export const EXTERNAL_MODEL_DEFINITIONS = Object.freeze([
     backend: 'kaggle-cli',
     callable: true,
     remote: true,
+    limitKind: 'compute_utilization',
     priority: 7,
     billingEnv: 'KAGGLE_AI_BILLING',
     billingCategory: 'free',
@@ -214,6 +271,7 @@ export const EXTERNAL_MODEL_DEFINITIONS = Object.freeze([
     backend: 'opencode-cli',
     callable: true,
     remote: true,
+    limitKind: 'provider_model',
     priority: 6,
     billingEnv: 'OPENCODE_AI_BILLING',
     billingCategory: 'free',
@@ -223,7 +281,27 @@ export const EXTERNAL_MODEL_DEFINITIONS = Object.freeze([
     autoSelectEnv: 'OPENCODE_AI_AUTO_SELECT',
     defaultTimeoutMs: 300000,
     minAvailableMemoryMb: 0,
-    notes: 'Runs OpenCode in headless mode; set OPENCODE_AI_MODEL to choose a provider/model.'
+    notes: 'Runs OpenCode in headless mode across the 4+1 providers; set OPENCODE_AI_MODEL to choose a provider/model.'
+  },
+  {
+    id: 'agy',
+    label: 'Antigravity headless',
+    provider: 'agy',
+    execution: 'live',
+    backend: 'agy-cli',
+    callable: true,
+    remote: true,
+    limitKind: 'provider_model',
+    priority: 5,
+    billingEnv: 'AGY_AI_BILLING',
+    billingCategory: 'free',
+    urlEnv: 'AGY_AI_URL',
+    apiKeyEnv: 'AGY_AI_API_KEY',
+    timeoutEnv: 'AGY_AI_TIMEOUT_MS',
+    autoSelectEnv: 'AGY_AI_AUTO_SELECT',
+    defaultTimeoutMs: 300000,
+    minAvailableMemoryMb: 0,
+    notes: 'Antigravity CLI (`agy --print --output-format json`); set AGY_AI_URL to use an HTTP tunnel instead.'
   }
 ])
 
@@ -336,13 +414,30 @@ function createCliConfig(env) {
         path.join(workspaceTempDir(env), 'workspace-kaggle-runs')
       )
     },
-    opencode: {
-      command: 'opencode',
+    opencode: (() => {
+      const model = readText(env, 'OPENCODE_AI_MODEL', 'console-groq/openai/gpt-oss-120b')
+      const slash = model.indexOf('/')
+      return {
+        command: 'opencode',
+        probeArgs: ['--version'],
+        model,
+        agent: readText(env, 'OPENCODE_AI_AGENT', ''),
+        session: readText(env, 'OPENCODE_AI_SESSION', ''),
+        provider: slash > 0 ? model.slice(0, slash) : '',
+        providers: OPENCODE_PROVIDERS,
+        auditDir: readText(env, 'OPENCODE_AI_AUDIT_DIR', ''),
+        timeoutMs: readNumber(env, 'OPENCODE_AI_TIMEOUT_MS', 300000)
+      }
+    })(),
+    agy: {
+      command: 'agy',
       probeArgs: ['--version'],
-      model: readText(env, 'OPENCODE_AI_MODEL', 'console-nvidia/nvidia/nemotron-3-ultra-550b-a55b'),
-      agent: readText(env, 'OPENCODE_AI_AGENT', ''),
-      auditDir: readText(env, 'OPENCODE_AI_AUDIT_DIR', ''),
-      timeoutMs: readNumber(env, 'OPENCODE_AI_TIMEOUT_MS', 300000)
+      model: readText(env, 'AGY_AI_MODEL', 'gemini-3.8-flash-medium'),
+      agent: readText(env, 'AGY_AI_AGENT', ''),
+      effort: readText(env, 'AGY_AI_EFFORT', ''),
+      conversation: readText(env, 'AGY_AI_CONVERSATION', ''),
+      auditDir: readText(env, 'AGY_AI_AUDIT_DIR', ''),
+      timeoutMs: readNumber(env, 'AGY_AI_TIMEOUT_MS', 300000)
     }
   }
 }
@@ -407,6 +502,7 @@ function buildServerlessModel(definition, config) {
     backend: definition.backend,
     callable: true,
     remote: true,
+    limitKind: definition.limitKind ?? 'provider_model',
     priority: config.priority,
     billingCategory: config.billingCategory,
     url: config.url,
@@ -445,6 +541,7 @@ function createOllamaModel(env, billingCategories) {
     backend: 'ollama',
     callable: true,
     remote: true,
+    limitKind: 'provider_model',
     priority: 6,
     billingCategory: resolveBillingCategory({
       env,
@@ -615,10 +712,21 @@ export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
     }
   })
 
+  const billingOverrides = billingCategories.size > 0
+    ? Object.fromEntries(billingCategories.entries())
+    : null
+
   const externalModels = EXTERNAL_MODEL_DEFINITIONS.map((definition) => {
     const url = readUrl(env, definition.urlEnv)
     const apiKey = definition.apiKeyEnv ? env[definition.apiKeyEnv] : undefined
     const backend = url ? 'http' : definition.backend
+    const defaultScope = definition.backend === 'opencode-cli'
+      ? cli.opencode.model
+      : definition.backend === 'agy-cli'
+        ? cli.agy.model
+        : definition.backend === 'colab-cli'
+          ? cli.colab.modelId
+          : ''
     const model = {
       ...definition,
       execution: url ? 'live' : definition.execution,
@@ -628,6 +736,7 @@ export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
         env,
         categories: billingCategories,
         id: definition.id,
+        scope: defaultScope,
         definition,
         label: definition.billingEnv
       }),
@@ -644,6 +753,7 @@ export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
     if (backend === 'colab-cli') model.cli = cli.colab
     if (backend === 'kaggle-cli') model.cli = cli.kaggle
     if (backend === 'opencode-cli') model.cli = cli.opencode
+    if (backend === 'agy-cli') model.cli = cli.agy
     return model
   })
 
@@ -666,6 +776,9 @@ export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
       throw new Error(`Model id "${model.id}" is registered more than once.`)
     }
     seen.add(model.id)
+    if (billingOverrides) {
+      model.billingOverrides = billingOverrides
+    }
   }
   return models
 }
@@ -747,6 +860,7 @@ export function publicModelDefinition(model) {
     callable: model.callable,
     autoSelect: model.autoSelect ?? true,
     priority: model.priority,
+    ...(model.limitKind ? { limitKind: model.limitKind } : {}),
     ...(model.billingCategory
       ? {
         billingCategory: model.billingCategory,

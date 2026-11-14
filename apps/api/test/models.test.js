@@ -112,14 +112,15 @@ function refine(url, body = {}) {
   })
 }
 
-test('registry contains two callable local models and three CLI-backed remote models', () => {
+test('registry contains two callable local models and four CLI-backed remote models', () => {
   const models = createModelRegistry({ env: {} })
   assert.deepEqual(models.map((model) => [model.id, model.execution, model.backend, model.autoSelect]), [
     ['local-0.5b', 'live', 'http', true],
     ['local-1.5b', 'live', 'http', true],
     ['colab-3b', 'live', 'colab-cli', false],
     ['kaggle-3b', 'batch', 'kaggle-cli', false],
-    ['opencode', 'live', 'opencode-cli', false]
+    ['opencode', 'live', 'opencode-cli', false],
+    ['agy', 'live', 'agy-cli', false]
   ])
   assert.equal(models[0].minAvailableMemoryMb, 1024)
   assert.equal(models[1].minAvailableMemoryMb, 1792)
@@ -139,6 +140,26 @@ test('registry contains two callable local models and three CLI-backed remote mo
   assert.deepEqual(models[3].cli.probeArgs, ['config', 'view'])
   assert.equal(models[3].cli.cancelFallback, 'none')
   assert.match(models[3].cli.manifestDir, /workspace-kaggle-runs$/)
+  assert.equal(models[4].cli.command, 'opencode')
+  assert.deepEqual(models[4].cli.providers, [
+    'console-google',
+    'console-groq',
+    'console-nvidia',
+    'console-openrouter',
+    'opencode'
+  ])
+  assert.equal(models[4].cli.provider, 'console-groq')
+  assert.equal(models[5].cli.command, 'agy')
+  assert.deepEqual(models[5].cli.probeArgs, ['--version'])
+  assert.equal(models[5].cli.model, 'gemini-3.8-flash-medium')
+  assert.deepEqual(models.map((model) => [model.id, model.limitKind]), [
+    ['local-0.5b', 'resource'],
+    ['local-1.5b', 'resource'],
+    ['colab-3b', 'compute_utilization'],
+    ['kaggle-3b', 'compute_utilization'],
+    ['opencode', 'provider_model'],
+    ['agy', 'provider_model']
+  ])
 
   const accelerated = createModelRegistry({
     env: {
@@ -202,7 +223,8 @@ test('models expose billing categories without changing quota enforcement', () =
       ['local-1.5b', 'free'],
       ['colab-3b', 'free'],
       ['kaggle-3b', 'free'],
-      ['opencode', 'free']
+      ['opencode', 'free'],
+      ['agy', 'free']
     ]
   )
 
@@ -270,7 +292,7 @@ test('serverless slot is registered only when an endpoint is configured', () => 
   })
 
   assert.deepEqual(models.map((model) => model.id), [
-    'local-0.5b', 'local-1.5b', 'serverless', 'colab-3b', 'kaggle-3b', 'opencode'
+    'local-0.5b', 'local-1.5b', 'serverless', 'colab-3b', 'kaggle-3b', 'opencode', 'agy'
   ])
   const serverless = models.find((model) => model.id === 'serverless')
   assert.equal(serverless.url, 'https://api.example/openai')
@@ -332,7 +354,7 @@ test('multiple serverless slots register independently', () => {
   })
 
   assert.deepEqual(models.map((model) => model.id), [
-    'local-0.5b', 'local-1.5b', 'slot-a', 'slot-b', 'colab-3b', 'kaggle-3b', 'opencode'
+    'local-0.5b', 'local-1.5b', 'slot-a', 'slot-b', 'colab-3b', 'kaggle-3b', 'opencode', 'agy'
   ])
 
   const slotA = models.find((model) => model.id === 'slot-a')
@@ -381,7 +403,7 @@ test('legacy serverless variables coexist with JSON slots', () => {
   })
 
   assert.deepEqual(models.map((model) => model.id), [
-    'local-0.5b', 'local-1.5b', 'serverless', 'slot-a', 'colab-3b', 'kaggle-3b', 'opencode'
+    'local-0.5b', 'local-1.5b', 'serverless', 'slot-a', 'colab-3b', 'kaggle-3b', 'opencode', 'agy'
   ])
 })
 
@@ -462,10 +484,12 @@ test('CLI remote models opt out of automatic selection unless enabled', () => {
   const defaults = createModelRegistry({ env: {} })
   assert.equal(defaults.find((model) => model.id === 'colab-3b').autoSelect, false)
   assert.equal(defaults.find((model) => model.id === 'kaggle-3b').autoSelect, false)
+  assert.equal(defaults.find((model) => model.id === 'agy').autoSelect, false)
 
-  const enabled = createModelRegistry({ env: { COLAB_AI_AUTO_SELECT: 'true' } })
+  const enabled = createModelRegistry({ env: { COLAB_AI_AUTO_SELECT: 'true', AGY_AI_AUTO_SELECT: 'true' } })
   assert.equal(enabled.find((model) => model.id === 'colab-3b').autoSelect, true)
   assert.equal(enabled.find((model) => model.id === 'kaggle-3b').autoSelect, false)
+  assert.equal(enabled.find((model) => model.id === 'agy').autoSelect, true)
 
   const disabled = createModelRegistry({
     env: { COLAB_AI_URL: 'https://colab.example', COLAB_AI_AUTO_SELECT: 'false' }

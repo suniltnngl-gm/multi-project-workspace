@@ -154,7 +154,102 @@ function retrySecondsFromText(text) {
       (Number(human[3]) || 0)
     if (total > 0) return total
   }
+  const secondsOnly = text.match(/retry\s+(?:in|after)\s+(?:about\s+)?(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)\b/i)
+  if (secondsOnly) {
+    const seconds = Number(secondsOnly[1])
+    if (Number.isFinite(seconds) && seconds > 0) return seconds
+  }
   return null
+}
+
+function isRateLimitText(text) {
+  return /\b429\b|rate.?limit|quota.?exhausted|RESOURCE_EXHAUSTED|too many requests/i.test(String(text ?? ''))
+}
+
+function estimateTokens(text) {
+  const value = String(text ?? '')
+  return value ? Math.max(1, Math.ceil(value.length / 4)) : 0
+}
+
+function joinMessagesForPrompt(messages = []) {
+  return messages
+    .map((message) => `${message.role}: ${message.content}`)
+    .join('\n\n')
+}
+
+export function parseAgyOutput(stdout) {
+  const raw = stripAnsi(stdout).trim()
+  if (!raw) {
+    return { conversationId: '', text: '', error: 'The Antigravity CLI returned no output.', usage: undefined }
+  }
+
+  let parsed = null
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    const lines = raw
+      .split('\n')
+      .map((line) => line.split('\r').pop().trim())
+      .filter(Boolean)
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const candidate = lines[index]
+      if (!candidate.startsWith('{')) continue
+      try {
+        parsed = JSON.parse(candidate)
+        break
+      } catch {
+        // Keep scanning earlier lines.
+      }
+    }
+    if (!parsed) {
+      const firstBrace = raw.indexOf('{')
+      const lastBrace = raw.lastIndexOf('}')
+      if (firstBrace >= 0 && lastBrace > firstBrace) {
+        try {
+          parsed = JSON.parse(raw.slice(firstBrace, lastBrace + 1))
+        } catch {
+          parsed = null
+        }
+      }
+    }
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { conversationId: '', text: '', error: 'The Antigravity CLI returned invalid JSON output.', usage: undefined }
+  }
+
+  const conversationId = String(
+    parsed.conversation_id
+    ?? parsed.conversationId
+    ?? parsed.session_id
+    ?? parsed.sessionID
+    ?? ''
+  ).trim()
+  const text = typeof parsed.response === 'string'
+    ? parsed.response.trim()
+    : (typeof parsed.content === 'string' ? parsed.content.trim() : '')
+
+  let error = null
+  if (parsed.error) {
+    error = typeof parsed.error === 'string'
+      ? parsed.error
+      : (parsed.error.message || JSON.stringify(parsed.error))
+  } else if (parsed.status && !['SUCCESS', 'ok', 'OK'].includes(String(parsed.status))) {
+    error = String(parsed.message || parsed.error_message || text || `Antigravity exited with status ${parsed.status}.`)
+  }
+
+  let usage
+  if (parsed.usage && typeof parsed.usage === 'object') {
+    const promptTokens = Number(parsed.usage.input_tokens ?? parsed.usage.prompt_tokens ?? 0)
+    const completionTokens = Number(parsed.usage.output_tokens ?? parsed.usage.completion_tokens ?? 0)
+      + Number(parsed.usage.thinking_tokens ?? 0)
+    const totalTokens = Number(parsed.usage.total_tokens ?? (promptTokens + completionTokens))
+    if (Number.isFinite(promptTokens) && Number.isFinite(completionTokens) && Number.isFinite(totalTokens)) {
+      usage = { promptTokens, completionTokens, totalTokens }
+    }
+  }
+
+  return { conversationId, text, error, usage }
 }
 
 function parseCliRetryDelaySeconds(error) {
@@ -217,6 +312,8 @@ export function createModelClient({
   promptCache: promptCacheOptions = {}
 } = {}) {
   const colabStates = new Map()
+  const opencodeSessions = new Map()
+  const agySessions = new Map()
   const probeCache = new Map()
   // Cache and adaptive timeout state belong to the client instance. Module
   // singletons leaked cached completions and timeouts between app instances
@@ -342,7 +439,10 @@ export function createModelClient({
   }
 
   async function probe(model) {
-    const cliBackend = model.backend === 'colab-cli' || model.backend === 'kaggle-cli' || model.backend === 'opencode-cli'
+    const cliBackend = model.backend === 'colab-cli'
+      || model.backend === 'kaggle-cli'
+      || model.backend === 'opencode-cli'
+      || model.backend === 'agy-cli'
     let result
     if (cliBackend) {
       result = await probeCli(model)
@@ -609,11 +709,14 @@ export function createModelClient({
         throw new ModelCallError(`The ${model.label} CLI returned invalid output.`, 502)
       }
       const content = parseContent(result)
+      const durationMs = Date.now() - startedAt
+      const computeSeconds = Math.max(1, Math.ceil(durationMs / 1000))
+      reportUsage(request, { ...(parseUsage(result) || {}), computeSeconds })
       await writeColabAudit(model, {
         ...audit,
         status: 'ok',
         response: { content },
-        durationMs: Date.now() - startedAt
+        durationMs
       })
       return content
     } catch (error) {
@@ -632,6 +735,7 @@ export function createModelClient({
       throw new ModelCallError('The Kaggle runner requires task fields.', 500)
     }
 
+    const startedAt = Date.now()
     const directory = await mkdtemp(join(tmpdir(), 'workspace-kaggle-'))
     try {
       const taskPath = join(directory, 'task.json')
@@ -666,6 +770,11 @@ export function createModelClient({
       ) {
         throw new ModelCallError('The Kaggle runner returned an invalid task response.', 502)
       }
+      const reportedCompute = Number(parsed.compute_seconds ?? parsed.computeSeconds)
+      const computeSeconds = Number.isFinite(reportedCompute) && reportedCompute > 0
+        ? reportedCompute
+        : Math.max(1, Math.ceil((Date.now() - startedAt) / 1000))
+      reportUsage(request, { computeSeconds })
       return JSON.stringify(parsed)
     } catch (error) {
       if (error instanceof ModelCallError) throw error
@@ -675,45 +784,115 @@ export function createModelClient({
     }
   }
 
-  async function completeOpencode(model, request) {
-    reportPhase(request, 'generating')
-    const prompt = request.messages
-      .map((message) => `${message.role}: ${message.content}`)
-      .join('\n\n')
-    const args = ['run', prompt, '--format', 'json']
-    if (model.cli?.model) args.push('--model', model.cli.model)
-    if (model.cli?.agent) args.push('--agent', model.cli.agent)
+  function opencodeSessionKey(model, request) {
+    return [
+      model.id ?? 'opencode',
+      model.cli?.model ?? '',
+      model.cli?.agent ?? '',
+      request.worktreePath ?? '',
+      request.sessionKey ?? ''
+    ].join('\0')
+  }
 
-    const timeoutMs = model.timeoutMs ?? 300000
-    let stdout
-    try {
-      ({ stdout } = await runCommand(model.cli.command, args, {
-        timeoutMs,
-        // A task-linked run executes inside the task's worktree so generated
-        // changes never touch the main checkout.
-        ...(request.worktreePath ? { cwd: request.worktreePath } : {}),
-        signal: request.signal
-      }))
-    } catch (error) {
-      throw new ModelCallError(`The OpenCode CLI failed: ${error.message}`, 502)
-    }
+  function isMissingOpencodeSessionMessage(text) {
+    return /session.*not found|SessionNotFoundError/i.test(String(text ?? ''))
+  }
 
+  function parseOpencodeOutput(stdout) {
     let content = ''
     let errorEvent = null
-    for (const line of stdout.split(/\r?\n/)) {
+    let observedSessionId = ''
+    let promptTokens = 0
+    let completionTokens = 0
+    let totalTokens = 0
+    let sawUsage = false
+    for (const line of String(stdout ?? '').split(/\r?\n/)) {
       const trimmed = line.trim()
       if (!trimmed) continue
       try {
         const event = JSON.parse(trimmed)
+        const eventSessionId = typeof event.sessionID === 'string' && event.sessionID
+          ? event.sessionID
+          : (typeof event.part?.sessionID === 'string' && event.part.sessionID ? event.part.sessionID : '')
+        if (eventSessionId) observedSessionId = eventSessionId
         if (event.type === 'text' && event.part && typeof event.part.text === 'string') {
           content += event.part.text
         } else if (event.type === 'error' && !errorEvent) {
           errorEvent = event.error ?? {}
         }
+        const tokens = event.part?.tokens ?? event.tokens ?? event.usage
+        if (tokens && typeof tokens === 'object') {
+          const input = Number(tokens.input ?? tokens.prompt_tokens ?? tokens.input_tokens)
+          const output = Number(tokens.output ?? tokens.completion_tokens ?? tokens.output_tokens)
+          const reasoning = Number(tokens.reasoning ?? tokens.thinking_tokens ?? 0)
+          const total = Number(tokens.total ?? tokens.total_tokens)
+          if (Number.isFinite(input) || Number.isFinite(output) || Number.isFinite(total)) {
+            sawUsage = true
+            if (Number.isFinite(input)) promptTokens += input
+            if (Number.isFinite(output)) {
+              completionTokens += output + (Number.isFinite(reasoning) ? reasoning : 0)
+            }
+            if (Number.isFinite(total)) totalTokens += total
+            else totalTokens += (Number.isFinite(input) ? input : 0) + (Number.isFinite(output) ? output : 0)
+          }
+        }
       } catch {
         // Ignore non-JSON log lines.
       }
     }
+    const usage = sawUsage
+      ? {
+          promptTokens,
+          completionTokens,
+          totalTokens: totalTokens || (promptTokens + completionTokens)
+        }
+      : undefined
+    return { content, errorEvent, observedSessionId, usage }
+  }
+
+  async function completeOpencode(model, request) {
+    reportPhase(request, 'generating')
+    const prompt = joinMessagesForPrompt(request.messages)
+    const timeoutMs = model.timeoutMs ?? 300000
+    const sessionKey = opencodeSessionKey(model, request)
+    const cachedSessionId = opencodeSessions.get(sessionKey) || model.cli?.session || ''
+
+    const runOpencodeOnce = async (sessionId) => {
+      const args = ['run', prompt, '--format', 'json']
+      if (model.cli?.model) args.push('--model', model.cli.model)
+      if (model.cli?.agent) args.push('--agent', model.cli.agent)
+      if (sessionId) args.push('--session', sessionId)
+      const { stdout } = await runCommand(model.cli.command, args, {
+        timeoutMs,
+        // A task-linked run executes inside the task's worktree so generated
+        // changes never touch the main checkout.
+        ...(request.worktreePath ? { cwd: request.worktreePath } : {}),
+        signal: request.signal
+      })
+      return parseOpencodeOutput(stdout)
+    }
+
+    let parsed
+    try {
+      parsed = await runOpencodeOnce(cachedSessionId)
+      if (cachedSessionId && !parsed.content && isMissingOpencodeSessionMessage(parsed.errorEvent?.message)) {
+        opencodeSessions.delete(sessionKey)
+        parsed = await runOpencodeOnce('')
+      }
+    } catch (error) {
+      if (cachedSessionId && isMissingOpencodeSessionMessage(error?.message)) {
+        opencodeSessions.delete(sessionKey)
+        try {
+          parsed = await runOpencodeOnce('')
+        } catch (retryError) {
+          throw new ModelCallError(`The OpenCode CLI failed: ${retryError.message}`, 502)
+        }
+      } else {
+        throw new ModelCallError(`The OpenCode CLI failed: ${error.message}`, 502)
+      }
+    }
+
+    const { content, errorEvent, observedSessionId } = parsed
     if (!content) {
       // A run that produced no text but reported an error fails with the
       // provider's own status and retry delay when the event carries them, so
@@ -726,7 +905,128 @@ export function createModelClient({
       )
     }
 
+    const nextSessionId = observedSessionId || cachedSessionId
+    if (nextSessionId) opencodeSessions.set(sessionKey, nextSessionId)
+    reportUsage(
+      request,
+      parsed.usage ?? {
+        promptTokens: estimateTokens(prompt),
+        completionTokens: estimateTokens(content),
+        totalTokens: estimateTokens(prompt) + estimateTokens(content)
+      }
+    )
     return content
+  }
+
+  function agySessionKey(model, request) {
+    return [
+      model.id ?? 'agy',
+      model.cli?.model ?? '',
+      model.cli?.agent ?? '',
+      model.cli?.effort ?? '',
+      request.worktreePath ?? '',
+      request.sessionKey ?? ''
+    ].join('\0')
+  }
+
+  function isMissingAgyConversationMessage(text) {
+    return /conversation.*not found|ConversationNotFound|invalid.*conversation|no conversation|unknown conversation/i.test(String(text ?? ''))
+  }
+
+  async function completeAgy(model, request) {
+    reportPhase(request, 'generating')
+    const prompt = joinMessagesForPrompt(request.messages)
+    const timeoutMs = model.timeoutMs ?? 300000
+    const sessionKey = agySessionKey(model, request)
+    const cachedConversationId = agySessions.get(sessionKey) || model.cli?.conversation || ''
+
+    const buildArgs = (conversationId) => {
+      const args = ['--print', prompt, '--output-format', 'json']
+      if (model.cli?.model) args.push('--model', model.cli.model)
+      if (model.cli?.agent) args.push('--agent', model.cli.agent)
+      if (model.cli?.effort) args.push('--effort', model.cli.effort)
+      if (conversationId) args.push('--conversation', conversationId)
+      return args
+    }
+
+    const runAgyOnce = async (conversationId) => {
+      const { stdout, stderr } = await runCommand(model.cli.command, buildArgs(conversationId), {
+        timeoutMs,
+        ...(request.worktreePath ? { cwd: request.worktreePath } : {}),
+        signal: request.signal
+      })
+      const parsed = parseAgyOutput(stdout)
+      if (parsed.error && stderr && parsed.error === 'The Antigravity CLI returned no output.') {
+        parsed.error = stderr.trim()
+      }
+      return parsed
+    }
+
+    let parsed
+    try {
+      parsed = await runAgyOnce(cachedConversationId)
+      if (cachedConversationId && parsed.error && isMissingAgyConversationMessage(parsed.error)) {
+        agySessions.delete(sessionKey)
+        parsed = await runAgyOnce('')
+      }
+    } catch (error) {
+      if (cachedConversationId && isMissingAgyConversationMessage(error?.message)) {
+        agySessions.delete(sessionKey)
+        try {
+          parsed = await runAgyOnce('')
+        } catch (retryError) {
+          if (retryError instanceof ModelCallError) throw retryError
+          if (isRateLimitText(retryError?.message)) {
+            throw new ModelCallError(retryError.message, 429, {
+              retryAfter: retrySecondsFromText(retryError.message) ?? undefined
+            })
+          }
+          throw new ModelCallError(`The Antigravity CLI failed: ${retryError.message}`, 502)
+        }
+      } else {
+        if (error instanceof ModelCallError) throw error
+        if (isRateLimitText(error?.message)) {
+          throw new ModelCallError(error.message, 429, {
+            retryAfter: retrySecondsFromText(error.message) ?? undefined
+          })
+        }
+        throw new ModelCallError(`The Antigravity CLI failed: ${error.message}`, 502)
+      }
+    }
+
+    if (parsed.error || !parsed.text) {
+      const errorMessage = String(parsed.error || 'The Antigravity CLI returned no model output.')
+      if (isRateLimitText(errorMessage)) {
+        throw new ModelCallError(errorMessage, 429, {
+          retryAfter: retrySecondsFromText(errorMessage) ?? undefined
+        })
+      }
+      throw new ModelCallError(errorMessage, 502)
+    }
+
+    const nextConversationId = parsed.conversationId || cachedConversationId
+    if (nextConversationId) agySessions.set(sessionKey, nextConversationId)
+
+    reportUsage(
+      request,
+      parsed.usage ?? {
+        promptTokens: estimateTokens(prompt),
+        completionTokens: estimateTokens(parsed.text),
+        totalTokens: estimateTokens(prompt) + estimateTokens(parsed.text)
+      }
+    )
+
+    if (model.cli?.auditDir) {
+      await writeColabAudit(model, {
+        conversationId: nextConversationId || null,
+        status: 'ok',
+        request: { messages: request.messages, maxTokens: request.maxTokens },
+        response: { content: parsed.text },
+        usage: parsed.usage ?? null
+      })
+    }
+
+    return parsed.text
   }
 
   function promptCacheKey(model, request) {
@@ -740,6 +1040,7 @@ export function createModelClient({
       .update(model.id)
       .update(model.cli?.model ?? '')
       .update(model.cli?.agent ?? '')
+      .update(model.cli?.effort ?? '')
       .update(JSON.stringify(request.messages ?? []))
       .update(String(request.maxTokens ?? ''))
       .update(JSON.stringify(request.task ?? null))
@@ -816,6 +1117,7 @@ export function createModelClient({
       if (model.backend === 'colab-cli') content = await completeColab(model, request)
       else if (model.backend === 'kaggle-cli') content = await completeKaggle(model, request)
       else if (model.backend === 'opencode-cli') content = await completeOpencode(model, request)
+      else if (model.backend === 'agy-cli') content = await completeAgy(model, request)
       else if (model.backend === 'ollama') content = await completeOllama(model, request)
       else content = await completeHttp(model, request)
       const observed = Date.now() - startedAt

@@ -1,69 +1,208 @@
 #!/usr/bin/env node
-// Objective: Rotate the OpenCode CLI model daily so one exhausted free tier does not block the workspace.
-// Requirements: Change OPENCODE_AI_MODEL only when the UTC day changes; alternate providers; never rotate a key into the database or git.
+// Objective: Rotate OpenCode (4+1 providers) or Antigravity (agy) headless models daily so one exhausted quota does not block the workspace.
+// Requirements: Update OPENCODE_AI_MODEL or AGY_AI_MODEL in .env when rotating; support all 4+1 OpenCode providers and agy; never rotate a key into the database or git.
 // Decisions: Rotation state lives in the OS temp directory (WORKSPACE_TMP_DIR override) because it is local scheduling state, not workspace data; .env is the only sink so the server sees the model after restart.
-// Relevant Files: scripts/rotate-model.mjs, scripts/model-study.mjs, workspace, .env
-// Important Context: User file. .env is gitignored; only free-tier model ids are listed here.
-// Work State: Completed: Added with the ai model rotate command; Active: None; Blocked: None; Next Move: Maintain as needed.
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+// Relevant Files: scripts/rotate-model.mjs, scripts/model-study.mjs, scripts/opencode-console.mjs, workspace, .env
+// Important Context: User file. .env is gitignored; supports OpenCode's 4+1 providers (console-google, console-groq, console-nvidia, console-openrouter, opencode) and agy.
+// Work State: Completed: Updated for OpenCode 4+1 providers and agy headless; Active: None; Blocked: None; Next Move: Maintain as needed.
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { workspaceTmpDir } from './env.mjs'
 
-const providers = {
-  'console-openrouter': [
-    'console-openrouter/liquid/lfm-3-1.7b:free',
-    'console-openrouter/nvidia/nemotron-3.5-lightning:free',
-    'console-openrouter/cohere/north-mini-code:free',
-    'console-openrouter/nvidia/nemotron-3-ultra-550b-a55b:free',
-    'console-openrouter/google/gemma-4-26b-a4b-it:free',
-    'console-openrouter/liquid/lfm-2.5-2.6b:free',
-    'console-openrouter/nvidia/nemotron-3.5-super-vl:free',
-    'console-openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
-    'console-openrouter/thinkingmachines/inkling-2-small:free',
-    'console-openrouter/recursive/flint-v1.0:free'
-  ],
+export const OPENCODE_PROVIDERS = {
   'console-google': [
-    'console-google/gemini-4-argon',
     'console-google/gemini-3.8-flash',
-    'console-google/gemini-3.7-flash',
-    'console-google/gemini-flash-latest',
-    'console-google/gemini-3.5-flash-lite',
-    'console-google/gemini-robotics-er-2-preview'
+    'console-google/gemini-2.5-flash',
+    'console-google/gemini-4-argon',
+    'console-google/gemini-3.5-flash',
+    'console-google/gemma-4-31b-it'
+  ],
+  'console-groq': [
+    'console-groq/openai/gpt-oss-120b',
+    'console-groq/qwen/qwen3.8-27b',
+    'console-groq/openai/gpt-oss-20b',
+    'console-groq/allam-2-7b'
+  ],
+  'console-nvidia': [
+    'console-nvidia/deepseek-ai/deepseek-v4.1-flash',
+    'console-nvidia/nvidia/nemotron-3-ultra-550b-a55b',
+    'console-nvidia/nvidia/nemotron-3.5-lightning-30b-a3b',
+    'console-nvidia/minimaxai/minimax-m3.1-flash',
+    'console-nvidia/z-ai/glm-5.3-flash'
+  ],
+  'console-openrouter': [
+    'console-openrouter/openrouter/free',
+    'console-openrouter/nvidia/nemotron-3-ultra-550b-a55b:free',
+    'console-openrouter/nvidia/nemotron-3.5-lightning:free',
+    'console-openrouter/google/gemma-4-31b-it:free',
+    'console-openrouter/cohere/north-mini-code:free'
+  ],
+  opencode: [
+    'opencode/big-pickle',
+    'opencode/deepseek-v4.1-flash-free',
+    'opencode/glm-5.3-flash-free',
+    'opencode/minimax-m3.1-flash-free',
+    'opencode/nemotron-3.5-lightning-free',
+    'opencode/beam-free'
   ]
 }
 
-const tmpDir = workspaceTmpDir()
-mkdirSync(tmpDir, { recursive: true })
-const stateFile = join(tmpDir, 'rotation-state.json')
-let state = { day: 0, openrouterIndex: 0, googleIndex: 0 }
-try { 
-  const content = readFileSync(stateFile, 'utf8')
-  state = JSON.parse(content)
-} catch {}
+export const OPENCODE_PROVIDER_ORDER = Object.freeze([
+  'console-google',
+  'console-groq',
+  'console-nvidia',
+  'console-openrouter',
+  'opencode'
+])
 
-const today = Math.floor(Date.now() / 86400000)
-if (state.day !== today) {
-  state.day = today
-  state.openrouterIndex = (state.openrouterIndex + 1) % providers['console-openrouter'].length
-  state.googleIndex = (state.googleIndex + 1) % providers['console-google'].length
-  writeFileSync(stateFile, JSON.stringify(state))
+export const AGY_MODELS = [
+  'gemini-3.8-flash-medium',
+  'gemini-3.8-flash-high',
+  'gemini-4-argon-medium',
+  'gemini-4-hydrogen-medium',
+  'claude-sonnet-5-5-medium',
+  'gpt-oss-120b-medium'
+]
+
+function parseOptions(argv) {
+  let backend = 'opencode'
+  let provider = ''
+  let dryRun = false
+  let list = false
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index]
+    if (arg === '--dry-run') {
+      dryRun = true
+    } else if (arg === '--list') {
+      list = true
+    } else if (arg === '--backend' && argv[index + 1]) {
+      backend = argv[index + 1]
+      index += 1
+    } else if (arg.startsWith('--backend=')) {
+      backend = arg.slice('--backend='.length)
+    } else if (arg === '--provider' && argv[index + 1]) {
+      provider = argv[index + 1]
+      index += 1
+    } else if (arg.startsWith('--provider=')) {
+      provider = arg.slice('--provider='.length)
+    } else {
+      throw new Error(`Unknown option: ${arg}`)
+    }
+  }
+  if (provider === 'agy') backend = 'agy'
+  if (!['opencode', 'agy'].includes(backend)) {
+    throw new Error(`Unsupported backend "${backend}". Use opencode or agy.`)
+  }
+  if (backend === 'opencode' && provider && !Object.hasOwn(OPENCODE_PROVIDERS, provider)) {
+    throw new Error(
+      `Unknown OpenCode provider "${provider}". Available: ${OPENCODE_PROVIDER_ORDER.join(', ')}`
+    )
+  }
+  return { backend, provider, dryRun, list }
 }
 
-// Alternate between providers daily
-const useOpenRouter = today % 2 === 0
-const model = useOpenRouter 
-  ? providers['console-openrouter'][state.openrouterIndex]
-  : providers['console-google'][state.googleIndex]
-
-const envPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', '.env')
-let env = readFileSync(envPath, 'utf8')
-if (env.includes('OPENCODE_AI_MODEL=')) {
-  env = env.replace(/^OPENCODE_AI_MODEL=.*/m, `OPENCODE_AI_MODEL=${model}`)
-} else {
-  env += `\nOPENCODE_AI_MODEL=${model}`
+function updateEnvKey(envPath, key, value) {
+  let env = existsSync(envPath) ? readFileSync(envPath, 'utf8') : ''
+  const pattern = new RegExp(`^${key}=.*$`, 'm')
+  if (pattern.test(env)) {
+    env = env.replace(pattern, `${key}=${value}`)
+  } else {
+    const prefix = env && !env.endsWith('\n') ? '\n' : ''
+    env += `${prefix}${key}=${value}\n`
+  }
+  writeFileSync(envPath, env)
 }
-writeFileSync(envPath, env)
 
-console.log(`🔄 Rotated to ${useOpenRouter ? 'OpenRouter' : 'Google'} model: ${model}`)
-console.log(`   State: day=${today}, openrouterIndex=${state.openrouterIndex}, googleIndex=${state.googleIndex}`)
+function main() {
+  const { backend, provider, dryRun, list } = parseOptions(process.argv.slice(2))
+
+  if (list) {
+    if (backend === 'agy') {
+      console.log('Antigravity (agy) rotation pool:')
+      for (const model of AGY_MODELS) console.log(`  - ${model}`)
+      return
+    }
+    const targetProviders = provider ? [provider] : OPENCODE_PROVIDER_ORDER
+    for (const entry of targetProviders) {
+      console.log(`${entry}:`)
+      for (const model of OPENCODE_PROVIDERS[entry]) console.log(`  - ${model}`)
+    }
+    return
+  }
+
+  const tmpDir = workspaceTmpDir()
+  const stateFile = join(tmpDir, 'rotation-state.json')
+  let state = {
+    day: 0,
+    providerIndex: 0,
+    indices: Object.fromEntries(OPENCODE_PROVIDER_ORDER.map((name) => [name, 0])),
+    agyDay: 0,
+    agyIndex: 0
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(stateFile, 'utf8'))
+    if (parsed && typeof parsed === 'object') {
+      state = {
+        ...state,
+        ...parsed,
+        indices: { ...state.indices, ...(parsed.indices || {}) }
+      }
+    }
+  } catch {
+    // Use initial state when no state file exists yet.
+  }
+
+  const today = Math.floor(Date.now() / 86400000)
+  const envPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', '.env')
+
+  if (backend === 'agy') {
+    const nextState = { ...state }
+    if (nextState.agyDay !== today) {
+      nextState.agyDay = today
+      nextState.agyIndex = (Number(nextState.agyIndex || 0) + 1) % AGY_MODELS.length
+    }
+    const model = AGY_MODELS[nextState.agyIndex]
+    if (!dryRun) {
+      mkdirSync(tmpDir, { recursive: true })
+      writeFileSync(stateFile, JSON.stringify(nextState, null, 2))
+      updateEnvKey(envPath, 'AGY_AI_MODEL', model)
+    }
+    console.log(`${dryRun ? '[dry-run] Would rotate' : 'Rotated'} agy model: ${model}`)
+    console.log(`   State: day=${today}, agyIndex=${nextState.agyIndex}`)
+    return
+  }
+
+  const nextState = {
+    ...state,
+    indices: { ...state.indices }
+  }
+  const activeProvider = provider || OPENCODE_PROVIDER_ORDER[
+    nextState.day !== today
+      ? (Number(nextState.providerIndex || 0) + 1) % OPENCODE_PROVIDER_ORDER.length
+      : Number(nextState.providerIndex || 0) % OPENCODE_PROVIDER_ORDER.length
+  ]
+  if (nextState.day !== today) {
+    nextState.day = today
+    if (!provider) {
+      nextState.providerIndex = (Number(nextState.providerIndex || 0) + 1) % OPENCODE_PROVIDER_ORDER.length
+    }
+    const pool = OPENCODE_PROVIDERS[activeProvider]
+    nextState.indices[activeProvider] = (Number(nextState.indices[activeProvider] || 0) + 1) % pool.length
+  }
+
+  const pool = OPENCODE_PROVIDERS[activeProvider]
+  const index = Number(nextState.indices[activeProvider] || 0) % pool.length
+  const model = pool[index]
+
+  if (!dryRun) {
+    mkdirSync(tmpDir, { recursive: true })
+    writeFileSync(stateFile, JSON.stringify(nextState, null, 2))
+    updateEnvKey(envPath, 'OPENCODE_AI_MODEL', model)
+  }
+
+  console.log(`${dryRun ? '[dry-run] Would rotate' : 'Rotated'} to ${activeProvider} model: ${model}`)
+  console.log(`   State: day=${today}, provider=${activeProvider}, index=${index}`)
+}
+
+main()

@@ -1,13 +1,19 @@
-// Objective: Own the AI drafting routes: refine-task, background jobs, complete, and improve, with their shared model selection and runner logic.
-// Requirements: One attempt per selected model with budget, cooldown, and provenance recorded; drafts parse into task shape; complete and improve run as jobs like any other model call; improve suggestions persist as proposals that never become tasks without approval.
-// Decisions: Draft validation, prompt building, and runner helpers stay in one group because refine-task, jobs, complete, and improve share them; the shared env module is imported before the module-level AI limits are read; the improve route hands parsed suggestions to the proposals store so the board, not the model, decides what becomes a task.
-// Relevant Files: apps/api/src/routes/aiDrafts.js, apps/api/src/routes/util.js, apps/api/src/taskJobStore.js, apps/api/src/localAiPrompt.js
-// Important Context: User file. Route group for /api/local-ai/* and /api/ai/*.
-// Work State: Completed: Extracted from app.js as task #45; env loading uses the shared env module as task #63; Active: None; Blocked: None; Next Move: Maintain as needed.
+// Objective: Own the AI drafting routes: refine-task, background jobs, complete, and improve, orchestrated over the multi-agent control plane with shared model selection and budget helpers.
+// Requirements: Execute refine-task, local-ai jobs, complete, and improve as tracked agentBus runs (parent + workers + optional reviewer) with pre-run register backfill, context hydration, and session compaction; preserve backward-compatible response envelopes and originAgentRunId proposal attribution; keep budget, cooldown, and billing circuit breakers accurate.
+// Decisions: Draft validation, prompt building, and runThroughAgentBus orchestration stay in one group so all AI draft routes share register hydration, preReserved budget handoff, and multi-agent slicing/review options; improve suggestions still persist as proposals that require approval before becoming tasks.
+// Relevant Files: apps/api/src/routes/aiDrafts.js, apps/api/src/routes/util.js, apps/api/src/taskJobStore.js, apps/api/src/localAiPrompt.js, apps/api/src/agentBus.js, apps/api/src/swarmRunner.js
+// Important Context: User file. Multi-agent route group for /api/local-ai/* and /api/ai/*.
+// Work State: Completed: Extracted from app.js (#45), shared env loading (#63), pre-run register backfill, and multi-agent agentBus execution across all four routes; Active: None; Blocked: None; Next Move: Maintain as needed.
 import '../env.js'
 import { Router } from 'express'
 import { existsSync } from 'node:fs'
-import { buildTaskPrompt } from '../localAiPrompt.js'
+import {
+  backfillTaskRegisters,
+  buildTaskPrompt,
+  formatAgentContextBlock,
+  resolveFileAndFolderRegisters,
+  resolveTaskSessionContext
+} from '../localAiPrompt.js'
 import {
   describeFallback,
   fallbackAllowed,
@@ -32,10 +38,14 @@ const AI_SESSION_CONTEXT_MESSAGES = Number(process.env.AI_SESSION_CONTEXT_MESSAG
 const AI_SESSION_SUMMARY_MAX_CHARS = 2000
 const AI_COMPLETE_DEFAULT_MAX_TOKENS = 400
 const AI_COMPLETE_MAX_TOKENS_LIMIT = 2000
+const MAX_ARTIFACT_THRESHOLD = 500
 const COMPLETE_MESSAGE_ROLES = new Set(['system', 'user', 'assistant'])
+const MULTI_AGENT_FIELDS = [
+  'workers', 'worker_count', 'models', 'include_reviewer', 'backfill_registers'
+]
 const COMPLETE_INPUT_FIELDS = new Set([
   'prompt', 'system', 'messages', 'model', 'prompt_template_id', 'variables',
-  'session_id', 'task_id', 'max_tokens'
+  'session_id', 'task_id', 'max_tokens', 'include_context', ...MULTI_AGENT_FIELDS
 ])
 
 function formatAcceptanceCriteria(criteria) {
@@ -85,12 +95,39 @@ function parseAssistantDraft(content) {
   }
 }
 
+function validateMultiAgentOptions(input) {
+  for (const field of ['workers', 'worker_count']) {
+    if (input[field] !== undefined) {
+      if (!Number.isSafeInteger(input[field]) || input[field] < 1 || input[field] > 6) {
+        return `${field} must be an integer between 1 and 6.`
+      }
+    }
+  }
+  if (input.models !== undefined) {
+    if (!Array.isArray(input.models) || input.models.length === 0 || input.models.length > 6) {
+      return 'models must be a non-empty array of at most 6 model IDs.'
+    }
+    for (const entry of input.models) {
+      if (!isValidText(entry, 80) || !entry.trim()) {
+        return 'Each entry in models must be a non-empty model ID of at most 80 characters.'
+      }
+    }
+  }
+  for (const flag of ['include_reviewer', 'backfill_registers', 'include_context']) {
+    if (input[flag] !== undefined && typeof input[flag] !== 'boolean') {
+      return `${flag} must be a boolean.`
+    }
+  }
+  return undefined
+}
+
 function validateRefineInput(input, { requireModel = false } = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return 'Request body must be a JSON object.'
   }
   const draftFields = [
-    'title', ...Object.keys(TASK_TEXT_LIMITS), 'project', 'task_type', 'model', 'task_id', 'session_id'
+    'title', ...Object.keys(TASK_TEXT_LIMITS), 'project', 'task_type', 'model', 'task_id', 'session_id',
+    ...MULTI_AGENT_FIELDS
   ]
   if (Object.keys(input).some((key) => !draftFields.includes(key))) {
     return 'Request includes an unsupported task field.'
@@ -124,6 +161,8 @@ function validateRefineInput(input, { requireModel = false } = {}) {
   ) {
     return 'Session ID must be a positive integer.'
   }
+  const multiAgentError = validateMultiAgentOptions(input)
+  if (multiAgentError) return multiAgentError
   if (requireModel && input.model === undefined) {
     return 'Model is required for a background job.'
   }
@@ -217,7 +256,7 @@ function validateCompleteInput(body) {
   if (body.prompt === undefined && body.messages === undefined && body.prompt_template_id === undefined) {
     return 'Provide prompt, messages, or prompt_template_id.'
   }
-  return undefined
+  return validateMultiAgentOptions(body)
 }
 
 function renderTemplateText(text, variables) {
@@ -329,13 +368,59 @@ function settleModelBudget(modelBudget, model, gate) {
     return
   }
   modelBudget.record?.(model.id, 1, gate.scope)
-  if (gate.usage) modelBudget.recordUsage?.(model.id, gate.usage)
+  if (gate.usage) modelBudget.recordUsage?.(model.id, gate.usage, gate.scope)
 }
 
 function releaseModelBudget(modelBudget, gate) {
   if (gate?.reservationId && typeof modelBudget.release === 'function') {
     modelBudget.release(gate.reservationId)
   }
+}
+
+function compactBusText(text, maxChars = 400) {
+  const clean = String(text ?? '').replace(/\s+/g, ' ').trim()
+  if (clean.length <= maxChars) return clean
+  return `${clean.slice(0, Math.max(0, maxChars - 3))}...`
+}
+
+function tryParseStructuredJson(content) {
+  const clean = String(content ?? '').trim().replace(/^```(?:json)?\s*|\s*```$/gi, '').trim()
+  if (!clean) return null
+  try {
+    return JSON.parse(clean)
+  } catch {
+    return null
+  }
+}
+
+const VALID_REGISTER_FIELDS = new Set([
+  'objectives', 'requirements', 'decisions', 'relevant_files',
+  'important_context', 'work_active', 'next_move'
+])
+
+function extractRegistersFromJson(parsed) {
+  const raw = parsed?.registers
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const fields = {}
+  for (const [key, value] of Object.entries(raw)) {
+    if (VALID_REGISTER_FIELDS.has(key) && typeof value === 'string' && value.trim()) {
+      fields[key] = value.trim().slice(0, 1800)
+    }
+  }
+  return fields
+}
+
+function pickSecondaryModel(preferredModels, index, fallbackModel, registryModels = []) {
+  const explicit = Array.isArray(preferredModels) ? preferredModels[index] : undefined
+  if (typeof explicit === 'string' && explicit.trim()) {
+    const found = registryModels.find((entry) => entry.id === explicit.trim())
+    return found ?? { id: explicit.trim(), backend: '' }
+  }
+  const callable = registryModels.filter((entry) => entry.callable !== false && entry.id !== fallbackModel.id)
+  if (callable.length > 0) {
+    return callable[(index - 1) % callable.length]
+  }
+  return fallbackModel
 }
 
 export function createAiDraftsRouter({
@@ -346,9 +431,13 @@ export function createAiDraftsRouter({
   modelMetrics,
   modelBudget,
   fallbackChain = [],
-  fallbackAllowSessions = false
+  fallbackAllowSessions = false,
+  agentBus = null,
+  swarmRunner = null,
+  models = []
 }) {
   const router = Router()
+  const jobAgentRuns = new Map()
 
   async function selectDraftModel(input) {
     let selection
@@ -461,7 +550,13 @@ export function createAiDraftsRouter({
           signal,
           onPhase
         })
-        return { content, model: attempt.model, fallbackFrom, fallbackReason }
+        return {
+          content,
+          model: attempt.model,
+          fallbackFrom,
+          fallbackReason,
+          usage: attempt.gate?.usage
+        }
       } catch (error) {
         if (candidates.length === 0 || !isFallbackEligible(error)) {
           if (fallbackFrom) {
@@ -497,29 +592,561 @@ export function createAiDraftsRouter({
     }
   }
 
-  function submitDraftJob(input, model, selection, gate) {
-    const task = taskFromRefineInput(input)
-    const sessionSummary = input.session_id !== undefined
-      ? String(database.getAiSession(input.session_id)?.summary ?? '')
-      : ''
-    const prompt = buildTaskPrompt(task, { sessionSummary })
+  function rememberJobAgentRun(jobId, agentRunId) {
+    if (!jobId || !agentRunId) return
+    jobAgentRuns.set(jobId, agentRunId)
+    if (jobAgentRuns.size > 500) {
+      const oldest = jobAgentRuns.keys().next().value
+      if (oldest !== undefined) jobAgentRuns.delete(oldest)
+    }
+  }
 
-    const runner = async ({ signal, onPhase, retarget }) => {
-      const result = await runWithFallback({
-        primary: { model, selection, gate },
-        sessionBound: input.session_id !== undefined,
-        buildRequest: () => ({
-          messages: prompt.messages,
-          maxTokens: prompt.maxTokens,
-          task
-        }),
+  function recordRunUsageFromGate(runId, agentId, modelId, usage, calls = 1) {
+    if (!agentBus) return
+    agentBus.recordUsage({
+      runId,
+      agentId,
+      usage: {
+        calls,
+        model: modelId,
+        promptTokens: Number(usage?.promptTokens ?? 0),
+        completionTokens: Number(usage?.completionTokens ?? 0),
+        totalTokens: Number(usage?.totalTokens ?? 0)
+      }
+    })
+  }
+
+  function persistTaskRegisterFields(runId, parentAgentId, taskId, fields) {
+    if (!taskId || typeof database.applyTaskOps !== 'function' || typeof database.getTask !== 'function') {
+      return
+    }
+    const entries = Object.entries(fields ?? {}).filter(([, v]) => typeof v === 'string' && v.trim())
+    if (entries.length === 0) return
+    const task = database.getTask(taskId)
+    if (!task) return
+    database.applyTaskOps({
+      agent: { id: parentAgentId },
+      ops: [{
+        op_id: `backfill-${runId}`,
+        op: 'update_task',
+        task_id: task.id,
+        expected_updated_at: task.updated_at,
+        fields: Object.fromEntries(entries)
+      }]
+    })
+  }
+
+  /**
+   * Execute an AI operation over the SQLite star-topology agentBus so every
+   * call has explicit run provenance, parent -> worker assignments, worker -> parent
+   * results (or artifacts), optional multi-worker perspectives, and optional
+   * reviewer verification.
+   */
+  async function runThroughAgentBus({
+    taskId = null,
+    title = 'AI task',
+    goal = '',
+    primary,
+    sessionBound = false,
+    buildRequest,
+    multiAgentInput = {},
+    signal,
+    onPhase,
+    retarget,
+    onRunCreated
+  }) {
+    if (!agentBus) {
+      const direct = await runWithFallback({
+        primary,
+        sessionBound,
+        buildRequest: () => buildRequest({ workerIndex: 0, workerCount: 1 }),
         signal,
         onPhase,
         retarget
       })
+      return { ...direct, agentRunId: null, extraOutputs: [], reviewerResult: null }
+    }
+
+    const requestedWorkers = multiAgentInput.workers ?? multiAgentInput.worker_count ?? 1
+    const workerCount = Math.min(6, Math.max(1, Number(requestedWorkers) || 1))
+    const includeReviewer = multiAgentInput.include_reviewer === true
+    const backfillEnabled = multiAgentInput.backfill_registers !== false
+    const registryModels = Array.isArray(models) && models.length > 0 ? models : []
+
+    const agentsSpec = [
+      {
+        role: 'parent',
+        name: 'parent',
+        model: primary.model.id,
+        ...(primary.model.backend ? { backend: primary.model.backend } : {})
+      },
+      {
+        role: 'worker',
+        name: 'worker-1',
+        model: primary.model.id,
+        ...(primary.model.backend ? { backend: primary.model.backend } : {})
+      }
+    ]
+    for (let index = 1; index < workerCount; index += 1) {
+      const candidate = pickSecondaryModel(multiAgentInput.models, index, primary.model, registryModels)
+      agentsSpec.push({
+        role: 'worker',
+        name: `worker-${index + 1}`,
+        model: candidate.id,
+        ...(candidate.backend ? { backend: candidate.backend } : {})
+      })
+    }
+    if (includeReviewer) {
+      const reviewerModel = pickSecondaryModel(
+        multiAgentInput.models,
+        workerCount,
+        primary.model,
+        registryModels
+      )
+      agentsSpec.push({
+        role: 'reviewer',
+        name: 'reviewer',
+        model: reviewerModel.id,
+        ...(reviewerModel.backend ? { backend: reviewerModel.backend } : {})
+      })
+    }
+
+    const created = agentBus.createRun({
+      ...(taskId !== undefined && taskId !== null ? { task_id: taskId } : {}),
+      model_plan: { workerCount, includeReviewer, primaryModel: primary.model.id },
+      plan: {
+        title: compactBusText(title, 120),
+        workerCount,
+        includeReviewer,
+        hasSwarmRunner: Boolean(swarmRunner)
+      },
+      agents: agentsSpec
+    })
+    if (created.error) {
+      const direct = await runWithFallback({
+        primary,
+        sessionBound,
+        buildRequest: () => buildRequest({ workerIndex: 0, workerCount: 1 }),
+        signal,
+        onPhase,
+        retarget
+      })
+      return { ...direct, agentRunId: null, extraOutputs: [], reviewerResult: null }
+    }
+
+    const runId = created.id
+    onRunCreated?.(runId)
+    const parentAgent = created.agents.find((entry) => entry.role === 'parent')
+    const workers = created.agents.filter((entry) => entry.role === 'worker')
+    const reviewerAgent = created.agents.find((entry) => entry.role === 'reviewer') ?? null
+
+    agentBus.startRun(runId)
+    agentBus.transitionRun(runId, 'dispatching')
+    agentBus.transitionRun(runId, 'running')
+
+    const assignGoal = compactBusText(goal || title, 600)
+    const extraOutputs = []
+    let primaryResult = null
+    let reviewerResult = null
+
+    try {
+      const w1 = workers[0]
+      const assigned1 = agentBus.sendMessage({
+        agentId: parentAgent.id,
+        runId,
+        to: w1.name,
+        kind: 'assign',
+        preReserved: true,
+        payload: { sliceIndex: 1, title: compactBusText(title, 120), goal: assignGoal },
+        idempotencyKey: `assign-${w1.name}-1`,
+        correlationId: 'slice-1'
+      })
+      if (assigned1.error) {
+        throw Object.assign(
+          new Error(assigned1.error.body?.error || 'Failed to dispatch worker assignment.'),
+          { status: assigned1.error.status || 429 }
+        )
+      }
+
+      const claimed1 = agentBus.claimInbox({ agentId: w1.id, runId, limit: 1 })
+      const assignMsg1 = claimed1.messages?.[0]
+      if (assignMsg1) agentBus.ackMessage({ agentId: w1.id, messageId: assignMsg1.id })
+
+      primaryResult = await runWithFallback({
+        primary,
+        sessionBound,
+        buildRequest: () => ({
+          ...buildRequest({ workerIndex: 0, workerCount }),
+          sessionKey: w1.promptCacheKey
+        }),
+        signal,
+        onPhase,
+        retarget: (info) => {
+          retarget?.(info)
+          agentBus.switchAgentModel({
+            runId,
+            agentId: w1.id,
+            model: info.model,
+            backend: info.backend ?? '',
+            reason: info.fallbackReason ?? ''
+          })
+        }
+      })
+
+      recordRunUsageFromGate(runId, w1.id, primaryResult.model.id, primaryResult.usage, 1)
+      const artifactRefs1 = []
+      if (primaryResult.content.length > MAX_ARTIFACT_THRESHOLD && typeof database.saveAgentArtifact === 'function') {
+        const artifact = database.saveAgentArtifact({
+          kind: 'worker_output',
+          path: 'slice-1',
+          producer: w1.name,
+          content: primaryResult.content
+        })
+        artifactRefs1.push(artifact.contentHash)
+      }
+      agentBus.sendMessage({
+        agentId: w1.id,
+        runId,
+        to: 'parent',
+        kind: 'result',
+        payload: {
+          sliceIndex: 1,
+          summary: compactBusText(primaryResult.content, 400),
+          status: 'done',
+          ...(assignMsg1 ? { assignSeq: assignMsg1.seq } : {})
+        },
+        artifactRefs: artifactRefs1,
+        idempotencyKey: `result-${w1.name}-1`,
+        correlationId: 'slice-1'
+      })
+      if (assignMsg1) {
+        agentBus.completeMessage({
+          agentId: w1.id,
+          messageId: assignMsg1.id,
+          result: { summary: compactBusText(primaryResult.content, 400) }
+        })
+      }
+      database.updateAgent(w1.id, { state: 'done' })
+
+      for (let index = 1; index < workers.length; index += 1) {
+        const worker = workers[index]
+        const selectedExtra = await selectDraftModel({ model: worker.model })
+        if (selectedExtra.error) continue
+
+        const sent = agentBus.sendMessage({
+          agentId: parentAgent.id,
+          runId,
+          to: worker.name,
+          kind: 'assign',
+          preReserved: true,
+          payload: {
+            sliceIndex: index + 1,
+            title: `${compactBusText(title, 90)} (perspective ${index + 1})`,
+            goal: assignGoal
+          },
+          idempotencyKey: `assign-${worker.name}-1`,
+          correlationId: `slice-${index + 1}`
+        })
+        if (sent.error) {
+          releaseModelBudget(modelBudget, selectedExtra.gate)
+          selectedExtra.selection.release({ inferenceStarted: false })
+          continue
+        }
+
+        const claimed = agentBus.claimInbox({ agentId: worker.id, runId, limit: 1 })
+        const msg = claimed.messages?.[0]
+        if (msg) agentBus.ackMessage({ agentId: worker.id, messageId: msg.id })
+
+        try {
+          const workerRes = await runWithFallback({
+            primary: selectedExtra,
+            sessionBound,
+            buildRequest: () => ({
+              ...buildRequest({
+                workerIndex: index,
+                workerCount,
+                primaryContent: primaryResult.content,
+                extraOutputs
+              }),
+              sessionKey: worker.promptCacheKey
+            }),
+            signal,
+            onPhase
+          })
+          recordRunUsageFromGate(runId, worker.id, workerRes.model.id, workerRes.usage, 1)
+          extraOutputs.push({
+            worker: worker.name,
+            model: workerRes.model.id,
+            content: workerRes.content
+          })
+          agentBus.sendMessage({
+            agentId: worker.id,
+            runId,
+            to: 'parent',
+            kind: 'result',
+            payload: {
+              sliceIndex: index + 1,
+              summary: compactBusText(workerRes.content, 400),
+              status: 'done',
+              ...(msg ? { assignSeq: msg.seq } : {})
+            },
+            idempotencyKey: `result-${worker.name}-1`,
+            correlationId: `slice-${index + 1}`
+          })
+          if (msg) {
+            agentBus.completeMessage({
+              agentId: worker.id,
+              messageId: msg.id,
+              result: { summary: compactBusText(workerRes.content, 400) }
+            })
+          }
+          database.updateAgent(worker.id, { state: 'done' })
+        } catch (workerErr) {
+          if (msg) {
+            agentBus.failMessage({
+              agentId: worker.id,
+              messageId: msg.id,
+              error: workerErr.message || 'Worker failed.',
+              retryable: false
+            })
+          }
+          agentBus.sendMessage({
+            agentId: worker.id,
+            runId,
+            to: 'parent',
+            kind: 'error',
+            payload: { sliceIndex: index + 1, error: workerErr.message || 'Worker failed.' },
+            idempotencyKey: `error-${worker.name}-1`,
+            correlationId: `slice-${index + 1}`
+          })
+          database.updateAgent(worker.id, { state: 'failed' })
+        }
+      }
+
+      if (reviewerAgent) {
+        const selectedReviewer = await selectDraftModel({ model: reviewerAgent.model })
+        if (!selectedReviewer.error) {
+          agentBus.transitionRun(runId, 'reviewing')
+          const combinedOutputs = [
+            `worker-1: ${compactBusText(primaryResult.content, 500)}`,
+            ...extraOutputs.map((entry) => `${entry.worker}: ${compactBusText(entry.content, 500)}`)
+          ]
+          agentBus.sendMessage({
+            agentId: parentAgent.id,
+            runId,
+            to: reviewerAgent.name,
+            kind: 'handoff',
+            payload: {
+              refs: ['#2'],
+              slices: combinedOutputs,
+              summary: `Review ${combinedOutputs.length} worker output(s).`
+            },
+            idempotencyKey: `handoff-review-${runId}`,
+            correlationId: 'review'
+          })
+          const claimedReview = agentBus.claimInbox({ agentId: reviewerAgent.id, runId, limit: 1 })
+          const reviewMsg = claimedReview.messages?.[0]
+          if (reviewMsg) agentBus.ackMessage({ agentId: reviewerAgent.id, messageId: reviewMsg.id })
+
+          try {
+            const revCall = await runWithFallback({
+              primary: selectedReviewer,
+              sessionBound: false,
+              buildRequest: () => ({
+                messages: [
+                  {
+                    role: 'system',
+                    content: 'You are the reviewer. Verify the worker outputs for accuracy and return JSON {"approved": boolean, "summary": string}.'
+                  },
+                  {
+                    role: 'user',
+                    content: combinedOutputs.join('\n')
+                  }
+                ],
+                maxTokens: 300,
+                sessionKey: reviewerAgent.promptCacheKey
+              }),
+              signal,
+              onPhase
+            })
+            recordRunUsageFromGate(runId, reviewerAgent.id, revCall.model.id, revCall.usage, 1)
+            const parsedVerdict = tryParseStructuredJson(revCall.content)
+            const approved = parsedVerdict?.approved === false ? false : true
+            const verdictSummary = typeof parsedVerdict?.summary === 'string' && parsedVerdict.summary.trim()
+              ? compactBusText(parsedVerdict.summary, 400)
+              : compactBusText(revCall.content, 400)
+            reviewerResult = { approved, summary: verdictSummary, content: revCall.content, parsed: parsedVerdict }
+            agentBus.sendMessage({
+              agentId: reviewerAgent.id,
+              runId,
+              to: 'parent',
+              kind: 'verdict',
+              payload: {
+                approved,
+                summary: verdictSummary,
+                ...(reviewMsg ? { handoffSeq: reviewMsg.seq } : {})
+              },
+              idempotencyKey: `verdict-${runId}`,
+              correlationId: 'review'
+            })
+            if (reviewMsg) {
+              agentBus.completeMessage({
+                agentId: reviewerAgent.id,
+                messageId: reviewMsg.id,
+                result: { approved, summary: verdictSummary }
+              })
+            }
+            database.updateAgent(reviewerAgent.id, { state: 'done' })
+          } catch (revErr) {
+            if (reviewMsg) {
+              agentBus.failMessage({
+                agentId: reviewerAgent.id,
+                messageId: reviewMsg.id,
+                error: revErr.message || 'Reviewer failed.',
+                retryable: false
+              })
+            }
+            database.updateAgent(reviewerAgent.id, { state: 'failed' })
+          }
+        }
+      }
+
+      const parentClaimed = agentBus.claimInbox({ agentId: parentAgent.id, runId, limit: 20 })
+      for (const message of parentClaimed.messages ?? []) {
+        agentBus.ackMessage({ agentId: parentAgent.id, messageId: message.id })
+        agentBus.completeMessage({ agentId: parentAgent.id, messageId: message.id, result: { recorded: true } })
+      }
+
+      if (taskId && backfillEnabled) {
+        const registerFields = {
+          ...extractRegistersFromJson(tryParseStructuredJson(primaryResult.content)),
+          ...(reviewerResult?.parsed ? extractRegistersFromJson(reviewerResult.parsed) : {})
+        }
+        persistTaskRegisterFields(runId, parentAgent.id, taskId, registerFields)
+      }
+
+      agentBus.checkpointRun({
+        agentId: parentAgent.id,
+        runId,
+        checkpoint: {
+          workerCount,
+          completedOutputs: 1 + extraOutputs.length,
+          ...(reviewerResult ? { reviewed: true, approved: reviewerResult.approved } : {})
+        }
+      })
+      database.updateAgent(parentAgent.id, { state: 'done' })
+      agentBus.transitionRun(runId, 'completed', {
+        result: { summary: compactBusText(primaryResult.content, 400) }
+      })
+
+      return {
+        ...primaryResult,
+        agentRunId: runId,
+        extraOutputs,
+        reviewerResult
+      }
+    } catch (error) {
+      const current = database.getAgentRun(runId)
+      if (current && !['completed', 'failed', 'cancelled'].includes(current.state)) {
+        for (const msg of database.listAgentMessages(runId)) {
+          if (msg.toAgentId === workers[0].id && ['delivered', 'leased', 'acked'].includes(msg.state)) {
+            agentBus.failMessage({
+              agentId: workers[0].id,
+              messageId: msg.id,
+              error: error?.message || 'Agent call failed.',
+              retryable: false
+            })
+          }
+        }
+        agentBus.sendMessage({
+          agentId: workers[0].id,
+          runId,
+          to: 'parent',
+          kind: 'error',
+          payload: { sliceIndex: 1, error: error?.message || 'Agent call failed.' },
+          idempotencyKey: `error-${workers[0].name}-1`,
+          correlationId: 'slice-1'
+        })
+        agentBus.transitionRun(runId, 'failed', { error: error?.message || 'Agent call failed.' })
+      }
+      throw error
+    }
+  }
+
+  function submitDraftJob(input, model, selection, gate) {
+    const rawTask = taskFromRefineInput(input)
+    const storedTask = input.task_id !== undefined ? database.getTask(input.task_id) : null
+    const candidateTask = storedTask
+      ? {
+          ...storedTask,
+          ...Object.fromEntries(
+            Object.entries(rawTask).filter(([key, value]) => (
+              key === 'title' ? Boolean(value) : value !== ''
+            ))
+          ),
+          id: storedTask.id
+        }
+      : rawTask
+    const { task, fileRegisters, folderRegisters } = backfillTaskRegisters(database, candidateTask, {
+      persist: Boolean(input.task_id !== undefined && input.backfill_registers !== false)
+    })
+    const { sessionSummary } = resolveTaskSessionContext(database, {
+      taskId: input.task_id,
+      sessionId: input.session_id
+    })
+    const extraRegisterContext = formatAgentContextBlock({
+      fileRegisters,
+      folderRegisters,
+      maxChars: 500
+    })
+    const combinedSummary = [sessionSummary, extraRegisterContext].filter(Boolean).join('\n')
+    const prompt = buildTaskPrompt(task, { sessionSummary: combinedSummary })
+
+    let jobRef = null
+    const runner = async ({ signal, onPhase, retarget }) => {
+      const result = await runThroughAgentBus({
+        taskId: input.task_id ?? null,
+        title: `Refine task: ${task.title}`,
+        goal: task.title,
+        primary: { model, selection, gate },
+        sessionBound: input.session_id !== undefined,
+        multiAgentInput: input,
+        signal,
+        onPhase,
+        retarget,
+        onRunCreated: (agentRunId) => rememberJobAgentRun(jobRef?.id, agentRunId),
+        buildRequest: ({ workerIndex }) => {
+          if (workerIndex === 0) {
+            return {
+              messages: prompt.messages,
+              maxTokens: prompt.maxTokens,
+              task
+            }
+          }
+          return {
+            messages: [
+              prompt.messages[0],
+              {
+                role: 'user',
+                content: `${prompt.messages[1].content}\nProvide an independent alternative refinement as worker-${workerIndex + 1}.`
+              }
+            ],
+            maxTokens: prompt.maxTokens,
+            task
+          }
+        }
+      })
+      rememberJobAgentRun(jobRef?.id, result.agentRunId)
+
+      const reviewedDraft = result.reviewerResult?.parsed
+      const candidateContent = (
+        typeof reviewedDraft?.description === 'string' && reviewedDraft?.acceptance_criteria
+          ? result.reviewerResult.content
+          : result.content
+      )
 
       try {
-        return parseAssistantDraft(result.content)
+        return parseAssistantDraft(candidateContent)
       } catch (error) {
         console.error('Could not parse local AI response:', error)
         throw Object.assign(
@@ -529,13 +1156,14 @@ export function createAiDraftsRouter({
       }
     }
 
-    return jobStore.submit({
+    jobRef = jobStore.submit({
       model: model.id,
       backend: model.backend,
       title: task.title,
       taskId: input.task_id,
       runner
     })
+    return jobRef
   }
 
   async function startDraftJob(input) {
@@ -590,9 +1218,14 @@ export function createAiDraftsRouter({
 
     const job = await jobStore.wait(started.job.id)
     if (job.state === 'done') {
+      const agentRunId = jobAgentRuns.get(started.job.id)
       // The job id travels with the draft so clients can hand it back as
       // source_job_id and record the drafting provenance on the created task.
-      return response.json({ ...job.result, jobId: started.job.id })
+      return response.json({
+        ...job.result,
+        jobId: started.job.id,
+        ...(agentRunId ? { agentRunId } : {})
+      })
     }
     if (job.state === 'cancelled') {
       return response.status(499).json({ error: job.error || 'The draft was cancelled.' })
@@ -655,8 +1288,9 @@ export function createAiDraftsRouter({
     // A task-linked run executes inside the task's worktree when one is live,
     // so AI-generated changes stay out of the main checkout.
     let worktreePath
+    let linkedTask = null
     if (body.task_id !== undefined) {
-      const linkedTask = database.getTask(body.task_id)
+      linkedTask = database.getTask(body.task_id)
       if (linkedTask?.worktree_path && existsSync(linkedTask.worktree_path)) {
         worktreePath = linkedTask.worktree_path
       }
@@ -673,6 +1307,29 @@ export function createAiDraftsRouter({
     }
 
     const { messages, newMessages } = buildCompleteMessages(body, template, session)
+    if (body.include_context === true || body.backfill_registers === true) {
+      const backfilled = linkedTask
+        ? backfillTaskRegisters(database, linkedTask, {
+            persist: Boolean(body.backfill_registers === true)
+          })
+        : { task: null, fileRegisters: [], folderRegisters: [] }
+      const { sessionSummary } = !session && linkedTask
+        ? resolveTaskSessionContext(database, { taskId: linkedTask.id })
+        : { sessionSummary: '' }
+      const contextBlock = formatAgentContextBlock({
+        task: backfilled.task,
+        fileRegisters: backfilled.fileRegisters,
+        folderRegisters: backfilled.folderRegisters,
+        sessionSummary
+      })
+      if (contextBlock) {
+        if (messages[0]?.role === 'system') {
+          messages[0] = { role: 'system', content: `${messages[0].content}\n\nWorkspace context:\n${contextBlock}` }
+        } else {
+          messages.unshift({ role: 'system', content: `Workspace context:\n${contextBlock}` })
+        }
+      }
+    }
 
     const selected = await selectDraftModel({ model: body.model })
     if (selected.error) {
@@ -685,31 +1342,47 @@ export function createAiDraftsRouter({
       : 'AI chat'
 
     const runner = async ({ signal, onPhase, retarget }) => {
-      const result = await runWithFallback({
+      const result = await runThroughAgentBus({
+        taskId: body.task_id ?? null,
+        title: jobTitle,
+        goal: typeof body.prompt === 'string' && body.prompt.trim() ? body.prompt.trim() : jobTitle,
         primary: { model, selection, gate },
         sessionBound: Boolean(session),
-        buildRequest: () => ({
-          messages,
+        multiAgentInput: body,
+        signal,
+        onPhase,
+        retarget,
+        buildRequest: ({ workerIndex, workerCount }) => ({
+          messages: workerIndex === 0
+            ? messages
+            : [
+                ...messages,
+                {
+                  role: 'user',
+                  content: `Provide worker ${workerIndex + 1}/${workerCount} verification or complementary details concisely.`
+                }
+              ],
           maxTokens,
           task: { title: jobTitle, project: 'workspace', task_type: 'chore' },
           ...(worktreePath ? { worktreePath } : {})
-        }),
-        signal,
-        onPhase,
-        retarget
+        })
       })
+      const finalContent = typeof result.reviewerResult?.parsed?.content === 'string'
+        ? result.reviewerResult.parsed.content
+        : result.content
       if (session) {
         for (const message of newMessages) {
           if (message.role === 'user' || message.role === 'assistant') {
             database.addAiMessage(session.id, message)
           }
         }
-        database.addAiMessage(session.id, { role: 'assistant', content: result.content })
+        database.addAiMessage(session.id, { role: 'assistant', content: finalContent })
       }
       return {
-        content: result.content,
+        content: finalContent,
         model: result.model.id,
         backend: result.model.backend,
+        ...(result.agentRunId ? { agentRunId: result.agentRunId } : {}),
         ...(result.fallbackFrom
           ? {
               fallbackFrom: result.fallbackFrom,
@@ -742,6 +1415,7 @@ export function createAiDraftsRouter({
         model: result.model ?? finished.model ?? model.id,
         backend: result.backend ?? finished.backend ?? model.backend,
         jobId: job.id,
+        ...(result.agentRunId ? { agentRunId: result.agentRunId } : {}),
         ...(result.fallbackFrom || finished.fallbackFrom
           ? {
               fallbackFrom: result.fallbackFrom ?? finished.fallbackFrom,
@@ -764,6 +1438,10 @@ export function createAiDraftsRouter({
     const body = request.body && typeof request.body === 'object' && !Array.isArray(request.body)
       ? request.body
       : {}
+    const multiAgentError = validateMultiAgentOptions(body)
+    if (multiAgentError) {
+      return response.status(400).json({ error: multiAgentError })
+    }
     const requestedModel = typeof body.model === 'string' ? body.model.trim() : undefined
 
     const summary = {
@@ -800,23 +1478,36 @@ export function createAiDraftsRouter({
     }
     const { model, selection, gate } = selected
 
-    // The improvement run is a job like any other model call, so it records
-    // model provenance, honors budget and cooldown, and can be inspected or
-    // cancelled through the job endpoints.
+    // The improvement run executes on agentBus as a tracked multi-agent run
+    // inside jobStore, recording both model job provenance and agentRunId.
     const runner = async ({ signal, onPhase, retarget }) => {
-      const result = await runWithFallback({
+      const result = await runThroughAgentBus({
+        title: 'Improve workspace',
+        goal: `Suggest workspace improvements from tracking summary (${JSON.stringify(summary)}).`,
         primary: { model, selection, gate },
         sessionBound: false,
-        buildRequest: () => ({
-          messages,
-          maxTokens: 400,
-          task: { title: 'Improve workspace', project: 'workspace', task_type: 'chore' }
-        }),
+        multiAgentInput: body,
         signal,
         onPhase,
-        retarget
+        retarget,
+        buildRequest: ({ workerIndex, workerCount }) => ({
+          messages: workerIndex === 0
+            ? messages
+            : [
+                messages[0],
+                {
+                  role: 'user',
+                  content: `${messages[1].content} (Worker ${workerIndex + 1}/${workerCount}: focus on non-overlapping reliability, testing, or documentation improvements.)`
+                }
+              ],
+          maxTokens: 400,
+          task: { title: 'Improve workspace', project: 'workspace', task_type: 'chore' }
+        })
       })
-      return result.content
+      return {
+        contents: [result.content, ...result.extraOutputs.map((entry) => entry.content)],
+        agentRunId: result.agentRunId
+      }
     }
 
     let job
@@ -843,14 +1534,28 @@ export function createAiDraftsRouter({
         ...(finished.retryAfter !== undefined ? { retryAfter: finished.retryAfter } : {})
       })
     }
-    const content = finished.result
 
-    let suggestions = []
-    try {
-      const parsed = JSON.parse(content.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''))
-      if (Array.isArray(parsed)) suggestions = parsed
-    } catch {
-      suggestions = [{ title: 'Review AI improvement output', description: content, priority: 'medium', rationale: 'Model output was not JSON.' }]
+    const outputPayload = finished.result && typeof finished.result === 'object'
+      ? finished.result
+      : { contents: [finished.result], agentRunId: null }
+    const rawContents = Array.isArray(outputPayload.contents) ? outputPayload.contents : [outputPayload]
+    const agentRunId = outputPayload.agentRunId || ''
+
+    const suggestions = []
+    for (const content of rawContents) {
+      const parsed = tryParseStructuredJson(content)
+      if (Array.isArray(parsed)) {
+        suggestions.push(...parsed)
+      } else if (parsed && Array.isArray(parsed.proposals)) {
+        suggestions.push(...parsed.proposals)
+      } else if (suggestions.length === 0) {
+        suggestions.push({
+          title: 'Review AI improvement output',
+          description: String(content ?? ''),
+          priority: 'medium',
+          rationale: 'Model output was not JSON.'
+        })
+      }
     }
 
     // Suggestions persist as proposals, never tasks: the improve run is a
@@ -859,10 +1564,17 @@ export function createAiDraftsRouter({
     // re-runs do not duplicate pending work.
     const { created, skipped } = database.createTaskProposals({
       proposals: suggestions,
-      jobId: job.id
+      jobId: job.id,
+      agentRunId
     })
 
-    response.json({ proposals: created, skipped, summary, jobId: job.id })
+    response.json({
+      proposals: created,
+      skipped,
+      summary,
+      jobId: job.id,
+      ...(agentRunId ? { agentRunId } : {})
+    })
   })
 
   return router

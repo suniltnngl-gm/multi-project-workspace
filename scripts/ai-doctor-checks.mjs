@@ -4,7 +4,10 @@ import {
   createModelRegistry,
   modelQuotaProfiles
 } from '../apps/api/src/modelRegistry.js'
-import { resolveQuotaProfiles } from '../apps/api/src/modelBudget.js'
+import {
+  resolveLimitsForScope,
+  resolveQuotaProfiles
+} from '../apps/api/src/modelBudget.js'
 import { ROOT_DIR } from './env.mjs'
 
 const DEFAULT_DATABASE_PATH = resolve(ROOT_DIR, 'apps/api/data/workspace.sqlite')
@@ -48,7 +51,7 @@ export function checkQuotaConfiguration(models, { env = process.env } = {}) {
 
   const checks = []
   for (const model of models.filter((entry) => entry.remote)) {
-    const limits = profiles.get(model.id)
+    const limits = resolveLimitsForScope(profiles, model.id, model.cli?.model)
     const billing = model.billingCategory
       ? ` Billing: ${model.billingCategory}; quotas still apply.`
       : ''

@@ -6,7 +6,11 @@
 // Work State: Completed: Extracted from app.js as task #45; offline roster fields added as task #43; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { Router } from 'express'
 import { publicModelDefinition } from '../modelRegistry.js'
-import { createOpenCodeRosterCacheFromEnv } from '../opencodeDiscovery.js'
+import {
+  createAgyRosterCacheFromEnv,
+  createOpenCodeRosterCacheFromEnv,
+  groupOpenCodeModelsByProvider
+} from '../opencodeDiscovery.js'
 import { providerSnapshots } from '../providerQuota.js'
 
 export function createModelsRouter({
@@ -14,7 +18,8 @@ export function createModelsRouter({
   modelMetrics,
   modelBudget,
   scheduler,
-  opencodeRosterCache
+  opencodeRosterCache,
+  agyRosterCache
 }) {
   const router = Router()
 
@@ -40,8 +45,8 @@ export function createModelsRouter({
     })
   })
 
-  // The OpenCode roster is discovered from the local CLI on demand and cached;
-  // tests inject a cache so the real CLI never runs in the suite.
+  // CLI rosters are discovered from the local CLIs on demand and cached;
+  // tests inject caches so the real CLIs never run in the suite.
   let resolvedOpenCodeRosterCache = null
   const getOpenCodeRosterCache = () => {
     if (opencodeRosterCache) return opencodeRosterCache
@@ -51,17 +56,32 @@ export function createModelsRouter({
     return resolvedOpenCodeRosterCache
   }
 
-  router.get('/api/models/opencode', async (request, response) => {
-    const slot = models.find((model) => model.id === 'opencode')
+  let resolvedAgyRosterCache = null
+  const getAgyRosterCache = () => {
+    if (agyRosterCache) return agyRosterCache
+    if (resolvedAgyRosterCache === null) {
+      resolvedAgyRosterCache = createAgyRosterCacheFromEnv()
+    }
+    return resolvedAgyRosterCache
+  }
+
+  async function respondWithCliRoster(request, response, {
+    slotId,
+    missingMessage,
+    readErrorMessage,
+    getCache,
+    extraFields
+  }) {
+    const slot = models.find((model) => model.id === slotId)
     if (!slot) {
-      return response.status(404).json({ error: 'The OpenCode backend is not registered.' })
+      return response.status(404).json({ error: missingMessage })
     }
     const refresh = ['1', 'true', 'yes'].includes(String(request.query.refresh ?? '').toLowerCase())
     let roster
     try {
-      roster = await getOpenCodeRosterCache().get({ refresh })
-    } catch (error) {
-      return response.status(500).json({ error: 'Could not read the OpenCode model roster.' })
+      roster = await getCache().get({ refresh })
+    } catch {
+      return response.status(500).json({ error: readErrorMessage })
     }
     const model = slot.cli?.model ?? null
     return response.json({
@@ -72,10 +92,29 @@ export function createModelsRouter({
       fetchedAt: roster.fetchedAt,
       stale: roster.stale === true,
       source: roster.source ?? 'cli',
+      ...(extraFields ? extraFields(model, roster) : {}),
       ...(roster.discoveryError ? { discoveryError: roster.discoveryError } : {}),
       ...(roster.ok ? {} : { error: roster.error })
     })
-  })
+  }
+
+  router.get('/api/models/opencode', (request, response) => respondWithCliRoster(request, response, {
+    slotId: 'opencode',
+    missingMessage: 'The OpenCode backend is not registered.',
+    readErrorMessage: 'Could not read the OpenCode model roster.',
+    getCache: getOpenCodeRosterCache,
+    extraFields: (model, roster) => ({
+      activeProvider: typeof model === 'string' && model.includes('/') ? model.split('/')[0] : null,
+      providers: groupOpenCodeModelsByProvider(roster.models)
+    })
+  }))
+
+  router.get('/api/models/agy', (request, response) => respondWithCliRoster(request, response, {
+    slotId: 'agy',
+    missingMessage: 'The Antigravity backend is not registered.',
+    readErrorMessage: 'Could not read the Antigravity model roster.',
+    getCache: getAgyRosterCache
+  }))
 
   router.get('/api/local-ai/status', async (_request, response) => {
     try {

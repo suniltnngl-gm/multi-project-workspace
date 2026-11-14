@@ -4,7 +4,10 @@ import { createApp } from './app.js'
 import { createDatabase } from './database.js'
 import { createModelBudget } from './modelBudget.js'
 import { createModelRegistry, modelQuotaProfiles } from './modelRegistry.js'
-import { createOpenCodeRosterCacheFromEnv } from './opencodeDiscovery.js'
+import {
+  createAgyRosterCacheFromEnv,
+  createOpenCodeRosterCacheFromEnv
+} from './opencodeDiscovery.js'
 import {
   createSensorCycleScheduler,
   resolveCycleConfig,
@@ -29,12 +32,13 @@ const port = Number(process.env.PORT || 3001)
 const host = process.env.HOST || '127.0.0.1'
 const database = createDatabase(undefined, { rootDir: resolveRepositoryRoot() })
 const opencodeRosterCache = createOpenCodeRosterCacheFromEnv()
+const agyRosterCache = createAgyRosterCacheFromEnv()
 const models = createModelRegistry()
 const modelBudget = createModelBudget({
   repository: database,
   profiles: modelQuotaProfiles(models)
 })
-const app = createApp(database, { opencodeRosterCache, models, modelBudget })
+const app = createApp(database, { opencodeRosterCache, agyRosterCache, models, modelBudget })
 const cycleConfig = resolveCycleConfig()
 const sensorCycles = createSensorCycleScheduler({
   intervalMs: cycleConfig.intervalMs,
@@ -52,6 +56,7 @@ const server = app.listen(port, host, () => {
   // Best-effort warm-up so the first roster request sees a fresh result; a
   // missing or failing CLI only marks the roster unavailable.
   opencodeRosterCache.get()
+  agyRosterCache.get()
   sensorCycles.start()
   if (cycleConfig.intervalMs > 0) {
     console.log(

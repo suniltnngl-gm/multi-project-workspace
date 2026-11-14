@@ -56,6 +56,7 @@ const LEGACY_LIMITS = [
   ['colab-3b', 'COLAB_AI_MAX_REQUESTS_PER_DAY'],
   ['kaggle-3b', 'KAGGLE_AI_MAX_REQUESTS_PER_DAY'],
   ['opencode', 'OPENCODE_AI_MAX_REQUESTS_PER_DAY'],
+  ['agy', 'AGY_AI_MAX_REQUESTS_PER_DAY'],
   ['ollama', 'OLLAMA_AI_MAX_REQUESTS_PER_DAY']
 ]
 
@@ -239,10 +240,49 @@ function parseProfileJson(raw) {
   return result
 }
 
+function buildComputeAndRequestLimits(env, entries) {
+  const specs = []
+  for (const spec of entries) {
+    const limit = readLimit(env, spec.key)
+    if (limit === null) continue
+    const hours = spec.hoursEnv
+      ? Number(env[spec.hoursEnv] === undefined || env[spec.hoursEnv] === '' ? spec.defaultHours : env[spec.hoursEnv])
+      : undefined
+    if (spec.hoursEnv && (!Number.isFinite(hours) || hours <= 0)) {
+      throw new Error(`${spec.hoursEnv} must be a positive number.`)
+    }
+    specs.push({
+      unit: spec.unit,
+      limit,
+      window: spec.window,
+      reset: 'fixed',
+      timezone: 'UTC',
+      ...(hours !== undefined ? { hours } : {})
+    })
+  }
+  return specs
+}
+
+export function resolveLimitsForScope(configs, id, scope) {
+  if (!configs) return undefined
+  if (scope) {
+    if (configs.has(`${id}@${scope}`)) return configs.get(`${id}@${scope}`)
+    if (configs.has(scope)) return configs.get(scope)
+    const slash = String(scope).indexOf('/')
+    if (slash > 0) {
+      const provider = scope.slice(0, slash)
+      if (configs.has(`${id}@${provider}`)) return configs.get(`${id}@${provider}`)
+      if (configs.has(provider)) return configs.get(provider)
+    }
+  }
+  return configs.get(id)
+}
+
 /**
  * Normalize the active quota profiles from an explicit registry profile map,
- * AI_QUOTA_PROFILES, and the legacy daily shorthand. Returns a Map keyed by
- * model id; callers can use it for diagnostics without creating a budget.
+ * AI_QUOTA_PROFILES, and the legacy daily/compute shorthands. Returns a Map
+ * keyed by model (or scoped `model@submodel`) id; callers can use it for
+ * diagnostics without creating a budget.
  */
 export function resolveQuotaProfiles({ env = process.env, profiles } = {}) {
   let result
@@ -264,6 +304,30 @@ export function resolveQuotaProfiles({ env = process.env, profiles } = {}) {
     for (const [id, limits] of parseProfileJson(env.AI_QUOTA_PROFILES)) {
       if (!result.has(id)) result.set(id, limits)
     }
+  }
+
+  if (!result.has('colab-3b')) {
+    const colabLimits = buildComputeAndRequestLimits(env, [
+      {
+        key: 'COLAB_AI_MAX_COMPUTE_SECONDS_PER_SESSION',
+        unit: 'compute_seconds',
+        window: 'session',
+        hoursEnv: 'COLAB_AI_SESSION_HOURS',
+        defaultHours: 12
+      },
+      { key: 'COLAB_AI_MAX_COMPUTE_SECONDS_PER_DAY', unit: 'compute_seconds', window: 'day' },
+      { key: 'COLAB_AI_MAX_REQUESTS_PER_DAY', unit: 'requests', window: 'day' }
+    ])
+    if (colabLimits.length > 0) result.set('colab-3b', normalizeLimits('colab-3b', colabLimits))
+  }
+
+  if (!result.has('kaggle-3b')) {
+    const kaggleLimits = buildComputeAndRequestLimits(env, [
+      { key: 'KAGGLE_AI_MAX_COMPUTE_SECONDS_PER_WEEK', unit: 'compute_seconds', window: 'week' },
+      { key: 'KAGGLE_AI_MAX_COMPUTE_SECONDS_PER_DAY', unit: 'compute_seconds', window: 'day' },
+      { key: 'KAGGLE_AI_MAX_REQUESTS_PER_DAY', unit: 'requests', window: 'day' }
+    ])
+    if (kaggleLimits.length > 0) result.set('kaggle-3b', normalizeLimits('kaggle-3b', kaggleLimits))
   }
 
   for (const [id, key] of LEGACY_LIMITS) {
@@ -522,7 +586,7 @@ export function createModelBudget({
   }
 
   function snapshot(id, scope) {
-    const limits = configs.get(id)
+    const limits = resolveLimitsForScope(configs, id, scope)
     const observedId = scope ? `${id}@${scope}` : id
     const at = now()
     const pending = pendingReservations(id, scope, at)
@@ -533,18 +597,19 @@ export function createModelBudget({
     const hasObserved = observedRequests > 0 || cap !== null
     if ((!limits || limits.length === 0) && !hasObserved) return undefined
     const cooldownUntil = cooldowns.get(observedId) ?? 0
+    const supportedUsage = usageSeen.get(observedId) ?? usageSeen.get(id)
     const limiters = (limits ?? []).map((limit) => {
-      const baseUsed = usedFor(id, limit, at)
+      const baseUsed = usedFor(observedId, limit, at)
       const used = baseUsed + pendingAmount(pending, limit)
       const bucket = limit.reset === 'rolling' || limit.reset === 'pool'
         ? null
-        : bucketFor(id, limit, at)
+        : bucketFor(observedId, limit, at)
       const realWait = withinLimit(baseUsed, limit)
         ? null
-        : resetSecondsFor(id, limit, at, baseUsed)
+        : resetSecondsFor(observedId, limit, at, baseUsed)
       const pendingWait = withinLimit(used, limit)
         ? 0
-        : pendingWaitSeconds(id, limit, at)
+        : pendingWaitSeconds(observedId, limit, at)
       const wait = realWait === null
         ? pendingWait
         : (pendingWait === null ? realWait : Math.max(realWait, pendingWait))
@@ -559,8 +624,8 @@ export function createModelBudget({
         ok: withinLimit(used, limit),
         resetsInSeconds: wait,
         bucket,
-        ...(limit.unit !== 'requests' && usageSeen.has(id)
-          ? { usageSupported: usageSeen.get(id) }
+        ...(limit.unit !== 'requests' && supportedUsage !== undefined
+          ? { usageSupported: supportedUsage }
           : {})
       }
     })
@@ -652,23 +717,25 @@ export function createModelBudget({
     const at = now()
     const count = Number(amount)
     if (!Number.isFinite(count) || count <= 0) return
-    const limits = configs.get(id)
+    const observedId = scope ? `${id}@${scope}` : id
+    const limits = resolveLimitsForScope(configs, id, scope)
     for (const limit of limits ?? []) {
-      if (limit.unit === 'requests') addAmount(id, limit, count, at)
+      if (limit.unit === 'requests') addAmount(observedId, limit, count, at)
     }
     // Observation counts every real request, profiled or not. A scope keeps
     // free-tier cooldowns and learned caps separate when a CLI backend such as
-    // OpenCode switches its effective provider model.
+    // OpenCode or Antigravity switches its effective provider/model.
     addBucket(
-      scope ? `${id}@${scope}` : id,
+      observedId,
       OBSERVED_REQUESTS_POLICY,
       startOfFixedWindow(at, OBSERVED_DAY),
       count
     )
   }
 
-  function recordUsage(id, usage) {
-    const limits = configs.get(id)
+  function recordUsage(id, usage, scope) {
+    const observedId = scope ? `${id}@${scope}` : id
+    const limits = resolveLimitsForScope(configs, id, scope)
     const metered = limits?.filter((limit) => limit.unit !== 'requests') ?? []
     if (metered.length === 0) return
 
@@ -684,7 +751,7 @@ export function createModelBudget({
     for (const limit of metered) {
       if (limit.unit === 'tokens') {
         if (!haveTokens) {
-          usageSeen.set(id, false)
+          usageSeen.set(observedId, false)
           continue
         }
         let amount
@@ -692,20 +759,20 @@ export function createModelBudget({
         else if (limit.usage === 'output') amount = completion
         else amount = Number.isFinite(total) ? total : prompt + completion
         if (Number.isFinite(amount) && amount > 0) {
-          usageSeen.set(id, true)
-          addAmount(id, limit, amount, at)
+          usageSeen.set(observedId, true)
+          addAmount(observedId, limit, amount, at)
         } else {
-          usageSeen.set(id, false)
+          usageSeen.set(observedId, false)
         }
         continue
       }
       if (limit.unit === 'compute_seconds') {
         if (!haveCompute || compute <= 0) {
-          usageSeen.set(id, false)
+          usageSeen.set(observedId, false)
           continue
         }
-        usageSeen.set(id, true)
-        addAmount(id, limit, compute, at)
+        usageSeen.set(observedId, true)
+        addAmount(observedId, limit, compute, at)
       }
     }
   }
@@ -774,7 +841,7 @@ export function createModelBudget({
       ? Math.floor(count)
       : reservation.calls
     record(reservation.modelId, settledCalls, reservation.scope || undefined)
-    if (usage) recordUsage(reservation.modelId, usage)
+    if (usage) recordUsage(reservation.modelId, usage, reservation.scope || undefined)
     return { settled: true, budget: snapshot(reservation.modelId, reservation.scope || undefined) }
   }
 
@@ -787,15 +854,26 @@ export function createModelBudget({
   // blocked, 1 means the least-constrained limiter is untouched.
   function headroom(id, scope) {
     const budget = snapshot(id, scope)
-    if (!budget) return { ok: true, ratio: 1 }
-    if (!budget.ok) return { ok: false, ratio: 0, retryAfter: budget.retryAfter, budget }
+    if (!budget) return { ok: true, ratio: 1, configured: false, observedRequests: 0 }
     const scored = (budget.limiters ?? []).filter(
       (limiter) => Number.isFinite(limiter.limit) && limiter.limit > 0
     )
+    const configured = scored.length > 0
+    const observedRequests = Number(budget.observed?.requests ?? 0)
+    if (!budget.ok) {
+      return {
+        ok: false,
+        ratio: 0,
+        retryAfter: budget.retryAfter,
+        configured,
+        observedRequests,
+        budget
+      }
+    }
     const ratio = scored.length === 0
       ? 1
       : Math.min(...scored.map((limiter) => limiter.remaining / limiter.limit))
-    return { ok: true, ratio, budget }
+    return { ok: true, ratio, configured, observedRequests, budget }
   }
 
   // Learn from a live 429 without touching configured profiles: a marker

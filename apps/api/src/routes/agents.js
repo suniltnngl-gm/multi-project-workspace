@@ -1,8 +1,9 @@
-// Objective: Expose the deterministic agent control plane over the local API: runs, typed messages, inbox leases, cancellation, checkpoints, task ops, scripts, and artifacts.
-// Requirements: Authenticate agent writes with per-run tokens; return the raw token only when the run is created; keep reads token-free for the local board; never let a worker call another worker; never execute a registered script command from the API.
-// Decisions: The route group delegates every protocol rule to the broker and every task write to the task-op store; script matching and artifact bytes stay in their own stores; message ids and run ids are opaque strings; missing or invalid tokens are 401 rather than silently falling back to an agent id.
-// Relevant Files: apps/api/src/routes/agents.js, apps/api/src/agentBus.js, apps/api/src/agentScripts.js, apps/api/src/db/agentTaskOps.js, apps/api/src/db/agentScripts.js, apps/api/src/app.js
+// Objective: Expose the deterministic agent control plane over the local API: runs, typed messages, inbox leases, cancellation, checkpoints, task ops, scripts, artifacts, and swarm orchestration.
+// Requirements: Authenticate agent writes with per-run tokens; return the raw token only when the run is created; keep reads token-free for the local board; never let a worker call another worker; never execute a registered script command from the API; expose swarm plan/run/step/board endpoints supporting parent_mode, max_review_rounds, sync_task, and complete_task.
+// Decisions: The route group delegates every protocol rule to the broker, task writes to the task-op store, and swarm orchestration to swarmRunner; script matching and artifact bytes stay in their own stores; missing or invalid tokens are 401 rather than silently falling back to an agent id.
+// Relevant Files: apps/api/src/routes/agents.js, apps/api/src/agentBus.js, apps/api/src/swarmRunner.js, apps/api/src/agentScripts.js, apps/api/src/db/agentTaskOps.js, apps/api/src/db/agentScripts.js, apps/api/src/app.js
 // Important Context: User file. Local-only surface; the API is bound to loopback by default.
+// Work State: Completed: Deterministic agent control-plane routes plus /api/agents/swarm/* endpoints; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { Router } from 'express'
 import { validateScriptInput } from '../agentScripts.js'
 
@@ -31,7 +32,42 @@ function parseLimit(value, fallback, max) {
   return limit <= max ? limit : null
 }
 
-export function createAgentsRouter({ database, bus }) {
+function normalizeSwarmBody(body = {}) {
+  const input = body && typeof body === 'object' && !Array.isArray(body) ? body : {}
+  return {
+    ...input,
+    ...(input.task_id !== undefined && input.taskId === undefined ? { taskId: input.task_id } : {}),
+    ...(input.worker_count !== undefined && input.workerCount === undefined
+      ? { workerCount: input.worker_count }
+      : {}),
+    ...(input.include_reviewer !== undefined && input.includeReviewer === undefined
+      ? { includeReviewer: input.include_reviewer }
+      : {}),
+    ...(input.opencode_models !== undefined && input.opencodeModels === undefined
+      ? { opencodeModels: input.opencode_models }
+      : {}),
+    ...(input.worktree_path !== undefined && input.worktreePath === undefined
+      ? { worktreePath: input.worktree_path }
+      : {}),
+    ...(input.max_steps !== undefined && input.maxSteps === undefined
+      ? { maxSteps: input.max_steps }
+      : {}),
+    ...(input.parent_mode !== undefined && input.parentMode === undefined
+      ? { parentMode: input.parent_mode }
+      : {}),
+    ...(input.max_review_rounds !== undefined && input.maxReviewRounds === undefined
+      ? { maxReviewRounds: input.max_review_rounds }
+      : {}),
+    ...(input.sync_task !== undefined && input.syncTask === undefined
+      ? { syncTask: input.sync_task }
+      : {}),
+    ...(input.complete_task !== undefined && input.completeTask === undefined
+      ? { completeTask: input.complete_task }
+      : {})
+  }
+}
+
+export function createAgentsRouter({ database, bus, swarmRunner } = {}) {
   const router = Router()
 
   router.post('/api/agents/runs', (request, response) => {
@@ -362,6 +398,84 @@ export function createAgentsRouter({ database, bus }) {
       content: body.content,
       expiresAt
     }))
+  })
+
+  router.post('/api/agents/swarm/plan', (request, response) => {
+    if (!swarmRunner) {
+      return response.status(501).json({ error: 'Swarm runner is not configured.' })
+    }
+    const plan = swarmRunner.planSwarm(normalizeSwarmBody(request.body ?? {}))
+    if (sendError(response, plan)) return
+    return response.json(plan)
+  })
+
+  router.post('/api/agents/swarm', async (request, response, next) => {
+    try {
+      if (!swarmRunner) {
+        return response.status(501).json({ error: 'Swarm runner is not configured.' })
+      }
+      const options = normalizeSwarmBody(request.body ?? {})
+      const created = swarmRunner.createSwarm(options)
+      if (sendError(response, created)) return
+      if (options.execute === true) {
+        const executed = await swarmRunner.executeSwarm(created.runId, {
+          maxSteps: options.maxSteps
+        })
+        if (sendError(response, executed)) return
+        return response.status(201).json(executed)
+      }
+      return response.status(201).json(created)
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  router.get('/api/agents/runs/:id/board', (request, response) => {
+    if (!swarmRunner) {
+      return response.status(501).json({ error: 'Swarm runner is not configured.' })
+    }
+    const runId = request.params.id
+    if (!isOpaqueId(runId, 'run')) {
+      return response.status(400).json({ error: 'Run ID is invalid.' })
+    }
+    const board = swarmRunner.formatBoard(runId)
+    if (!board) return response.status(404).json({ error: 'Agent run not found.' })
+    return response.json(board)
+  })
+
+  router.post('/api/agents/runs/:id/step', async (request, response, next) => {
+    try {
+      if (!swarmRunner) {
+        return response.status(501).json({ error: 'Swarm runner is not configured.' })
+      }
+      const runId = request.params.id
+      if (!isOpaqueId(runId, 'run')) {
+        return response.status(400).json({ error: 'Run ID is invalid.' })
+      }
+      const result = await swarmRunner.stepSwarm(runId)
+      if (sendError(response, result)) return
+      return response.json(result)
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  router.post('/api/agents/runs/:id/execute', async (request, response, next) => {
+    try {
+      if (!swarmRunner) {
+        return response.status(501).json({ error: 'Swarm runner is not configured.' })
+      }
+      const runId = request.params.id
+      if (!isOpaqueId(runId, 'run')) {
+        return response.status(400).json({ error: 'Run ID is invalid.' })
+      }
+      const options = normalizeSwarmBody(request.body ?? {})
+      const result = await swarmRunner.executeSwarm(runId, { maxSteps: options.maxSteps })
+      if (sendError(response, result)) return
+      return response.json(result)
+    } catch (error) {
+      next(error)
+    }
   })
 
   return router

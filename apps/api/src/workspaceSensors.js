@@ -6,7 +6,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { modelQuotaProfiles } from './modelRegistry.js'
-import { resolveQuotaProfiles } from './modelBudget.js'
+import { resolveLimitsForScope, resolveQuotaProfiles } from './modelBudget.js'
 import { providerSnapshots, quotaScopeForModel } from './providerQuota.js'
 
 export const SENSOR_SEVERITIES = Object.freeze(['low', 'medium', 'high'])
@@ -133,6 +133,7 @@ export function buildWorkspaceSnapshot({
   })
   const modelEntries = (Array.isArray(models) ? models : []).map((model) => {
     const scope = quotaScopeForModel(model)
+    const scopedLimits = resolveLimitsForScope(configuredProfiles, model.id, scope)
     let budget
     try {
       budget = typeof modelBudget?.snapshot === 'function'
@@ -147,7 +148,7 @@ export function buildWorkspaceSnapshot({
       provider: model.provider,
       billingCategory: model.billingCategory,
       ...(scope ? { scope } : {}),
-      configured: configuredProfiles.has(model.id),
+      configured: Boolean(scopedLimits?.length || configuredProfiles.has(model.id)),
       budget
     }
   })

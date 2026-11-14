@@ -23,7 +23,9 @@ export function createToolsRouter({ database }) {
       { name: 'python', command: resolvePythonCommand() },
       { name: 'git', command: 'git' },
       { name: 'colab', command: 'colab' },
-      { name: 'kaggle', command: 'kaggle' }
+      { name: 'kaggle', command: 'kaggle' },
+      { name: 'opencode', command: 'opencode' },
+      { name: 'agy', command: 'agy' }
     ]
     const entries = commands.map((item) => {
       const available = Boolean(findExecutable(item.command))

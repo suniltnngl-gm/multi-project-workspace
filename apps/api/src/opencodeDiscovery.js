@@ -16,6 +16,61 @@ const MAX_ROSTER_BUFFER_BYTES = 4 * 1024 * 1024
 const DEFAULT_ROSTER_CACHE_FILE = fileURLToPath(
   new URL('../data/opencode-roster-cache.json', import.meta.url)
 )
+const DEFAULT_AGY_ROSTER_CACHE_FILE = fileURLToPath(
+  new URL('../data/agy-roster-cache.json', import.meta.url)
+)
+
+export const OPENCODE_CONSOLE_PROVIDERS = Object.freeze([
+  'console-google',
+  'console-groq',
+  'console-nvidia',
+  'console-openrouter',
+  'opencode'
+])
+
+export function groupOpenCodeModelsByProvider(models = []) {
+  const groups = Object.fromEntries(OPENCODE_CONSOLE_PROVIDERS.map((provider) => [provider, []]))
+  for (const modelId of models) {
+    if (typeof modelId !== 'string' || !modelId) continue
+    const slash = modelId.indexOf('/')
+    const provider = slash > 0 ? modelId.slice(0, slash) : 'opencode'
+    if (!Object.hasOwn(groups, provider)) groups[provider] = []
+    groups[provider].push(modelId)
+  }
+  return groups
+}
+
+function stripAnsi(value) {
+  return String(value ?? '').replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+}
+
+export function discoverAgyModels({
+  execFileImpl = execFile,
+  command = 'agy',
+  timeoutMs = DEFAULT_DISCOVERY_TIMEOUT_MS
+} = {}) {
+  return new Promise((resolve) => {
+    execFileImpl(
+      command,
+      ['models'],
+      { timeout: timeoutMs, maxBuffer: MAX_ROSTER_BUFFER_BYTES, encoding: 'utf8' },
+      (error, stdout) => {
+        if (error) {
+          resolve({ ok: false, models: [], error: error.message })
+          return
+        }
+        const ids = []
+        for (const rawLine of stripAnsi(stdout).split('\n')) {
+          const cleanLine = rawLine.split('\r').pop().trim()
+          if (!cleanLine) continue
+          const match = cleanLine.match(/^([a-z0-9][a-z0-9._-]*)(?:\t+|\s{2,}|\s*$)/i)
+          if (match) ids.push(match[1])
+        }
+        resolve({ ok: true, models: [...new Set(ids)].sort(), error: null })
+      }
+    )
+  })
+}
 
 /**
  * List the model ids the local opencode CLI can reach. The subprocess is
@@ -178,6 +233,33 @@ export function createOpenCodeRosterCacheFromEnv(env = process.env) {
   return createOpenCodeRosterCache({
     timeoutMs: readNonNegativeNumber(env, 'OPENCODE_AI_DISCOVERY_TIMEOUT_MS', DEFAULT_DISCOVERY_TIMEOUT_MS),
     ttlMs: readNonNegativeNumber(env, 'OPENCODE_AI_DISCOVERY_TTL_MS', DEFAULT_ROSTER_TTL_MS),
+    cacheFile
+  })
+}
+
+export function createAgyRosterCache({
+  discover,
+  timeoutMs = DEFAULT_DISCOVERY_TIMEOUT_MS,
+  ttlMs = DEFAULT_ROSTER_TTL_MS,
+  now = Date.now,
+  cacheFile = null
+} = {}) {
+  return createOpenCodeRosterCache({
+    discover: discover ?? (() => discoverAgyModels({ timeoutMs })),
+    timeoutMs,
+    ttlMs,
+    now,
+    cacheFile
+  })
+}
+
+export function createAgyRosterCacheFromEnv(env = process.env) {
+  const cacheFile = env.AGY_AI_ROSTER_CACHE_FILE === undefined
+    ? DEFAULT_AGY_ROSTER_CACHE_FILE
+    : env.AGY_AI_ROSTER_CACHE_FILE || null
+  return createAgyRosterCache({
+    timeoutMs: readNonNegativeNumber(env, 'AGY_AI_DISCOVERY_TIMEOUT_MS', DEFAULT_DISCOVERY_TIMEOUT_MS),
+    ttlMs: readNonNegativeNumber(env, 'AGY_AI_DISCOVERY_TTL_MS', DEFAULT_ROSTER_TTL_MS),
     cacheFile
   })
 }

@@ -1,8 +1,9 @@
-// Objective: Enforce the star-topology agent protocol: runs, leases, idempotent typed messages, cancellation, and checkpoints.
-// Requirements: Derive sender identity from a per-agent token; reject every worker-to-worker edge; never wake a model for routing or retries; keep every state change auditable; make duplicate sends a no-op.
-// Decisions: The broker is deterministic code and never calls a model; worker messages always resolve to the primary parent; the reviewer is parent-side only; leases and expiry are resolved by the store in one transaction; idempotency compares canonical payloads so a replay cannot silently change the work item.
-// Relevant Files: apps/api/src/agentBus.js, apps/api/src/agentProtocol.js, apps/api/src/db/agentRuns.js, apps/api/src/routes/agents.js
+// Objective: Enforce the star-topology agent protocol: runs, leases, idempotent typed messages, cancellation, checkpoints, and per-run/provider dispatch gates.
+// Requirements: Derive sender identity from a per-agent token; reject every worker-to-worker edge; never wake a model for routing or retries; keep every state change auditable; make duplicate sends a no-op; enforce maxParallelPerProvider and skip duplicate modelBudget.check when preReserved is set.
+// Decisions: The broker is deterministic code and never calls a model; worker messages always resolve to the primary parent; the reviewer is parent-side only; leases and expiry are resolved by the store in one transaction; idempotency compares canonical payloads so a replay cannot silently change the work item; preReserved supports callers that already reserved a modelBudget slot.
+// Relevant Files: apps/api/src/agentBus.js, apps/api/src/agentProtocol.js, apps/api/src/db/agentRuns.js, apps/api/src/modelBudget.js, apps/api/src/routes/agents.js, apps/api/src/routes/aiDrafts.js, apps/api/src/swarmRunner.js
 // Important Context: User file. This is the zero-token control plane.
+// Work State: Completed: Star-topology broker, lease/run budget gates, provider concurrency guard, and preReserved dispatch option; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import {
   AGENT_AGENT_STATES,
@@ -16,7 +17,8 @@ import {
 import {
   modelProviderKey,
   planAgentDispatch,
-  quotaScopeForModel
+  quotaScopeForModel,
+  resolveAgentModel
 } from './providerQuota.js'
 
 const DEFAULT_BUDGET = {
@@ -151,7 +153,7 @@ export function createAgentBus({
 
   function modelForAgent(agent) {
     if (!agent) return undefined
-    return modelById.get(agent.model)
+    return resolveAgentModel(models, agent.model, agent.backend) ?? modelById.get(agent.model)
   }
 
   function providerForAgent(agent) {
@@ -218,8 +220,16 @@ export function createAgentBus({
     return { ...agent, tokenHash: undefined }
   }
 
-  function authorizeRunAgent(token, runId) {
-    const agent = authenticate(token)
+  function resolveActor({ token, agentId } = {}) {
+    if (typeof agentId === 'string' && agentId) {
+      const agent = database.getAgent(agentId)
+      return agent ? { ...agent, tokenHash: undefined } : null
+    }
+    return authenticate(token)
+  }
+
+  function authorizeRunAgent(token, runId, agentId) {
+    const agent = resolveActor({ token, agentId })
     if (!agent) return errorResult(401, 'A valid agent token is required.')
     if (agent.runId !== runId) {
       return errorResult(403, 'The agent token does not belong to this run.')
@@ -259,7 +269,7 @@ export function createAgentBus({
    * already has the configured number of active assignments. A refusal costs
    * no model call and leaves the message queue untouched.
    */
-  function dispatchGate(run, recipient) {
+  function dispatchGate(run, recipient, { preReserved = false } = {}) {
     const budgetState = runBudgetState(run)
     if (budgetState.exhausted) {
       return errorResult(
@@ -277,8 +287,8 @@ export function createAgentBus({
     const model = modelForAgent(recipient)
     if (!model) return null
 
-    if (modelBudget && typeof modelBudget.check === 'function') {
-      const quota = modelBudget.check(model.id, quotaScopeForModel(model))
+    if (!preReserved && modelBudget && typeof modelBudget.check === 'function') {
+      const quota = modelBudget.check(model.baseId ?? model.id, quotaScopeForModel(model))
       if (quota && quota.ok === false) {
         return errorResult(
           429,
@@ -436,6 +446,7 @@ export function createAgentBus({
 
   function sendMessage({
     token,
+    agentId,
     runId,
     to,
     kind,
@@ -444,9 +455,10 @@ export function createAgentBus({
     idempotencyKey,
     correlationId = '',
     deadlineAt,
-    ttlMs = messageTtlMs
+    ttlMs = messageTtlMs,
+    preReserved = false
   } = {}) {
-    const authorized = authorizeRunAgent(token, runId)
+    const authorized = authorizeRunAgent(token, runId, agentId)
     if (authorized.error) return authorized
     const { agent, run } = authorized
     if (isTerminalRunState(run.state)) {
@@ -486,7 +498,7 @@ export function createAgentBus({
     // Assignment is the only message kind that asks a worker to spend model
     // quota, so it is gated before the queue record is written.
     if (kind === 'assign') {
-      const denied = dispatchGate(run, recipient)
+      const denied = dispatchGate(run, recipient, { preReserved: Boolean(preReserved && !token) })
       if (denied) return denied
     }
 
@@ -520,8 +532,8 @@ export function createAgentBus({
     return { message, duplicate: false }
   }
 
-  function claimInbox({ token, runId, limit, leaseMs } = {}) {
-    const authorized = authorizeRunAgent(token, runId)
+  function claimInbox({ token, agentId, runId, limit, leaseMs } = {}) {
+    const authorized = authorizeRunAgent(token, runId, agentId)
     if (authorized.error) return authorized
     const { agent, run } = authorized
     if (isTerminalRunState(run.state)) {
@@ -556,8 +568,8 @@ export function createAgentBus({
     return claimed
   }
 
-  function ackMessage({ token, messageId } = {}) {
-    const agent = authenticate(token)
+  function ackMessage({ token, agentId, messageId } = {}) {
+    const agent = resolveActor({ token, agentId })
     if (!agent) return errorResult(401, 'A valid agent token is required.')
     const message = database.getAgentMessage(messageId)
     if (!message) return errorResult(404, 'Agent message not found.')
@@ -570,8 +582,8 @@ export function createAgentBus({
     return { message: updated }
   }
 
-  function completeMessage({ token, messageId, result } = {}) {
-    const agent = authenticate(token)
+  function completeMessage({ token, agentId, messageId, result } = {}) {
+    const agent = resolveActor({ token, agentId })
     if (!agent) return errorResult(401, 'A valid agent token is required.')
     const message = database.getAgentMessage(messageId)
     if (!message) return errorResult(404, 'Agent message not found.')
@@ -587,8 +599,8 @@ export function createAgentBus({
     return { message: updated }
   }
 
-  function failMessage({ token, messageId, error, retryable = true } = {}) {
-    const agent = authenticate(token)
+  function failMessage({ token, agentId, messageId, error, retryable = true } = {}) {
+    const agent = resolveActor({ token, agentId })
     if (!agent) return errorResult(401, 'A valid agent token is required.')
     const message = database.getAgentMessage(messageId)
     if (!message) return errorResult(404, 'Agent message not found.')
@@ -640,8 +652,8 @@ export function createAgentBus({
     return updated
   }
 
-  function checkpointRun({ token, runId, checkpoint } = {}) {
-    const authorized = authorizeRunAgent(token, runId)
+  function checkpointRun({ token, agentId, runId, checkpoint } = {}) {
+    const authorized = authorizeRunAgent(token, runId, agentId)
     if (authorized.error) return authorized
     const { run } = authorized
     if (isTerminalRunState(run.state)) {
@@ -661,8 +673,8 @@ export function createAgentBus({
     return updated
   }
 
-  function heartbeat({ token, state, leaseMs } = {}) {
-    const agent = authenticate(token)
+  function heartbeat({ token, agentId, state, leaseMs } = {}) {
+    const agent = resolveActor({ token, agentId })
     if (!agent) return errorResult(401, 'A valid agent token is required.')
     const run = database.getAgentRun(agent.runId)
     if (!run) return errorResult(404, 'Agent run not found.')
@@ -689,8 +701,8 @@ export function createAgentBus({
   // gated by what was already spent. Recording is always accepted, even when
   // it pushes the run over budget: the spend is real, and the next assignment
   // is the thing that must stop.
-  function recordUsage({ token, runId, usage } = {}) {
-    const authorized = authorizeRunAgent(token, runId)
+  function recordUsage({ token, agentId, runId, usage } = {}) {
+    const authorized = authorizeRunAgent(token, runId, agentId)
     if (authorized.error) return authorized
     const { agent, run } = authorized
     if (isTerminalRunState(run.state)) {
@@ -700,7 +712,7 @@ export function createAgentBus({
     if (normalized.error) return errorResult(400, normalized.error)
 
     const modelId = normalized.model ?? agent.model
-    const model = modelById.get(modelId)
+    const model = resolveAgentModel(models, modelId, agent.backend) ?? modelById.get(modelId)
     const totalTokens = normalized.totalTokens > 0
       ? normalized.totalTokens
       : normalized.promptTokens + normalized.completionTokens
@@ -761,6 +773,36 @@ export function createAgentBus({
     }
   }
 
+  function switchAgentModel({ runId, agentId, model, backend = '', reason = '' } = {}) {
+    const run = database.getAgentRun(runId)
+    if (!run) return errorResult(404, 'Agent run not found.')
+    if (isTerminalRunState(run.state)) {
+      return errorResult(409, `Agent run is ${run.state}.`)
+    }
+    const agent = database.getAgent(agentId)
+    if (!agent || agent.runId !== run.id) {
+      return errorResult(404, 'Agent was not found in this run.')
+    }
+    if (typeof model !== 'string' || !model.trim()) {
+      return errorResult(400, 'A target model is required.')
+    }
+    const nextModel = model.trim()
+    const nextBackend = typeof backend === 'string' ? backend.trim() : ''
+    const switchReason = typeof reason === 'string' ? reason.trim() : ''
+    const updated = database.updateAgent(agent.id, {
+      model: nextModel,
+      backend: nextBackend,
+      promptCacheKey: `${runId}:${agent.name}:${nextModel}:${nextBackend}`
+    })
+    appendEvent(runId, agent.id, 'agent_model_switched', {
+      fromModel: agent.model,
+      toModel: nextModel,
+      backend: nextBackend,
+      ...(switchReason ? { reason: switchReason } : {})
+    })
+    return { agent: updated }
+  }
+
   return {
     createRun,
     getRun,
@@ -781,6 +823,7 @@ export function createAgentBus({
     recordUsage,
     checkRunBudget,
     dispatchPlan,
+    switchAgentModel,
     errorResult,
     readToken
   }

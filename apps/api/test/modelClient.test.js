@@ -67,6 +67,24 @@ function opencodeModel(overrides = {}) {
   }
 }
 
+function agyModel(overrides = {}) {
+  return {
+    id: 'agy',
+    label: 'Antigravity headless',
+    backend: 'agy-cli',
+    remote: true,
+    timeoutMs: 300000,
+    cli: {
+      command: 'agy',
+      probeArgs: ['--version'],
+      model: 'gemini-3.8-flash-medium',
+      agent: 'planner',
+      effort: 'medium'
+    },
+    ...overrides
+  }
+}
+
 const REQUEST = {
   messages: [{ role: 'user', content: 'Draft a task' }],
   maxTokens: 120,
@@ -672,6 +690,352 @@ test('OpenCode text output wins over an accompanying error event', async () => {
   })
   const content = await client.complete(opencodeModel(), REQUEST)
   assert.equal(content, 'Recovered output')
+})
+
+test('Colab, Kaggle, and OpenCode settle computeSeconds and token usage via onUsage', async () => {
+  const colabUsages = []
+  const colabClient = createClient({
+    runCommand: async (_command, args) => {
+      if (args.includes(join(SCRIPTS, 'colab_model_server.py'))) {
+        return { stdout: '', stderr: '' }
+      }
+      return {
+        stdout: `${RESULT_SENTINEL}${JSON.stringify({
+          choices: [{ message: { content: 'colab reply' } }]
+        })}`,
+        stderr: ''
+      }
+    },
+    scriptsDir: SCRIPTS
+  })
+  assert.equal(
+    await colabClient.complete(colabModel(), {
+      ...REQUEST,
+      onUsage: (usage) => colabUsages.push(usage)
+    }),
+    'colab reply'
+  )
+  assert.equal(colabUsages.length, 1)
+  assert.ok(Number.isFinite(colabUsages[0].computeSeconds) && colabUsages[0].computeSeconds >= 1)
+
+  const kaggleUsages = []
+  const kaggleClient = createClient({
+    runCommand: async (_command, args) => {
+      const outputIndex = args.indexOf('--output')
+      const outputPath = args[outputIndex + 1]
+      await writeFile(
+        outputPath,
+        JSON.stringify({
+          description: 'from kaggle',
+          acceptance_criteria: 'done',
+          compute_seconds: 42
+        }),
+        'utf8'
+      )
+      return { stdout: '', stderr: '' }
+    },
+    scriptsDir: SCRIPTS
+  })
+  await kaggleClient.complete(kaggleModel(), {
+    ...REQUEST,
+    onUsage: (usage) => kaggleUsages.push(usage)
+  })
+  assert.deepEqual(kaggleUsages, [{ computeSeconds: 42 }])
+
+  const opencodeUsages = []
+  const opencodeClient = createClient({
+    runCommand: async () => ({
+      stdout: [
+        JSON.stringify({ type: 'text', sessionID: 'ses_usage', part: { text: 'opencode reply' } }),
+        JSON.stringify({
+          type: 'step_finish',
+          sessionID: 'ses_usage',
+          part: {
+            tokens: { input: 90, output: 25, reasoning: 5, total: 120 }
+          }
+        })
+      ].join('\n'),
+      stderr: ''
+    }),
+    scriptsDir: SCRIPTS
+  })
+  assert.equal(
+    await opencodeClient.complete(opencodeModel(), {
+      ...REQUEST,
+      onUsage: (usage) => opencodeUsages.push(usage)
+    }),
+    'opencode reply'
+  )
+  assert.deepEqual(opencodeUsages, [{
+    promptTokens: 90,
+    completionTokens: 30,
+    totalTokens: 120
+  }])
+})
+
+test('OpenCode reuses the session ID per model, agent, and worktree', async () => {
+  const calls = []
+  const sessionIds = ['ses_model_a', 'ses_model_b', 'ses_agent_build', 'ses_worktree_a']
+  const client = createClient({
+    runCommand: async (command, args) => {
+      calls.push({ command, args })
+      const sessionIndex = args.indexOf('--session')
+      const sessionID = sessionIndex >= 0 ? args[sessionIndex + 1] : sessionIds.shift()
+      return {
+        stdout: JSON.stringify({
+          type: 'text',
+          sessionID,
+          part: { text: `reply:${sessionID}` }
+        }),
+        stderr: ''
+      }
+    },
+    scriptsDir: SCRIPTS
+  })
+
+  const base = opencodeModel()
+  assert.equal(await client.complete(base, REQUEST), 'reply:ses_model_a')
+  assert.equal(calls[0].args.includes('--session'), false)
+
+  assert.equal(await client.complete(base, REQUEST), 'reply:ses_model_a')
+  assert.equal(calls[1].args[calls[1].args.indexOf('--session') + 1], 'ses_model_a')
+
+  const otherModel = opencodeModel({
+    cli: { ...base.cli, model: 'console-groq/openai/gpt-oss-120b' }
+  })
+  assert.equal(await client.complete(otherModel, REQUEST), 'reply:ses_model_b')
+  assert.equal(calls[2].args.includes('--session'), false)
+  assert.equal(await client.complete(otherModel, REQUEST), 'reply:ses_model_b')
+  assert.equal(calls[3].args[calls[3].args.indexOf('--session') + 1], 'ses_model_b')
+
+  const otherAgent = opencodeModel({
+    cli: { ...base.cli, agent: 'build' }
+  })
+  assert.equal(await client.complete(otherAgent, REQUEST), 'reply:ses_agent_build')
+  assert.equal(calls[4].args.includes('--session'), false)
+
+  assert.equal(
+    await client.complete(base, { ...REQUEST, worktreePath: '/tmp/worktree-a' }),
+    'reply:ses_worktree_a'
+  )
+  assert.equal(calls[5].args.includes('--session'), false)
+})
+
+test('OpenCode drops a missing cached session and retries with a fresh session', async () => {
+  const calls = []
+  const client = createClient({
+    runCommand: async (command, args) => {
+      calls.push(args)
+      const sessionIndex = args.indexOf('--session')
+      const passedSession = sessionIndex >= 0 ? args[sessionIndex + 1] : null
+      if (calls.length === 1) {
+        return {
+          stdout: JSON.stringify({
+            type: 'text',
+            sessionID: 'ses_stale',
+            part: { text: 'initial' }
+          }),
+          stderr: ''
+        }
+      }
+      if (passedSession === 'ses_stale') {
+        return {
+          stdout: JSON.stringify({
+            type: 'error',
+            sessionID: 'ses_stale',
+            error: { message: 'SessionNotFoundError: Session not found' }
+          }),
+          stderr: ''
+        }
+      }
+      return {
+        stdout: JSON.stringify({
+          type: 'text',
+          sessionID: 'ses_fresh',
+          part: { text: 'recovered' }
+        }),
+        stderr: ''
+      }
+    },
+    scriptsDir: SCRIPTS
+  })
+
+  const model = opencodeModel()
+  assert.equal(await client.complete(model, REQUEST), 'initial')
+  assert.equal(await client.complete(model, REQUEST), 'recovered')
+  assert.equal(calls.length, 3)
+  assert.equal(calls[1][calls[1].indexOf('--session') + 1], 'ses_stale')
+  assert.equal(calls[2].includes('--session'), false)
+
+  assert.equal(await client.complete(model, REQUEST), 'recovered')
+  assert.equal(calls[3][calls[3].indexOf('--session') + 1], 'ses_fresh')
+})
+
+test('agy probes with --version and completes headless JSON with usage accounting', async () => {
+  const calls = []
+  const reportedUsage = []
+  const client = createClient({
+    runCommand: async (command, args, options) => {
+      calls.push({ command, args, options })
+      if (args[0] === '--version') {
+        return { stdout: '1.5.8\n', stderr: '' }
+      }
+      return {
+        stdout: JSON.stringify({
+          conversation_id: 'conv-1',
+          status: 'SUCCESS',
+          response: 'draft from agy',
+          usage: {
+            input_tokens: 120,
+            output_tokens: 30,
+            thinking_tokens: 10,
+            total_tokens: 160
+          }
+        }),
+        stderr: ''
+      }
+    },
+    scriptsDir: SCRIPTS
+  })
+
+  assert.deepEqual(await client.probe(agyModel()), { ok: true })
+  assert.deepEqual(calls[0].args, ['--version'])
+
+  const content = await client.complete(agyModel(), {
+    ...REQUEST,
+    onUsage: (usage) => reportedUsage.push(usage)
+  })
+  assert.equal(content, 'draft from agy')
+  assert.equal(calls[1].command, 'agy')
+  assert.equal(calls[1].args[0], '--print')
+  assert.ok(calls[1].args.includes('--output-format'))
+  assert.equal(calls[1].args[calls[1].args.indexOf('--output-format') + 1], 'json')
+  assert.equal(calls[1].args[calls[1].args.indexOf('--model') + 1], 'gemini-3.8-flash-medium')
+  assert.equal(calls[1].args[calls[1].args.indexOf('--agent') + 1], 'planner')
+  assert.equal(calls[1].args[calls[1].args.indexOf('--effort') + 1], 'medium')
+  assert.deepEqual(reportedUsage, [{
+    promptTokens: 120,
+    completionTokens: 40,
+    totalTokens: 160
+  }])
+})
+
+test('agy reuses conversation IDs per model, agent, effort, and worktree', async () => {
+  const calls = []
+  const conversationIds = ['conv-a', 'conv-b', 'conv-agent', 'conv-effort', 'conv-wt']
+  const client = createClient({
+    runCommand: async (command, args) => {
+      calls.push({ command, args })
+      const index = args.indexOf('--conversation')
+      const conversationId = index >= 0 ? args[index + 1] : conversationIds.shift()
+      return {
+        stdout: JSON.stringify({
+          conversation_id: conversationId,
+          status: 'SUCCESS',
+          response: `reply:${conversationId}`
+        }),
+        stderr: ''
+      }
+    },
+    scriptsDir: SCRIPTS
+  })
+
+  const base = agyModel()
+  assert.equal(await client.complete(base, REQUEST), 'reply:conv-a')
+  assert.equal(calls[0].args.includes('--conversation'), false)
+
+  assert.equal(await client.complete(base, REQUEST), 'reply:conv-a')
+  assert.equal(calls[1].args[calls[1].args.indexOf('--conversation') + 1], 'conv-a')
+
+  const otherModel = agyModel({ cli: { ...base.cli, model: 'gemini-4-argon-high' } })
+  assert.equal(await client.complete(otherModel, REQUEST), 'reply:conv-b')
+  assert.equal(calls[2].args.includes('--conversation'), false)
+
+  const otherAgent = agyModel({ cli: { ...base.cli, agent: 'coder' } })
+  assert.equal(await client.complete(otherAgent, REQUEST), 'reply:conv-agent')
+  assert.equal(calls[3].args.includes('--conversation'), false)
+
+  const otherEffort = agyModel({ cli: { ...base.cli, effort: 'high' } })
+  assert.equal(await client.complete(otherEffort, REQUEST), 'reply:conv-effort')
+  assert.equal(calls[4].args.includes('--conversation'), false)
+
+  assert.equal(
+    await client.complete(base, { ...REQUEST, worktreePath: '/tmp/worktree-agy' }),
+    'reply:conv-wt'
+  )
+  assert.equal(calls[5].args.includes('--conversation'), false)
+})
+
+test('agy drops a missing cached conversation and retries with a fresh one', async () => {
+  const calls = []
+  const client = createClient({
+    runCommand: async (_command, args) => {
+      calls.push(args)
+      const index = args.indexOf('--conversation')
+      const passed = index >= 0 ? args[index + 1] : null
+      if (calls.length === 1) {
+        return {
+          stdout: JSON.stringify({
+            conversation_id: 'conv-stale',
+            status: 'SUCCESS',
+            response: 'initial'
+          }),
+          stderr: ''
+        }
+      }
+      if (passed === 'conv-stale') {
+        return {
+          stdout: JSON.stringify({
+            status: 'ERROR',
+            error: 'Conversation not found: conv-stale'
+          }),
+          stderr: ''
+        }
+      }
+      return {
+        stdout: JSON.stringify({
+          conversation_id: 'conv-fresh',
+          status: 'SUCCESS',
+          response: 'recovered'
+        }),
+        stderr: ''
+      }
+    },
+    scriptsDir: SCRIPTS
+  })
+
+  const model = agyModel()
+  assert.equal(await client.complete(model, REQUEST), 'initial')
+  assert.equal(await client.complete(model, REQUEST), 'recovered')
+  assert.equal(calls.length, 3)
+  assert.equal(calls[1][calls[1].indexOf('--conversation') + 1], 'conv-stale')
+  assert.equal(calls[2].includes('--conversation'), false)
+
+  assert.equal(await client.complete(model, REQUEST), 'recovered')
+  assert.equal(calls[3][calls[3].indexOf('--conversation') + 1], 'conv-fresh')
+})
+
+test('agy maps rate-limit responses to HTTP 429 with retryAfter', async () => {
+  const client = createClient({
+    runCommand: async () => ({
+      stdout: JSON.stringify({
+        status: 'ERROR',
+        error: 'RESOURCE_EXHAUSTED: rate limit exceeded, retry after 42s'
+      }),
+      stderr: ''
+    }),
+    scriptsDir: SCRIPTS
+  })
+
+  await assert.rejects(
+    () => client.complete(agyModel(), REQUEST),
+    (error) => {
+      assert.ok(error instanceof ModelCallError)
+      assert.equal(error.status, 429)
+      assert.equal(error.retryAfter, 42)
+      return true
+    }
+  )
 })
 
 test('CLI probes are cached per command', async () => {

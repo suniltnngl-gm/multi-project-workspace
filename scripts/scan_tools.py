@@ -23,6 +23,7 @@ TOOLS = [
     ("colab", "colab"),
     ("kaggle", "kaggle"),
     ("opencode", "opencode"),
+    ("agy", "agy"),
 ]
 
 

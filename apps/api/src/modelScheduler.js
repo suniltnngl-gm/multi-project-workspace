@@ -1,3 +1,5 @@
+import { billingRank } from './providerQuota.js'
+
 const HEALTH_TIMEOUT_MS = 5000
 const RETRY_AFTER_SECONDS = 5
 
@@ -39,6 +41,7 @@ function modelStatus(model, extra = {}) {
     callable: model.callable,
     autoSelect: model.autoSelect ?? true,
     priority: model.priority,
+    ...(model.limitKind ? { limitKind: model.limitKind } : {}),
     ...(model.billingCategory ? { billingCategory: model.billingCategory } : {}),
     ...(model.minAvailableMemoryMb !== undefined
       ? { minAvailableMemoryMb: model.minAvailableMemoryMb }
@@ -70,6 +73,7 @@ export function createModelScheduler({
   const callableModels = models.filter(isCallable)
   const states = new Map(callableModels.map((model) => [model.id, { inFlight: false }]))
   let nextGenerationAt = 0
+  let lastEvaluation = null
 
   function headersFor(model) {
     // Never send the local llama.cpp key to an external endpoint; remote
@@ -187,17 +191,20 @@ export function createModelScheduler({
 
     if (statuses.some((status) => status.state === 'ready')) {
       result.state = 'ready'
+      lastEvaluation = result
       return result
     }
     if (metricsError) {
       result.state = 'unavailable'
       result.error = 'Local AI resource monitoring is unavailable.'
+      lastEvaluation = result
       return result
     }
     if (coolingDown && models.some((model) => !model.remote)) {
       result.state = 'busy'
       result.busyReasons = ['Cooling down between local model turns.']
       result.retryAfter = Math.max(1, Math.ceil((nextGenerationAt - now) / 1000))
+      lastEvaluation = result
       return result
     }
 
@@ -210,12 +217,14 @@ export function createModelScheduler({
       result.state = 'busy'
       result.busyReasons = fallback.busyReasons
       result.retryAfter = RETRY_AFTER_SECONDS
+      lastEvaluation = result
       return result
     }
 
     result.state = 'unavailable'
     result.error = statuses.find((status) => status.state === 'unavailable')?.error
       || 'No local model is available.'
+    lastEvaluation = result
     return result
   }
 
@@ -313,6 +322,9 @@ export function createModelScheduler({
         // touched, instead of selecting it and returning 429.
         if (a.quota.ok !== b.quota.ok) return a.quota.ok ? -1 : 1
 
+        const billing = billingRank(a.status) - billingRank(b.status)
+        if (billing !== 0) return billing
+
         const failuresA = Number.isFinite(a.status.failures) ? a.status.failures : 0
         const failuresB = Number.isFinite(b.status.failures) ? b.status.failures : 0
         if (failuresA !== failuresB) return failuresA - failuresB
@@ -381,6 +393,7 @@ export function createModelScheduler({
 
   return {
     status: evaluate,
+    peekStatus: () => lastEvaluation,
     select
   }
 }

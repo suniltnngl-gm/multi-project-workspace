@@ -364,6 +364,7 @@ function printHelp() {
   log(row('ai improve [SUBCMD] ...', 'Run the AI improvement flow on draft proposals'))
   log(row('ai ask [--model ID] ...', 'Ask the running API a direct AI question'))
   log(row('ai model [rotate|study]', 'Rotate or study OpenCode models daily'))
+  log(row('ai swarm [SUBCMD] ...', 'Plan, run, or inspect a low-quota multi-agent swarm'))
   log(row('doctor', 'Alias for ai doctor'))
   log(`\n${C.bold}Dependencies${C.reset}`)
   log(row('install', 'Install npm dependencies and sync the Python project'))
@@ -649,30 +650,35 @@ async function aiAsk(args) {
 
 async function aiModel(args) {
   const subcommand = args[0] ?? 'status'
+  const restArgs = args.slice(1)
   if (subcommand === 'rotate') {
-    return runNodeScript('rotate-model.mjs')
+    return runNodeScript('rotate-model.mjs', restArgs)
   }
   if (subcommand === 'list') {
-    return runNodeScript('opencode-console.mjs', ['list'])
+    return runNodeScript('opencode-console.mjs', ['list', ...restArgs])
+  }
+  if (subcommand === 'providers') {
+    return runNodeScript('opencode-console.mjs', ['providers', ...restArgs])
   }
   if (subcommand === 'status') {
-    let current = '<not set>'
-    if (existsSync(ENV_FILE)) {
+    const readEnvValue = (key) => {
+      if (!existsSync(ENV_FILE)) return '<not set>'
       const line = readFileSync(ENV_FILE, 'utf8')
         .split(/\r?\n/)
-        .find((entry) => entry.startsWith('OPENCODE_AI_MODEL='))
-      if (line) current = line.slice('OPENCODE_AI_MODEL='.length)
+        .find((entry) => entry.startsWith(`${key}=`))
+      return line ? line.slice(`${key}=`.length) : '<not set>'
     }
-    info(`Current OPENCODE_AI_MODEL: ${current}`)
-    info('Available providers/models via OpenCode console:')
-    return runNodeScript('opencode-console.mjs', ['list'])
+    info(`Current OPENCODE_AI_MODEL: ${readEnvValue('OPENCODE_AI_MODEL')}`)
+    info(`Current AGY_AI_MODEL: ${readEnvValue('AGY_AI_MODEL')}`)
+    info('Available providers/models:')
+    return runNodeScript('opencode-console.mjs', ['status', ...restArgs])
   }
   if (subcommand === 'study') {
-    return runNodeScript('model-study.mjs', args.slice(1))
+    return runNodeScript('model-study.mjs', restArgs)
   }
   fail(
     `Unknown ai model subcommand: ${subcommand}\n` +
-    'Usage: ./workspace ai model [rotate|status|list|study] [--dry-run] [--all]',
+    'Usage: ./workspace ai model [rotate|status|list|providers|study] [--dry-run] [--all] [--provider NAME] [--backend opencode|agy] [--agy]',
     2
   )
 }
@@ -1004,12 +1010,14 @@ async function dispatch(argv) {
       if (subcommand === 'improve') return aiImprove(rest.slice(1))
       if (subcommand === 'ask') return aiAsk(rest.slice(1))
       if (subcommand === 'model') return aiModel(rest.slice(1))
+      if (subcommand === 'swarm') return runNodeScript('ai-swarm.mjs', rest.slice(1))
       fail(
         `Unknown ai subcommand: ${subcommand}\n` +
         'Usage: ./workspace ai doctor [--json] [--strict] [--offline]\n' +
         '       ./workspace ai improve [run|list|approve <id>|reject <id>|rollback <id>]\n' +
         '       ./workspace ai ask [--model ID] [--session ID] "prompt"\n' +
-        '       ./workspace ai model [rotate|status|list|study]',
+        '       ./workspace ai model [rotate|status|list|providers|study]\n' +
+        '       ./workspace ai swarm [plan|run|board <id>|step <id>|list]',
         2
       )
       break
