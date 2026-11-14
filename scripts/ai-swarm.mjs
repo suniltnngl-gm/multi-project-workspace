@@ -183,18 +183,30 @@ function buildPlanOptions(objective, options) {
 }
 
 function printPlan(plan) {
+  const qs = plan.quotaSummary ?? {}
   console.log(`Swarm Plan: ${plan.title}`)
   if (plan.objective) console.log(`Objective: ${plan.objective}`)
   console.log(
-    `Quota strategy: parentModelCalls=${plan.quotaSummary.parentModelCalls}, ` +
-    `distinctProviderDomains=${plan.quotaSummary.distinctProviderDomains}, ` +
+    `Quota strategy: parentModelCalls=${qs.parentModelCalls ?? 0}, ` +
+    `distinctProviderDomains=${qs.distinctProviderDomains ?? 0}, ` +
     `selfImprove=${plan.selfImprovementPlan?.strategy ?? (plan.selfImprove !== false ? 'parallel' : 'disabled')}`
   )
+  const usdLabel = `$${Number(qs.estimatedPaidUsd ?? 0).toFixed(4)} USD${qs.paidEscalationActive ? ' [PAID ESCALATION]' : ' (free)'}`
+  console.log(
+    `Exposure estimate: calls=${qs.estimatedCalls ?? 0}, tokens~=${qs.estimatedTokens ?? 0}, estCost=${usdLabel}`
+  )
+  const estByName = new Map((qs.agentEstimates ?? []).map((entry) => [entry.agent, entry]))
   console.log('Agents:')
   for (const agent of plan.agents) {
     const domain = agent.groupKey ? ` [${agent.groupKey}]` : ''
     const kind = agent.limitKind ? ` (${agent.limitKind})` : ''
-    console.log(`  - ${agent.name} (${agent.role}): ${agent.model}${domain}${kind}`)
+    const est = estByName.get(agent.name)
+    const estText = est
+      ? ` — headroom=${est.headroomPct}%, calls~=${est.estimatedCalls}, tokens~=${est.estimatedTokens}` +
+        (est.estimatedUsd > 0 ? `, estUsd=$${est.estimatedUsd.toFixed(4)}` : '') +
+        (est.remainingPoolUsd !== undefined ? `, poolLeft=$${est.remainingPoolUsd.toFixed(2)}` : '')
+      : ''
+    console.log(`  - ${agent.name} (${agent.role}): ${agent.model}${domain}${kind}${estText}`)
   }
   console.log('Slices:')
   for (const slice of plan.slices) {

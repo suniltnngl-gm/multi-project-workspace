@@ -1250,3 +1250,78 @@ test('swarm planSwarm and CLI distribute across AGY 3 weekly pools and rotate-mo
   assert.equal(rotated.status, 0, rotated.stderr)
   assert.match(rotated.stdout, /agy \[claude-gpt\] model:/)
 })
+
+test('planSwarm and --dry-run compute token/call and USD exposure estimates across free vs paid escalation lanes', () => {
+  const paidModel = {
+    id: 'gemini-api-paid',
+    label: 'Gemini API CLI (Prepay Tier-1)',
+    provider: 'gemini-api-paid',
+    backend: 'gemini-api-cli',
+    limitKind: 'provider_model',
+    billingCategory: 'payg',
+    escalationOnly: true,
+    allowProModels: true,
+    callable: true,
+    autoSelect: false,
+    remote: true,
+    priority: 99,
+    cli: { command: 'gemini-api', model: 'gemini-4-argon', allowProModels: true }
+  }
+  const models = [...makeSampleModels(), paidModel]
+  const budget = createModelBudget({
+    env: {
+      OPENCODE_AI_MAX_REQUESTS_PER_DAY: '100',
+      AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK: '50',
+      GEMINI_API_PAID_PREPAY_BALANCE_USD: '5'
+    }
+  })
+  const bus = createAgentBus({ database, models, modelBudget: budget })
+  const runner = createSwarmRunner({ database, bus, models, modelBudget: budget })
+
+  const freePlan = runner.planSwarm({
+    objective: 'Task 1; Task 2',
+    includeReviewer: false
+  })
+  assert.equal(freePlan.quotaSummary.paidEscalationActive, false)
+  assert.equal(freePlan.quotaSummary.estimatedPaidUsd, 0)
+  assert.ok(freePlan.quotaSummary.estimatedCalls >= 2)
+  assert.ok(freePlan.quotaSummary.estimatedTokens > 0)
+  assert.equal(freePlan.quotaSummary.agentEstimates.every((entry) => entry.estimatedUsd === 0), true)
+
+  const paidPlan = runner.planSwarm({
+    objective: 'Hard debug slice',
+    includeReviewer: false,
+    geminiApiPaidModels: ['gemini-4-argon']
+  })
+  assert.equal(paidPlan.quotaSummary.paidEscalationActive, true)
+  assert.ok(paidPlan.quotaSummary.estimatedPaidUsd > 0)
+  const paidAgentEst = paidPlan.quotaSummary.agentEstimates.find((entry) => entry.provider === 'gemini-api-paid')
+  assert.ok(paidAgentEst)
+  assert.ok(paidAgentEst.estimatedUsd > 0)
+  assert.equal(paidAgentEst.remainingPoolUsd, 4)
+
+  const dryRunCli = spawnSync(process.execPath, [
+    join(ROOT, 'scripts', 'ai-swarm.mjs'),
+    'run',
+    'Slice 1; Slice 2',
+    '--gemini-api-paid-models',
+    'gemini-4-argon',
+    '--database',
+    join(tempDir, 'cli-dry-run-estimate.sqlite'),
+    '--json',
+    '--dry-run'
+  ], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      GEMINI_API_PAID_PREPAY_BALANCE_USD: '5',
+      GEMINI_API_PAID_NO_KEYRING: 'true'
+    },
+    encoding: 'utf8'
+  })
+  assert.equal(dryRunCli.status, 0, dryRunCli.stderr)
+  const dryRunJson = JSON.parse(dryRunCli.stdout)
+  assert.equal(dryRunJson.dryRun, true)
+  assert.equal(dryRunJson.quotaSummary.paidEscalationActive, true)
+  assert.ok(dryRunJson.quotaSummary.estimatedPaidUsd > 0)
+})

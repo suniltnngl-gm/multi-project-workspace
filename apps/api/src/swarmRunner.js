@@ -13,6 +13,7 @@ import {
   resolveTaskSessionContext,
   splitFileRefs
 } from './localAiPrompt.js'
+import { estimateGeminiPaidCostMicros } from './modelBudget.js'
 import { isFallbackEligible } from './modelFallback.js'
 import {
   billingRank,
@@ -372,7 +373,8 @@ export function createSwarmRunner({
       syncSession = true,
       syncFiles = false,
       selfImprove: rawSelfImprove = true,
-      autoProposeSelfImprovement = false
+      autoProposeSelfImprovement = false,
+      budget: runBudget
     } = hydrated
     const parseCsvOrEnv = (value, envValue) => (
       Array.isArray(value)
@@ -464,6 +466,61 @@ export function createSwarmRunner({
     const delimitedCount = cleanObjective.split(/[;\n]+/).map((s) => s.trim()).filter(Boolean).length
     const hasExplicitSlices = (Array.isArray(slices) && slices.length > 0) || delimitedCount > 1
     const autoSlicePending = parentMode === 'ai' || (parentMode === 'auto' && !hasExplicitSlices)
+    const parentModelCalls = autoSlicePending ? 1 : 0
+    const sliceCountByWorker = new Map()
+    for (const slice of mappedSlices) {
+      sliceCountByWorker.set(slice.worker, (sliceCountByWorker.get(slice.worker) ?? 0) + 1)
+    }
+    const perCallOutputTokens = Number.isFinite(Number(runBudget?.maxTokens)) && Number(runBudget.maxTokens) > 0
+      ? Math.min(DEFAULT_SWARM_MAX_TOKENS, Math.floor(Number(runBudget.maxTokens)))
+      : DEFAULT_SWARM_MAX_TOKENS
+    const perCallInputTokens = 800
+    let estimatedCalls = agentsForPlan.some((agent) => agent.role === 'parent') ? 0 : parentModelCalls
+    let estimatedTokens = estimatedCalls * (perCallInputTokens + perCallOutputTokens)
+    let estimatedPaidMicros = 0
+    const agentEstimates = agentsForPlan.map((agent) => {
+      const calls = agent.role === 'parent'
+        ? parentModelCalls
+        : agent.role === 'reviewer'
+          ? (mappedSlices.length > 0 ? 1 + maxReviewRounds : 1)
+          : Math.max(1, sliceCountByWorker.get(agent.name) ?? 1) * (1 + maxReviewRounds)
+      const promptTokens = calls * perCallInputTokens
+      const completionTokens = calls * perCallOutputTokens
+      const totalTokens = promptTokens + completionTokens
+      const isPaid = agent.provider === 'gemini-api-paid' || agent.billingCategory === 'payg'
+      const usdMicros = isPaid
+        ? estimateGeminiPaidCostMicros({ promptTokens, completionTokens }, agent.scope ?? '', process.env)
+        : 0
+      const baseId = typeof agent.model === 'string' && agent.model.includes('@')
+        ? agent.model.split('@')[0]
+        : agent.model
+      const snap = modelBudget?.snapshot?.(baseId, agent.scope)
+      const usdPoolLimiter = snap?.limiters?.find((entry) => entry.unit === 'usd_micros')
+      estimatedCalls += calls
+      estimatedTokens += totalTokens
+      estimatedPaidMicros += usdMicros
+      return {
+        agent: agent.name,
+        role: agent.role,
+        model: agent.model,
+        provider: agent.provider,
+        groupKey: agent.groupKey,
+        billingCategory: agent.billingCategory,
+        estimatedCalls: calls,
+        estimatedTokens: totalTokens,
+        estimatedUsd: Number((usdMicros / 1_000_000).toFixed(6)),
+        headroomPct: Number(((Number.isFinite(agent.headroom) ? agent.headroom : 1) * 100).toFixed(1)),
+        ...(usdPoolLimiter
+          ? {
+            remainingPoolUsd: usdPoolLimiter.remainingUsd
+              ?? Number((usdPoolLimiter.remaining / 1_000_000).toFixed(6))
+          }
+          : {})
+      }
+    })
+    const paidEscalationActive = agentsForPlan.some(
+      (agent) => agent.provider === 'gemini-api-paid' || agent.billingCategory === 'payg'
+    )
 
     return {
       ...(taskId !== undefined ? { taskId } : {}),
@@ -489,9 +546,14 @@ export function createSwarmRunner({
       slices: mappedSlices,
       dispatchPlan,
       quotaSummary: {
-        parentModelCalls: autoSlicePending ? 1 : 0,
+        parentModelCalls,
         distinctProviderDomains: workerDomains.size,
-        byLimitKind
+        byLimitKind,
+        estimatedCalls,
+        estimatedTokens,
+        estimatedPaidUsd: Number((estimatedPaidMicros / 1_000_000).toFixed(6)),
+        paidEscalationActive,
+        agentEstimates
       }
     }
   }

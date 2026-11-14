@@ -115,6 +115,7 @@ function usageText() {
   return [
     'Usage:',
     '  ./workspace ai quota status [--database PATH] [--json]',
+    '  ./workspace ai quota audit [--database PATH] [--json]',
     '  ./workspace ai quota recommend [--database PATH] [--json]',
     '  ./workspace ai quota sync [pool options] [--database PATH] [--json]',
     '',
@@ -186,6 +187,7 @@ function summarizePool(budget, id, scope, label) {
     behindPace,
     harvestableSession,
     pacedHeadroom: Number((hr.pacedHeadroom ?? 1).toFixed(3)),
+    ...(hr.syncAudit ? { syncAudit: hr.syncAudit } : {}),
     ...(weekLimiter
       ? {
         weekly: {
@@ -310,11 +312,37 @@ export function buildQuotaReport(budget, env = process.env) {
 
   const recommendedAgyArgs = agyWorkerCandidates.map(({ defaultModel }) => defaultModel)
   const healthyGeminiApi = geminiApiModels.filter((entry) => entry.configured && entry.ok)
-  const suggestedSwarmCommand = recommendedAgyArgs.length > 0
-    ? `./workspace ai swarm run "<objective>" --agy-models ${recommendedAgyArgs.join(',')}`
-    : (healthyGeminiApi.length > 0
-      ? `./workspace ai swarm run "<objective>" --gemini-api-models ${configuredGeminiModels.join(',')}`
-      : './workspace ai swarm run "<objective>" --opencode-models opencode/deepseek-v4.1-flash-free,opencode/glm-5.3-flash-free')
+  const agyArg = recommendedAgyArgs.length > 0
+    ? `--agy-models ${recommendedAgyArgs.join(',')}`
+    : ''
+  const geminiApiArg = healthyGeminiApi.length > 0
+    ? `--gemini-api-models ${healthyGeminiApi.map((entry) => entry.target.replace(/^gemini-api@/, '')).join(',')}`
+    : ''
+  const suggestedSwarmCommand = (agyArg || geminiApiArg)
+    ? `./workspace ai swarm run "<objective>" ${[agyArg, geminiApiArg].filter(Boolean).join(' ')}`
+    : './workspace ai swarm run "<objective>" --opencode-models opencode/deepseek-v4.1-flash-free,opencode/glm-5.3-flash-free'
+
+  const expiredResets = agyPools
+    .filter((pool) => pool.syncAudit?.syncedWeekResetExpired)
+    .map((pool) => pool.target)
+  const stalePools = agyPools
+    .filter((pool) => pool.configured && (!pool.syncAudit || pool.syncAudit.staleCalibration))
+    .map((pool) => ({
+      target: pool.target,
+      label: pool.label,
+      reason: pool.syncAudit?.syncedWeekResetExpired
+        ? 'synced weekly reset timer elapsed; re-run `./workspace ai quota sync`'
+        : pool.syncAudit
+          ? `calibrated ${formatDuration(pool.syncAudit.syncAgeSeconds)} ago (>24h)`
+          : 'never calibrated via `./workspace ai quota sync`'
+    }))
+  const driftAudit = {
+    expiredResets,
+    stalePools: stalePools.map((entry) => entry.target),
+    details: stalePools,
+    needsSync: stalePools.length > 0,
+    warnings: stalePools.map((entry) => `${entry.target}: ${entry.reason}`)
+  }
 
   return {
     agyPools,
@@ -322,6 +350,7 @@ export function buildQuotaReport(budget, env = process.env) {
     ...(geminiApiPaid ? { geminiApiPaid } : {}),
     otherBackends,
     opencodeGoogle,
+    driftAudit,
     strategy: {
       workerPrimary: agyPools.find((entry) => entry.target.includes('gemini-3.8') || entry.target.includes('hydrogen'))?.ok
         ? AGY_POOL_DEFAULT_MODELS.gemini
@@ -360,6 +389,17 @@ function printQuotaReport(report) {
         `    5-Hour:  ${pool.session5h.remainingPct}% remaining (${pool.session5h.limit - pool.session5h.used}/${pool.session5h.limit} left, ` +
         `refreshes in ${pool.session5h.resetsIn})`
       )
+    }
+    if (pool.syncAudit) {
+      const age = pool.syncAudit.syncAgeSeconds !== undefined
+        ? `${formatDuration(pool.syncAudit.syncAgeSeconds)} ago`
+        : 'previously'
+      const state = pool.syncAudit.syncedWeekResetExpired
+        ? 'EXPIRED RESET — run `./workspace ai quota sync`'
+        : pool.syncAudit.staleCalibration
+          ? 'STALE (>24h) — consider `./workspace ai quota sync`'
+          : 'fresh'
+      console.log(`    Calibration: synced ${age} (${state})`)
     }
     console.log(`    Strategy: ${pool.roleAdvice}`)
   }
@@ -417,6 +457,20 @@ function printQuotaReport(report) {
 
   console.log('\nRecommended Swarm Dispatch:')
   console.log(`  ${report.strategy.suggestedSwarmCommand}`)
+  printDriftAudit(report)
+}
+
+function printDriftAudit(report) {
+  const audit = report.driftAudit
+  if (!audit) return
+  console.log('\nQuota Drift & Reset Audit:')
+  if (!audit.needsSync) {
+    console.log('  [OK] All configured AGY weekly/5h calibrations are current.')
+    return
+  }
+  for (const warning of audit.warnings) {
+    console.log(`  [SYNC NEEDED] ${warning}`)
+  }
 }
 
 function main() {
@@ -430,8 +484,8 @@ function main() {
     return
   }
 
-  if (!['status', 'sync', 'recommend'].includes(subcommand)) {
-    throw new Error(`Unknown ai quota subcommand "${subcommand}". Use status, sync, or recommend.`)
+  if (!['status', 'audit', 'sync', 'recommend'].includes(subcommand)) {
+    throw new Error(`Unknown ai quota subcommand "${subcommand}". Use status, audit, sync, or recommend.`)
   }
 
   const dbPath = resolveDatabasePath({ explicitPath: options['--database'], rootDir: ROOT_DIR })
@@ -499,6 +553,16 @@ function main() {
     }
 
     const report = buildQuotaReport(budget)
+    if (subcommand === 'audit') {
+      if (options['--json']) {
+        console.log(JSON.stringify({ driftAudit: report.driftAudit, strategy: report.strategy }, null, 2))
+      } else {
+        printDriftAudit(report)
+        console.log('\nRecommended Swarm Dispatch:')
+        console.log(`  ${report.strategy.suggestedSwarmCommand}`)
+      }
+      return
+    }
     if (options['--json']) {
       console.log(JSON.stringify(report, null, 2))
     } else {

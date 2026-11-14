@@ -41,6 +41,7 @@ const OBSERVED_REQUESTS_POLICY = 'observed-requests'
 const OBSERVED_429_POLICY = 'observed-429'
 const OBSERVED_COOLDOWN_POLICY = 'observed-cooldown'
 const SYNCED_WEEK_RESET_POLICY = 'synced-week-reset'
+const SYNCED_AT_POLICY = 'synced-at'
 const GOOGLE_API_DEFAULT_TIMEZONE = 'America/Los_Angeles'
 // The observed ledger buckets on UTC day boundaries; the learned cap is
 // applied as its own limiter shape when a cap exists.
@@ -966,6 +967,25 @@ export function createModelBudget({
   }
 
   function evaluateWeeklyPacing(observedId, limitConfigs, mappedLimiters, at) {
+    const rawSyncedResetAt = latestBucket(observedId, SYNCED_WEEK_RESET_POLICY)
+    const lastSyncedAt = latestBucket(observedId, SYNCED_AT_POLICY)
+    const syncedWeekResetExpired = Boolean(rawSyncedResetAt !== null && rawSyncedResetAt <= at)
+    const syncAgeSeconds = lastSyncedAt !== null
+      ? Math.max(0, Math.floor((at - lastSyncedAt) / 1000))
+      : null
+    const staleCalibration = Boolean(
+      syncedWeekResetExpired
+      || (lastSyncedAt !== null && at - lastSyncedAt > 24 * HOUR)
+    )
+    const syncAudit = (lastSyncedAt !== null || rawSyncedResetAt !== null)
+      ? {
+        ...(lastSyncedAt !== null ? { lastSyncedAt, syncAgeSeconds } : {}),
+        ...(rawSyncedResetAt !== null ? { syncedResetAt: rawSyncedResetAt } : {}),
+        syncedWeekResetExpired,
+        staleCalibration
+      }
+      : undefined
+
     const finitePairs = []
     for (let index = 0; index < mappedLimiters.length; index += 1) {
       const limiter = mappedLimiters[index]
@@ -973,10 +993,16 @@ export function createModelBudget({
       finitePairs.push({ limiter, rule: limitConfigs?.[index] ?? null })
     }
     if (finitePairs.length === 0) {
-      return { pacedHeadroom: 1, pacing: undefined, sessionWindow: undefined, harvestableSession: false }
+      return {
+        pacedHeadroom: 1,
+        pacing: undefined,
+        sessionWindow: undefined,
+        harvestableSession: false,
+        ...(syncAudit ? { syncAudit } : {})
+      }
     }
 
-    const syncedWeekEnd = activeSyncedWeekEnd(observedId, at)
+    const syncedWeekEnd = rawSyncedResetAt !== null && rawSyncedResetAt > at ? rawSyncedResetAt : null
     let worstWeekly = null
     let worstSession = null
     const scoredRatios = []
@@ -1035,7 +1061,8 @@ export function createModelBudget({
       pacedHeadroom,
       ...(worstWeekly ? { pacing: worstWeekly } : {}),
       ...(worstSession ? { sessionWindow: worstSession } : {}),
-      harvestableSession
+      harvestableSession,
+      ...(syncAudit ? { syncAudit } : {})
     }
   }
 
@@ -1185,6 +1212,7 @@ export function createModelBudget({
       ...(pacingEvaluation.pacing ? { pacing: pacingEvaluation.pacing } : {}),
       ...(pacingEvaluation.sessionWindow ? { sessionWindow: pacingEvaluation.sessionWindow } : {}),
       ...(pacingEvaluation.harvestableSession ? { harvestableSession: true } : {}),
+      ...(pacingEvaluation.syncAudit ? { syncAudit: pacingEvaluation.syncAudit } : {}),
       ...(primary.window === 'day' && primary.bucket !== null
         ? { day: dayKey(primary.bucket) }
         : {}),
@@ -1396,6 +1424,7 @@ export function createModelBudget({
         pacedHeadroom: 0,
         ...(budget.pacing ? { pacing: budget.pacing } : {}),
         ...(budget.sessionWindow ? { sessionWindow: budget.sessionWindow } : {}),
+        ...(budget.syncAudit ? { syncAudit: budget.syncAudit } : {}),
         retryAfter: budget.retryAfter,
         configured,
         observedRequests,
@@ -1412,6 +1441,7 @@ export function createModelBudget({
       ...(budget.pacing ? { pacing: budget.pacing } : {}),
       ...(budget.sessionWindow ? { sessionWindow: budget.sessionWindow } : {}),
       ...(budget.harvestableSession ? { harvestableSession: true } : {}),
+      ...(budget.syncAudit ? { syncAudit: budget.syncAudit } : {}),
       configured,
       observedRequests,
       budget
@@ -1436,6 +1466,9 @@ export function createModelBudget({
     const observedId = target.ledgerId
     const limits = target.limits ?? []
     const at = now()
+
+    deleteBucketPolicy(observedId, SYNCED_AT_POLICY)
+    addBucket(observedId, SYNCED_AT_POLICY, Math.floor(at), 1)
 
     const parsedWeekReset = Number(weeklyResetSeconds)
     if (weeklyResetSeconds !== undefined && Number.isFinite(parsedWeekReset) && parsedWeekReset > 0) {

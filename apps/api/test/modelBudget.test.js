@@ -855,3 +855,48 @@ test('gemini-api-paid enforces local prepay safety-ratio USD & token depleting p
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('syncAudit tracks calibration timestamp and flags elapsed synced reset or >24h staleness', () => {
+  const clock = clockAt('2026-01-14T10:00:00Z')
+  const budget = createModelBudget({
+    env: {
+      AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK: '200',
+      AGY_AI_GEMINI_MAX_REQUESTS_PER_5H: '45'
+    },
+    now: clock.now
+  })
+
+  assert.equal(budget.snapshot('agy', 'gemini-3.8-flash-medium').syncAudit, undefined)
+
+  budget.syncPoolState('agy', {
+    scope: 'gemini-3.8-flash-medium',
+    weeklyRemainingPercent: 80,
+    weeklyResetSeconds: 6 * 3600,
+    sessionRemainingPercent: 100,
+    sessionResetSeconds: 5 * 3600
+  })
+
+  const fresh = budget.headroom('agy', 'gemini-3.8-flash-medium')
+  assert.equal(fresh.syncAudit.syncedWeekResetExpired, false)
+  assert.equal(fresh.syncAudit.staleCalibration, false)
+  assert.equal(fresh.syncAudit.syncAgeSeconds, 0)
+
+  // Advance past the synced 6h weekly reset timer
+  clock.advance(7 * HOUR)
+  const expired = budget.headroom('agy', 'gemini-3.8-flash-medium')
+  assert.equal(expired.syncAudit.syncedWeekResetExpired, true)
+  assert.equal(expired.syncAudit.staleCalibration, true)
+  assert.equal(expired.syncAudit.syncAgeSeconds, 7 * 3600)
+
+  // Re-sync with a long reset window and advance >24h to check age-based staleness
+  budget.syncPoolState('agy', {
+    scope: 'gemini-3.8-flash-medium',
+    weeklyRemainingPercent: 95,
+    weeklyResetSeconds: 150 * 3600
+  })
+  clock.advance(25 * HOUR)
+  const staleByAge = budget.headroom('agy', 'gemini-3.8-flash-medium')
+  assert.equal(staleByAge.syncAudit.syncedWeekResetExpired, false)
+  assert.equal(staleByAge.syncAudit.staleCalibration, true)
+  assert.equal(staleByAge.syncAudit.syncAgeSeconds, 25 * 3600)
+})
