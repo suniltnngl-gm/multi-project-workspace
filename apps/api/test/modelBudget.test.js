@@ -704,3 +704,36 @@ test('AGY dual 5-hour session and weekly limits keep harvestableSession and pers
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('opencode console-google shares one GCP project pool, stays isolated from agy, and resets at Pacific midnight', () => {
+  // Winter PST is UTC-8: 2026-01-14T23:55:00Z is 15:55 PST on Jan 14.
+  const clock = clockAt('2026-01-14T23:55:00Z')
+  const budget = createModelBudget({
+    env: {
+      OPENCODE_AI_GOOGLE_MAX_REQUESTS_PER_DAY: '2',
+      OPENCODE_AI_GOOGLE_MAX_REQUESTS_PER_MINUTE: '10',
+      AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK: '5'
+    },
+    now: clock.now
+  })
+
+  budget.record('opencode', 1, 'console-google/gemini-3.8-flash')
+  assert.equal(budget.snapshot('opencode', 'console-google/gemini-2.5-flash').used, 1)
+  assert.equal(budget.snapshot('agy', 'gemini-3.8-flash-medium').used, 0)
+
+  // Live 429 on one console-google model also protects sibling models in the same GCP project,
+  // and daily/429 buckets ignore UTC midnight (00:05Z = 16:05 PST) until PT midnight (08:00Z).
+  budget.observe429('opencode', { scope: 'console-google/gemini-3.8-flash', retryAfter: 30 })
+  budget.record('opencode', 1, 'console-google/gemini-2.5-flash')
+  assert.equal(budget.check('opencode', 'console-google/gemini-3.8-flash').ok, false)
+
+  clock.set('2026-01-15T00:05:00Z') // Past UTC midnight, still Jan 14 in America/Los_Angeles
+  assert.equal(budget.check('opencode', 'console-google/gemini-2.5-flash').ok, false)
+
+  clock.set('2026-01-15T07:59:00Z') // 23:59 PST on Jan 14
+  assert.equal(budget.check('opencode', 'console-google/gemini-2.5-flash').ok, false)
+
+  clock.set('2026-01-15T08:01:00Z') // 00:01 PST on Jan 15 -> daily RPD & learned 429 reset
+  assert.equal(budget.check('opencode', 'console-google/gemini-2.5-flash').ok, true)
+  assert.equal(budget.snapshot('opencode', 'console-google/gemini-3.8-flash').used, 0)
+})

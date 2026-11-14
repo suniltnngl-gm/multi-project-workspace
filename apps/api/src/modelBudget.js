@@ -41,6 +41,7 @@ const OBSERVED_REQUESTS_POLICY = 'observed-requests'
 const OBSERVED_429_POLICY = 'observed-429'
 const OBSERVED_COOLDOWN_POLICY = 'observed-cooldown'
 const SYNCED_WEEK_RESET_POLICY = 'synced-week-reset'
+const GOOGLE_API_DEFAULT_TIMEZONE = 'America/Los_Angeles'
 // The observed ledger buckets on UTC day boundaries; the learned cap is
 // applied as its own limiter shape when a cap exists.
 const OBSERVED_DAY = {
@@ -254,16 +255,23 @@ function buildComputeAndRequestLimits(env, entries) {
     if (spec.hoursEnv && (!Number.isFinite(hours) || hours <= 0)) {
       throw new Error(`${spec.hoursEnv} must be a positive number.`)
     }
+    const timezone = spec.timezoneEnv && env[spec.timezoneEnv]?.trim()
+      ? env[spec.timezoneEnv].trim()
+      : (spec.timezone ?? 'UTC')
     specs.push({
       unit: spec.unit,
       limit,
       window: spec.window,
-      reset: 'fixed',
-      timezone: 'UTC',
+      reset: spec.reset ?? 'fixed',
+      timezone,
       ...(hours !== undefined ? { hours } : {})
     })
   }
   return specs
+}
+
+export function isConsoleGoogleScope(scope) {
+  return scope === 'console-google' || (typeof scope === 'string' && scope.startsWith('console-google/'))
 }
 
 export function resolveQuotaTarget(configs, id, scope) {
@@ -281,6 +289,26 @@ export function resolveQuotaTarget(configs, id, scope) {
         pool
       }
     }
+  }
+
+  // Google AI Studio / Gemini API keys on OpenCode (console-google/*) share
+  // RPM/TPM/RPD per Google Cloud project rather than per model/key and reset
+  // daily RPD at midnight US Pacific Time (America/Los_Angeles).
+  if (id === 'opencode' && isConsoleGoogleScope(scope)) {
+    const exactKey = `opencode@${scope}`
+    if (configs?.has(exactKey)) {
+      return { ledgerId: exactKey, limits: configs.get(exactKey), pool: 'console-google' }
+    }
+    const poolKey = 'opencode@console-google'
+    let limits = configs?.get(poolKey) ?? configs?.get('console-google')
+    if (!limits && configs?.has('opencode')) {
+      limits = configs.get('opencode').map((entry) => (
+        entry.window === 'day' && entry.timezone === 'UTC'
+          ? { ...entry, timezone: GOOGLE_API_DEFAULT_TIMEZONE }
+          : entry
+      ))
+    }
+    return { ledgerId: poolKey, limits, pool: 'console-google' }
   }
 
   const ledgerId = scope ? `${id}@${scope}` : id
@@ -420,6 +448,38 @@ export function resolveQuotaProfiles({ env = process.env, profiles } = {}) {
       { key: tokWeekKey, unit: 'tokens', window: 'week' }
     ])
     if (poolLimits.length > 0) result.set(poolId, normalizeLimits(poolId, poolLimits))
+  }
+
+  if (!result.has('opencode@console-google')) {
+    const googleLimits = buildComputeAndRequestLimits(env, [
+      {
+        key: 'OPENCODE_AI_GOOGLE_MAX_REQUESTS_PER_MINUTE',
+        unit: 'requests',
+        window: 'minute',
+        reset: 'rolling',
+        timezoneEnv: 'OPENCODE_AI_GOOGLE_TIMEZONE',
+        timezone: GOOGLE_API_DEFAULT_TIMEZONE
+      },
+      {
+        key: 'OPENCODE_AI_GOOGLE_MAX_TOKENS_PER_MINUTE',
+        unit: 'tokens',
+        window: 'minute',
+        reset: 'rolling',
+        timezoneEnv: 'OPENCODE_AI_GOOGLE_TIMEZONE',
+        timezone: GOOGLE_API_DEFAULT_TIMEZONE
+      },
+      {
+        key: 'OPENCODE_AI_GOOGLE_MAX_REQUESTS_PER_DAY',
+        unit: 'requests',
+        window: 'day',
+        reset: 'fixed',
+        timezoneEnv: 'OPENCODE_AI_GOOGLE_TIMEZONE',
+        timezone: GOOGLE_API_DEFAULT_TIMEZONE
+      }
+    ])
+    if (googleLimits.length > 0) {
+      result.set('opencode@console-google', normalizeLimits('opencode@console-google', googleLimits))
+    }
   }
 
   for (const [id, key] of LEGACY_LIMITS) {
@@ -579,11 +639,23 @@ export function createModelBudget({
     return rows
   }
 
+  function observedDayFor(observedId, limits) {
+    const dayLimit = (limits ?? []).find((entry) => entry.window === 'day' && entry.reset === 'fixed')
+    if (dayLimit?.timezone && dayLimit.timezone !== 'UTC') {
+      return { ...OBSERVED_DAY, timezone: dayLimit.timezone }
+    }
+    if (observedId === 'opencode@console-google' || observedId.startsWith('opencode@console-google/')) {
+      const tz = env.OPENCODE_AI_GOOGLE_TIMEZONE?.trim() || GOOGLE_API_DEFAULT_TIMEZONE
+      return { ...OBSERVED_DAY, timezone: tz }
+    }
+    return OBSERVED_DAY
+  }
+
   // Learned cap: the smallest observed request count at which a 429 struck
   // today. Markers from earlier days never apply, so a new day starts fresh.
-  function observedCap(id, at) {
-    const dayStart = startOfFixedWindow(at, OBSERVED_DAY)
-    const dayEnd = nextFixedBoundary(dayStart, OBSERVED_DAY)
+  function observedCap(id, at, dayShape = OBSERVED_DAY) {
+    const dayStart = startOfFixedWindow(at, dayShape)
+    const dayEnd = nextFixedBoundary(dayStart, dayShape)
     let cap = null
     for (const row of listBuckets(id, OBSERVED_429_POLICY)) {
       const bucket = Number(row.bucket)
@@ -800,12 +872,13 @@ export function createModelBudget({
     const target = resolveQuotaTarget(configs, id, scope)
     const limits = target.limits
     const observedId = target.ledgerId
+    const dayShape = observedDayFor(observedId, limits)
     const at = now()
     const pending = pendingReservations(id, scope, at, observedId)
-    const dayBucket = startOfFixedWindow(at, OBSERVED_DAY)
+    const dayBucket = startOfFixedWindow(at, dayShape)
     const observedRequests = readBucket(observedId, OBSERVED_REQUESTS_POLICY, dayBucket)
       + pendingCalls(pending)
-    const cap = observedCap(observedId, at)
+    const cap = observedCap(observedId, at, dayShape)
     const hasObserved = observedRequests > 0 || cap !== null
     if ((!limits || limits.length === 0) && !hasObserved) return undefined
     const cooldownUntil = cooldowns.get(observedId) ?? 0
@@ -858,7 +931,7 @@ export function createModelBudget({
         ok,
         resetsInSeconds: ok
           ? 0
-          : Math.max(1, Math.ceil((nextFixedBoundary(dayBucket, OBSERVED_DAY) - at) / 1000)),
+          : Math.max(1, Math.ceil((nextFixedBoundary(dayBucket, dayShape) - at) / 1000)),
         bucket: dayBucket,
         observed: true
       })
@@ -938,6 +1011,7 @@ export function createModelBudget({
     const target = resolveQuotaTarget(configs, id, scope)
     const observedId = target.ledgerId
     const limits = target.limits
+    const dayShape = observedDayFor(observedId, limits)
     for (const limit of limits ?? []) {
       if (limit.unit === 'requests') addAmount(observedId, limit, count, at)
     }
@@ -947,7 +1021,7 @@ export function createModelBudget({
     addBucket(
       observedId,
       OBSERVED_REQUESTS_POLICY,
-      startOfFixedWindow(at, OBSERVED_DAY),
+      startOfFixedWindow(at, dayShape),
       count
     )
   }
@@ -1178,12 +1252,14 @@ export function createModelBudget({
   function observe429(id, { retryAfter, scope } = {}) {
     const seconds = Math.ceil(Number(retryAfter))
     if (!Number.isFinite(seconds) || seconds <= 0) return
-    const observedId = resolveQuotaTarget(configs, id, scope).ledgerId
+    const target = resolveQuotaTarget(configs, id, scope)
+    const observedId = target.ledgerId
+    const dayShape = observedDayFor(observedId, target.limits)
     const at = now()
     const requests = readBucket(
       observedId,
       OBSERVED_REQUESTS_POLICY,
-      startOfFixedWindow(at, OBSERVED_DAY)
+      startOfFixedWindow(at, dayShape)
     )
     addBucket(observedId, OBSERVED_429_POLICY, at, requests)
     const until = at + seconds * 1000

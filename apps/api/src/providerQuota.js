@@ -4,6 +4,7 @@
 // Relevant Files: apps/api/src/providerQuota.js, apps/api/src/modelRegistry.js, apps/api/src/modelBudget.js, apps/api/src/agentBus.js, apps/api/src/routes/models.js
 // Important Context: User file. The zero-token half of provider-aware routing.
 
+import { isConsoleGoogleScope } from './modelBudget.js'
 import {
   agyQuotaPoolForScope,
   resolveBillingCategoryForScope
@@ -28,6 +29,10 @@ export function modelProviderKey(model) {
       const pool = agyQuotaPoolForScope(scope)
       return pool ? `agy:${pool}` : `agy:${scope}`
     }
+  }
+  if (provider === 'opencode') {
+    const scope = model.scope || quotaScopeForModel(model)
+    if (isConsoleGoogleScope(scope)) return 'opencode:console-google'
   }
   if (model.scope) {
     return `${provider}:${model.scope}`

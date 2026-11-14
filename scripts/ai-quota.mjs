@@ -205,7 +205,13 @@ function summarizePool(budget, id, scope, label) {
         daily: {
           remainingPct: dailyRemainingPct,
           used: dayLimiter.used,
-          limit: dayLimiter.limit
+          limit: dayLimiter.limit,
+          ...(dayLimiter.resetsInSeconds > 0
+            ? {
+              resetsIn: formatDuration(dayLimiter.resetsInSeconds),
+              resetsInSeconds: dayLimiter.resetsInSeconds
+            }
+            : {})
         }
       }
       : {}),
@@ -219,8 +225,10 @@ export function buildQuotaReport(budget) {
     summarizePool(budget, 'agy', AGY_POOL_DEFAULT_MODELS['claude-gpt'], 'AGY Claude & GPT-OSS'),
     summarizePool(budget, 'agy', AGY_POOL_DEFAULT_MODELS['gemini-4-argon'], 'AGY Gemini 4 Argon')
   ]
+  const opencodeGoogle = budget.snapshot('opencode', 'console-google/gemini-3.8-flash') ?? null
   const otherBackends = [
     summarizePool(budget, 'opencode', undefined, 'OpenCode headless (4+1 daily/RPM pools)'),
+    summarizePool(budget, 'opencode', 'console-google/gemini-3.8-flash', 'OpenCode console-google (GCP project API key, PT reset)'),
     summarizePool(budget, 'colab-3b', undefined, 'Colab 3B (12h GPU session + daily)'),
     summarizePool(budget, 'kaggle-3b', undefined, 'Kaggle 3B (weekly batch compute)')
   ].filter((entry) => entry.configured)
@@ -242,6 +250,7 @@ export function buildQuotaReport(budget) {
   return {
     agyPools,
     otherBackends,
+    opencodeGoogle,
     strategy: {
       workerPrimary: agyPools.find((entry) => entry.target.includes('gemini-3.8') || entry.target.includes('hydrogen'))?.ok
         ? AGY_POOL_DEFAULT_MODELS.gemini
@@ -289,7 +298,10 @@ function printQuotaReport(report) {
     for (const entry of report.otherBackends) {
       const parts = []
       if (entry.session5h) parts.push(`session=${entry.session5h.remainingPct}%`)
-      if (entry.daily) parts.push(`daily=${entry.daily.remainingPct}% (${entry.daily.limit - entry.daily.used}/${entry.daily.limit})`)
+      if (entry.daily) {
+        const suffix = entry.daily.resetsIn ? `, resets in ${entry.daily.resetsIn}` : ''
+        parts.push(`daily=${entry.daily.remainingPct}% (${entry.daily.limit - entry.daily.used}/${entry.daily.limit}${suffix})`)
+      }
       if (entry.weekly) parts.push(`weekly=${entry.weekly.remainingPct}%`)
       console.log(`  - ${entry.label}: ${parts.join(', ') || 'ready'}`)
     }

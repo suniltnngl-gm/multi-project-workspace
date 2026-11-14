@@ -588,3 +588,56 @@ test('buildSwarmRoster prefers harvestable 5h session pools and demotes ahead-of
   assert.ok(!roster.workers.some((worker) => worker.groupKey === 'agy:gemini-4-argon'))
   assert.equal(roster.reviewer?.groupKey, 'agy:claude-gpt')
 })
+
+test('console-google API key models share one GCP project domain while running concurrently with agy OAuth', () => {
+  const clock = clockAt('2026-11-14T07:00:00Z')
+  const budget = createModelBudget({
+    env: {
+      OPENCODE_AI_GOOGLE_MAX_REQUESTS_PER_DAY: '50',
+      OPENCODE_AI_MAX_REQUESTS_PER_DAY: '100',
+      AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK: '200'
+    },
+    now: clock.now
+  })
+
+  const models = [
+    model({
+      id: 'opencode',
+      provider: 'opencode',
+      backend: 'opencode-cli',
+      limitKind: 'provider_model',
+      cli: { command: 'opencode', model: 'console-google/gemini-3.8-flash' }
+    }),
+    model({
+      id: 'agy',
+      provider: 'agy',
+      backend: 'agy-cli',
+      limitKind: 'provider_model',
+      cli: { command: 'agy', model: 'gemini-3.8-flash-medium' }
+    })
+  ]
+
+  const g38 = resolveAgentModel(models, 'opencode@console-google/gemini-3.8-flash')
+  const g25 = resolveAgentModel(models, 'opencode@console-google/gemini-2.5-flash')
+  const agyGem = resolveAgentModel(models, 'agy@gemini-3.8-flash-medium')
+  const deepseek = resolveAgentModel(models, 'opencode@opencode/deepseek-v4.1-flash-free')
+
+  assert.equal(modelProviderKey(g38), 'opencode:console-google')
+  assert.equal(modelProviderKey(g25), 'opencode:console-google')
+  assert.equal(modelProviderKey(agyGem), 'agy:gemini')
+  assert.equal(modelProviderKey(deepseek), 'opencode:opencode/deepseek-v4.1-flash-free')
+
+  // Only one worker is scheduled onto opencode:console-google even with multiple console-google models
+  // listed, while agy:gemini runs in parallel because OAuth and API key quotas are independent.
+  const roster = buildSwarmRoster({
+    models,
+    modelBudget: budget,
+    workerCount: 2,
+    includeReviewer: false,
+    opencodeModels: ['console-google/gemini-3.8-flash', 'console-google/gemini-2.5-flash'],
+    agyModels: ['gemini-3.8-flash-medium']
+  })
+
+  const groupKeys = roster.workers.map((worker) => worker.groupKey).sort()
+  assert.deepEqual(groupKeys, ['agy:gemini', 'opencode:console-google'])
+})
