@@ -113,7 +113,13 @@ export function createAgentsRouter({ database, bus, swarmRunner } = {}) {
       return response.status(400).json({ error: 'Limit must be a positive integer of at most 200.' })
     }
     options.limit = limit
-    return response.json(database.listAgentRuns(options))
+    const runs = database.listAgentRuns(options).map((run) => ({
+      ...run,
+      reviewerVerdict: run.reviewerVerdict ?? run.checkpoint?.reviewerVerdict ?? run.result?.reviewerVerdict ?? null,
+      worktreeMerge: run.worktreeMerge ?? run.checkpoint?.worktreeMerge ?? run.result?.worktreeMerge ?? null,
+      worktreeDiffs: run.worktreeDiffs ?? run.checkpoint?.worktreeDiffs ?? run.result?.worktreeDiffs ?? []
+    }))
+    return response.json(runs)
   })
 
   router.get('/api/agents/runs/:id', (request, response) => {

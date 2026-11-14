@@ -631,4 +631,49 @@ describe('user files and folders sections', () => {
     window.dispatchEvent(new Event('beforeunload'))
     vi.useRealTimers()
   })
+
+  it('renders reviewer verdicts, merge status, and preserves open worktree diffs across refreshes', async () => {
+    vi.mocked(fetch).mockImplementation(async (path) => {
+      if (path === '/api/models/providers') {
+        return jsonResponse({ ok: true, providers: [] })
+      }
+      if (path === '/api/agents/runs?limit=5') {
+        return jsonResponse([{
+          id: 'run_wt_1',
+          status: 'completed',
+          isolateWorktrees: true,
+          reviewerVerdict: { status: 'approved', summary: 'All slices verified.' },
+          worktreeMerge: { status: 'merged', branches: ['swarm/1/worker-1'], conflicts: [] },
+          worktreeDiffs: [{ agent: 'worker-1', branch: 'swarm/1/worker-1', diff: '--- a/file.js\n+++ b/file.js' }]
+        }])
+      }
+      if (path === '/api/models') return jsonResponse([])
+      if (path === '/api/tasks') return jsonResponse([])
+      if (path === '/api/files') return jsonResponse([])
+      if (path === '/api/folders') return jsonResponse([])
+      return jsonResponse({})
+    })
+
+    document.body.innerHTML = '<div id="app"></div>'
+    vi.resetModules()
+    await import('./main.js')
+
+    await vi.waitFor(() => {
+      expect(document.querySelector('#swarm-telemetry-list').textContent).toContain('reviewer: approved')
+    })
+    expect(document.querySelector('#swarm-telemetry-list').textContent).toContain('merge: merged')
+    expect(document.querySelector('.telemetry-verdict').textContent).toBe('All slices verified.')
+
+    const diffDetails = document.querySelector('.telemetry-diff')
+    expect(diffDetails).not.toBeNull()
+    diffDetails.open = true
+    diffDetails.dispatchEvent(new Event('toggle'))
+
+    document.querySelector('#refresh-telemetry').click()
+    await vi.waitFor(() => {
+      expect(document.querySelector('.telemetry-diff').open).toBe(true)
+    })
+    expect(document.querySelector('.telemetry-diff pre').textContent).toContain('+++ b/file.js')
+    window.dispatchEvent(new Event('beforeunload'))
+  })
 })

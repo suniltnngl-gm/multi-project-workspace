@@ -276,6 +276,7 @@ const quotaTelemetryList = document.querySelector('#quota-telemetry-list')
 const swarmTelemetryList = document.querySelector('#swarm-telemetry-list')
 let telemetryInFlight = false
 let telemetryPollTimer = null
+const openTelemetryDiffKeys = new Set()
 let tasks = []
 let files = []
 let folders = []
@@ -400,9 +401,42 @@ function renderTelemetry(providerData, runsData) {
       details.className = 'model-meta'
       const parts = [run.status || 'unknown']
       if (run.isolateWorktrees || run.worktree) parts.push('worktree')
+      if (run.reviewerVerdict?.status) {
+        parts.push(`reviewer: ${run.reviewerVerdict.status}`)
+      }
+      if (run.worktreeMerge?.status) {
+        const conflictCount = Array.isArray(run.worktreeMerge.conflicts) ? run.worktreeMerge.conflicts.length : 0
+        parts.push(conflictCount > 0 ? `merge: ${run.worktreeMerge.status} (${conflictCount} conflicts)` : `merge: ${run.worktreeMerge.status}`)
+      }
       if (run.goal) parts.push(String(run.goal).slice(0, 60))
       details.textContent = parts.join(' · ')
       item.append(name, details)
+
+      if (run.reviewerVerdict?.summary) {
+        const verdictNote = document.createElement('p')
+        verdictNote.className = 'telemetry-verdict'
+        verdictNote.textContent = run.reviewerVerdict.summary
+        item.append(verdictNote)
+      }
+
+      const diffs = Array.isArray(run.worktreeDiffs) ? run.worktreeDiffs : []
+      for (const entry of diffs) {
+        const diffKey = `${run.id || 'run'}:${entry.agent || entry.branch || 'diff'}`
+        const diffDetails = document.createElement('details')
+        diffDetails.className = 'telemetry-diff'
+        diffDetails.open = openTelemetryDiffKeys.has(diffKey)
+        diffDetails.addEventListener('toggle', () => {
+          if (diffDetails.open) openTelemetryDiffKeys.add(diffKey)
+          else openTelemetryDiffKeys.delete(diffKey)
+        })
+        const summary = document.createElement('summary')
+        summary.textContent = `Diff: ${entry.agent || 'worker'}${entry.branch ? ` (${entry.branch})` : ''}`
+        const pre = document.createElement('pre')
+        pre.textContent = entry.diff || ''
+        diffDetails.append(summary, pre)
+        item.append(diffDetails)
+      }
+
       swarmTelemetryList.append(item)
     }
   }

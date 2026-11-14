@@ -1621,6 +1621,44 @@ export function createSwarmRunner({
       verdictResult,
       selfImprovement
     })
+    const worktreesToClean = runWorktrees.get(run.id) ?? checkpoint?.workerWorktrees
+    let worktreeDiffs = []
+    let worktreeMerge = null
+    if (worktreesToClean) {
+      worktreeDiffs = Object.entries(worktreesToClean)
+        .map(([agentName, wt]) => {
+          try {
+            const diff = collectWorktreeDiff(wt)
+            return diff ? { agent: agentName, branch: wt.branch, diff: String(diff).slice(0, 1500) } : null
+          } catch {
+            return null
+          }
+        })
+        .filter(Boolean)
+      const branches = Object.values(worktreesToClean).map((wt) => wt.branch).filter(Boolean)
+      if (approved && run.plan?.mergeWorktrees) {
+        const mergeResult = mergeWorktreeBranches(Object.values(worktreesToClean))
+        worktreeMerge = {
+          status: mergeResult?.ok === false ? 'aborted' : 'merged',
+          branches,
+          conflicts: Array.isArray(mergeResult?.conflicts) ? mergeResult.conflicts : []
+        }
+      } else {
+        worktreeMerge = { status: 'skipped', branches, conflicts: [] }
+      }
+    }
+
+    const reviewerVerdict = verdictResult
+      ? {
+        status: verdictResult.verdict?.approved ? 'approved' : 'rejected',
+        summary: String(verdictResult.verdict?.summary || verdictResult.summary || summary || '').slice(0, 240)
+      }
+      : null
+
+    checkpoint.reviewerVerdict = reviewerVerdict
+    if (worktreeMerge) checkpoint.worktreeMerge = worktreeMerge
+    if (worktreeDiffs.length > 0) checkpoint.worktreeDiffs = worktreeDiffs
+
     bus.checkpointRun({ agentId: run.primaryAgentId, runId: run.id, checkpoint })
     database.updateAgent(run.primaryAgentId, { state: approved ? 'done' : 'failed' })
     bus.transitionRun(
@@ -1631,6 +1669,9 @@ export function createSwarmRunner({
           result: {
             summary,
             ...(verdictResult ? { verdict: verdictResult.verdict } : {}),
+            ...(reviewerVerdict ? { reviewerVerdict } : {}),
+            ...(worktreeMerge ? { worktreeMerge } : {}),
+            ...(worktreeDiffs.length > 0 ? { worktreeDiffs } : {}),
             ...(selfImprovement ? { selfImprovement } : {}),
             slices: checkpoint.completedSlices
           }
@@ -1639,6 +1680,9 @@ export function createSwarmRunner({
           error: summary,
           result: {
             ...(verdictResult ? { verdict: verdictResult.verdict } : {}),
+            ...(reviewerVerdict ? { reviewerVerdict } : {}),
+            ...(worktreeMerge ? { worktreeMerge } : {}),
+            ...(worktreeDiffs.length > 0 ? { worktreeDiffs } : {}),
             ...(selfImprovement ? { selfImprovement } : {}),
             slices: checkpoint.completedSlices,
             ...(checkpoint.failedSlices?.length > 0 ? { failedSlices: checkpoint.failedSlices } : {})
@@ -1667,11 +1711,7 @@ export function createSwarmRunner({
         // Ignore scan errors when the worktree path is synthetic or not registered on disk.
       }
     }
-    const worktreesToClean = runWorktrees.get(run.id) ?? checkpoint?.workerWorktrees
     if (worktreesToClean) {
-      if (approved && run.plan?.mergeWorktrees) {
-        mergeWorktreeBranches(Object.values(worktreesToClean))
-      }
       cleanupRunWorktrees(Object.values(worktreesToClean))
       runWorktrees.delete(run.id)
     }
