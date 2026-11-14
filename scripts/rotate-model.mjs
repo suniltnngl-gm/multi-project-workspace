@@ -7,7 +7,7 @@
 // Work State: Completed: Updated for OpenCode 4+1 providers and agy headless; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { workspaceTmpDir } from './env.mjs'
 
 export const OPENCODE_PROVIDERS = {
@@ -56,18 +56,30 @@ export const OPENCODE_PROVIDER_ORDER = Object.freeze([
   'opencode'
 ])
 
-export const AGY_MODELS = [
-  'gemini-3.8-flash-medium',
-  'gemini-3.8-flash-high',
-  'gemini-4-argon-medium',
-  'gemini-4-hydrogen-medium',
-  'claude-sonnet-5-5-medium',
-  'gpt-oss-120b-medium'
-]
+export const AGY_POOLS = {
+  gemini: [
+    'gemini-3.8-flash-medium',
+    'gemini-3.8-flash-high',
+    'gemini-4-hydrogen-medium'
+  ],
+  'claude-gpt': [
+    'claude-sonnet-5-5-medium',
+    'gpt-oss-120b-medium'
+  ],
+  'gemini-4-argon': [
+    'gemini-4-argon-medium',
+    'gemini-4-argon-high'
+  ]
+}
+
+export const AGY_POOL_ORDER = Object.freeze(['gemini', 'claude-gpt', 'gemini-4-argon'])
+
+export const AGY_MODELS = AGY_POOL_ORDER.flatMap((pool) => AGY_POOLS[pool])
 
 function parseOptions(argv) {
   let backend = 'opencode'
   let provider = ''
+  let pool = ''
   let dryRun = false
   let list = false
   for (let index = 0; index < argv.length; index += 1) {
@@ -86,11 +98,19 @@ function parseOptions(argv) {
       index += 1
     } else if (arg.startsWith('--provider=')) {
       provider = arg.slice('--provider='.length)
+    } else if (arg === '--pool' && argv[index + 1]) {
+      pool = argv[index + 1]
+      index += 1
+    } else if (arg.startsWith('--pool=')) {
+      pool = arg.slice('--pool='.length)
     } else {
       throw new Error(`Unknown option: ${arg}`)
     }
   }
   if (provider === 'agy') backend = 'agy'
+  if (backend === 'agy' && !pool && provider && provider !== 'agy') {
+    pool = provider
+  }
   if (!['opencode', 'agy'].includes(backend)) {
     throw new Error(`Unsupported backend "${backend}". Use opencode or agy.`)
   }
@@ -99,7 +119,12 @@ function parseOptions(argv) {
       `Unknown OpenCode provider "${provider}". Available: ${OPENCODE_PROVIDER_ORDER.join(', ')}`
     )
   }
-  return { backend, provider, dryRun, list }
+  if (backend === 'agy' && pool && !Object.hasOwn(AGY_POOLS, pool)) {
+    throw new Error(
+      `Unknown Antigravity weekly pool "${pool}". Available: ${AGY_POOL_ORDER.join(', ')}`
+    )
+  }
+  return { backend, provider, pool, dryRun, list }
 }
 
 function updateEnvKey(envPath, key, value) {
@@ -115,12 +140,15 @@ function updateEnvKey(envPath, key, value) {
 }
 
 function main() {
-  const { backend, provider, dryRun, list } = parseOptions(process.argv.slice(2))
+  const { backend, provider, pool: agyPool, dryRun, list } = parseOptions(process.argv.slice(2))
 
   if (list) {
     if (backend === 'agy') {
-      console.log('Antigravity (agy) rotation pool:')
-      for (const model of AGY_MODELS) console.log(`  - ${model}`)
+      const targetPools = agyPool ? [agyPool] : AGY_POOL_ORDER
+      for (const entry of targetPools) {
+        console.log(`agy weekly pool [${entry}]:`)
+        for (const model of AGY_POOLS[entry]) console.log(`  - ${model}`)
+      }
       return
     }
     const targetProviders = provider ? [provider] : OPENCODE_PROVIDER_ORDER
@@ -138,7 +166,9 @@ function main() {
     providerIndex: 0,
     indices: Object.fromEntries(OPENCODE_PROVIDER_ORDER.map((name) => [name, 0])),
     agyDay: 0,
-    agyIndex: 0
+    agyIndex: 0,
+    agyPoolIndex: 0,
+    agyIndices: Object.fromEntries(AGY_POOL_ORDER.map((name) => [name, 0]))
   }
   try {
     const parsed = JSON.parse(readFileSync(stateFile, 'utf8'))
@@ -146,7 +176,8 @@ function main() {
       state = {
         ...state,
         ...parsed,
-        indices: { ...state.indices, ...(parsed.indices || {}) }
+        indices: { ...state.indices, ...(parsed.indices || {}) },
+        agyIndices: { ...state.agyIndices, ...(parsed.agyIndices || {}) }
       }
     }
   } catch {
@@ -157,19 +188,34 @@ function main() {
   const envPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', '.env')
 
   if (backend === 'agy') {
-    const nextState = { ...state }
-    if (nextState.agyDay !== today) {
-      nextState.agyDay = today
-      nextState.agyIndex = (Number(nextState.agyIndex || 0) + 1) % AGY_MODELS.length
+    const nextState = {
+      ...state,
+      agyIndices: { ...state.agyIndices }
     }
-    const model = AGY_MODELS[nextState.agyIndex]
+    const dayAdvanced = nextState.agyDay !== today
+    const activePool = agyPool || AGY_POOL_ORDER[
+      dayAdvanced
+        ? (Number(nextState.agyPoolIndex || 0) + 1) % AGY_POOL_ORDER.length
+        : Number(nextState.agyPoolIndex || 0) % AGY_POOL_ORDER.length
+    ]
+    const poolModels = AGY_POOLS[activePool]
+    if (dayAdvanced) {
+      nextState.agyDay = today
+      if (!agyPool) {
+        nextState.agyPoolIndex = (Number(nextState.agyPoolIndex || 0) + 1) % AGY_POOL_ORDER.length
+      }
+      nextState.agyIndices[activePool] = (Number(nextState.agyIndices[activePool] || 0) + 1) % poolModels.length
+    }
+    const index = Number(nextState.agyIndices[activePool] || 0) % poolModels.length
+    const model = poolModels[index]
+    nextState.agyIndex = Math.max(0, AGY_MODELS.indexOf(model))
     if (!dryRun) {
       mkdirSync(tmpDir, { recursive: true })
       writeFileSync(stateFile, JSON.stringify(nextState, null, 2))
       updateEnvKey(envPath, 'AGY_AI_MODEL', model)
     }
-    console.log(`${dryRun ? '[dry-run] Would rotate' : 'Rotated'} agy model: ${model}`)
-    console.log(`   State: day=${today}, agyIndex=${nextState.agyIndex}`)
+    console.log(`${dryRun ? '[dry-run] Would rotate' : 'Rotated'} agy [${activePool}] model: ${model}`)
+    console.log(`   State: day=${today}, pool=${activePool}, index=${index}`)
     return
   }
 
@@ -205,4 +251,6 @@ function main() {
   console.log(`   State: day=${today}, provider=${activeProvider}, index=${index}`)
 }
 
-main()
+if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+  main()
+}

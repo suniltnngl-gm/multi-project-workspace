@@ -62,7 +62,7 @@ cp .env.example .env   # configure optional model/backend settings
 
 - **Structured Task & Workspace Tracking**: Tasks track planning registers (`objectives`, `requirements`, `decisions`, `relevant_files`, `important_context`), work state, activity trails, AI job provenance, and sibling Git worktrees alongside file headers, folders, tools, and environments.
 - **Parallel Swarm & Self-Improvement Strategy**: Star-topology `agentBus` (`parent` + up to `6` workers + parent-side `reviewer`) with zero-token routing, `2+2+2` cross-pool diversity, 1-hop context hydration, pre-run register backfill, and a default-on **parallel self-improvement lane** that audits portability/sensor gaps and run telemetry alongside worker slices.
-- **Resource & Quota Safety**: Live adaptive CPU, RAM, disk, GPU, and swap gating for local models plus persistent SQLite quota ledgers, pre-dispatch reservations, `observe429` learned cooldowns, and `402` billing circuit breakers.
+- **Resource & Quota Safety**: Live adaptive CPU, RAM, disk, GPU, and swap gating for local models plus persistent SQLite quota ledgers, 3-pool Antigravity (`agy@gemini`, `agy@claude-gpt`, `agy@gemini-4-argon`) weekly quota pacing, pre-dispatch reservations, `observe429` learned cooldowns, and `402` billing circuit breakers.
 - **Deterministic Sensors**: Snapshot-based detectors catch workspace gaps without calling models or spending quota.
 
 ---

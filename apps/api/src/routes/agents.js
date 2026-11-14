@@ -46,6 +46,9 @@ function normalizeSwarmBody(body = {}) {
     ...(input.opencode_models !== undefined && input.opencodeModels === undefined
       ? { opencodeModels: input.opencode_models }
       : {}),
+    ...(input.agy_models !== undefined && input.agyModels === undefined
+      ? { agyModels: input.agy_models }
+      : {}),
     ...(input.worktree_path !== undefined && input.worktreePath === undefined
       ? { worktreePath: input.worktree_path }
       : {}),

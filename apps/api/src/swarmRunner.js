@@ -356,6 +356,7 @@ export function createSwarmRunner({
       includeReviewer = true,
       models: preferredModels = [],
       opencodeModels = [],
+      agyModels,
       agents: customAgents,
       resourceStatus,
       parentMode: rawParentMode = 'deterministic',
@@ -370,6 +371,13 @@ export function createSwarmRunner({
       selfImprove: rawSelfImprove = true,
       autoProposeSelfImprovement = false
     } = hydrated
+    const resolvedAgyModels = Array.isArray(agyModels)
+      ? agyModels
+      : (typeof agyModels === 'string'
+        ? agyModels.split(',').map((entry) => entry.trim()).filter(Boolean)
+        : (typeof process.env.AGY_AI_MODELS === 'string' && process.env.AGY_AI_MODELS.trim()
+          ? process.env.AGY_AI_MODELS.split(',').map((entry) => entry.trim()).filter(Boolean)
+          : []))
     const selfImprove = rawSelfImprove !== false
     const parentMode = VALID_PARENT_MODES.has(rawParentMode) ? rawParentMode : 'deterministic'
     const maxReviewRounds = Math.max(0, Math.min(3, Math.floor(Number(rawMaxReviewRounds) || 0)))
@@ -390,7 +398,8 @@ export function createSwarmRunner({
       workerCount: effectiveWorkerCount,
       includeReviewer,
       preferredModels,
-      opencodeModels
+      opencodeModels,
+      agyModels: resolvedAgyModels
     })
 
     const agentsForPlan = Array.isArray(customAgents) && customAgents.length > 0

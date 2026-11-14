@@ -4,7 +4,10 @@
 // Relevant Files: apps/api/src/providerQuota.js, apps/api/src/modelRegistry.js, apps/api/src/modelBudget.js, apps/api/src/agentBus.js, apps/api/src/routes/models.js
 // Important Context: User file. The zero-token half of provider-aware routing.
 
-import { resolveBillingCategoryForScope } from './modelRegistry.js'
+import {
+  agyQuotaPoolForScope,
+  resolveBillingCategoryForScope
+} from './modelRegistry.js'
 
 export const BILLING_RANK = new Map([
   ['free', 0],
@@ -14,10 +17,18 @@ export const BILLING_RANK = new Map([
 
 // Each serverless slot and Ollama endpoint may be a different account, so the
 // provider name alone is not enough to merge them. Named backends (local,
-// colab, kaggle, opencode, ...) share their provider quota domain.
+// colab, kaggle, opencode, ...) share their provider quota domain, while
+// Antigravity (`agy`) models map into 3 shared weekly quota pools.
 export function modelProviderKey(model) {
   if (!model || typeof model.provider !== 'string' || !model.provider.trim()) return ''
   const provider = model.provider.trim()
+  if (provider === 'agy') {
+    const scope = model.scope || quotaScopeForModel(model)
+    if (scope) {
+      const pool = agyQuotaPoolForScope(scope)
+      return pool ? `agy:${pool}` : `agy:${scope}`
+    }
+  }
   if (model.scope) {
     return `${provider}:${model.scope}`
   }
@@ -173,9 +184,12 @@ function ratioFor(modelBudget, model) {
   const scope = quotaScopeForModel(model)
   if (modelBudget && typeof modelBudget.headroom === 'function') {
     const result = modelBudget.headroom(targetId, scope)
+    const ratio = Number.isFinite(result?.ratio) ? result.ratio : (result?.ok === false ? 0 : 1)
     return {
       ok: result?.ok !== false,
-      ratio: Number.isFinite(result?.ratio) ? result.ratio : (result?.ok === false ? 0 : 1),
+      ratio,
+      pacedHeadroom: Number.isFinite(result?.pacedHeadroom) ? result.pacedHeadroom : ratio,
+      ...(result?.pacing ? { pacing: result.pacing } : {}),
       configured: Boolean(result?.configured || !model?.remote),
       observedRequests: Number(result?.observedRequests ?? 0),
       retryAfter: result?.retryAfter,
@@ -184,16 +198,18 @@ function ratioFor(modelBudget, model) {
   }
   if (modelBudget && typeof modelBudget.check === 'function') {
     const result = modelBudget.check(targetId, scope)
+    const ratio = result?.ok === false ? 0 : 1
     return {
       ok: result?.ok !== false,
-      ratio: result?.ok === false ? 0 : 1,
+      ratio,
+      pacedHeadroom: ratio,
       configured: !model?.remote,
       observedRequests: 0,
       retryAfter: result?.retryAfter,
       budget: result?.budget
     }
   }
-  return { ok: true, ratio: 1, configured: !model?.remote, observedRequests: 0 }
+  return { ok: true, ratio: 1, pacedHeadroom: 1, configured: !model?.remote, observedRequests: 0 }
 }
 
 function describeModel(model, modelBudget, resourceMap = null) {
@@ -207,6 +223,11 @@ function describeModel(model, modelBudget, resourceMap = null) {
   const retryAfter = retryAfterValues.length > 0 ? Math.max(...retryAfterValues) : undefined
   const ok = quota.ok && !resourceBlocked
   const headroom = resourceBlocked ? 0 : quota.ratio
+  const pacedHeadroom = resourceBlocked ? 0 : (quota.pacedHeadroom ?? headroom)
+  const agyPool = model.provider === 'agy' && scope ? agyQuotaPoolForScope(scope) : null
+  const utilizationTier = model.provider === 'agy' && (agyPool === 'claude-gpt' || agyPool === 'gemini-4-argon')
+    ? 1
+    : 0
   return {
     id: model.id,
     label: model.label,
@@ -214,6 +235,7 @@ function describeModel(model, modelBudget, resourceMap = null) {
     backend: model.backend,
     billingCategory: model.billingCategory,
     ...(scope ? { scope } : {}),
+    ...(agyPool ? { agyPool } : {}),
     autoSelect: model.autoSelect ?? true,
     ...(model.execution ? { execution: model.execution } : {}),
     priority: model.priority,
@@ -222,6 +244,9 @@ function describeModel(model, modelBudget, resourceMap = null) {
     observedRequests: Number(quota.observedRequests ?? 0),
     ok,
     headroom,
+    pacedHeadroom,
+    aheadOfPace: Boolean(quota.pacing?.aheadOfPace),
+    utilizationTier,
     ...(resourceBlocked
       ? {
         resourceBlocked: true,
@@ -258,11 +283,28 @@ export function compareRosterCandidates(a, b) {
   const bRemote = b.remote === true && b.limitKind !== 'resource'
   if (aRemote !== bRemote) return aRemote ? -1 : 1
 
-  if (a.headroom !== b.headroom) return b.headroom - a.headroom
+  if (Boolean(a.aheadOfPace) !== Boolean(b.aheadOfPace)) {
+    return a.aheadOfPace ? 1 : -1
+  }
+
+  // Workers prefer renewable Tier 0 pools (`agy@gemini`, local, opencode,
+  // colab, kaggle) even when a scarce Tier 1 weekly pool has fresher headroom;
+  // Tier 1 stays available for the reviewer or pass-2 fan-out.
+  const aTier = a.utilizationTier ?? 0
+  const bTier = b.utilizationTier ?? 0
+  if (aTier !== bTier) return aTier - bTier
+
+  const aEffectiveHeadroom = a.pacedHeadroom ?? a.headroom
+  const bEffectiveHeadroom = b.pacedHeadroom ?? b.headroom
+  if (Math.abs(aEffectiveHeadroom - bEffectiveHeadroom) > 0.05) {
+    return bEffectiveHeadroom - aEffectiveHeadroom
+  }
 
   const aObserved = Number(a.observedRequests ?? 0)
   const bObserved = Number(b.observedRequests ?? 0)
   if (aObserved !== bObserved) return aObserved - bObserved
+
+  if (a.headroom !== b.headroom) return b.headroom - a.headroom
 
   return (b.priority ?? 0) - (a.priority ?? 0)
 }
@@ -450,7 +492,8 @@ export function buildSwarmRoster({
   workerCount = 2,
   includeReviewer = true,
   preferredModels = [],
-  opencodeModels = []
+  opencodeModels = [],
+  agyModels = []
 } = {}) {
   const resourceMap = normalizeResourceMap(resourceStatus)
   const count = Math.max(1, Math.min(6, Math.floor(Number(workerCount) || 2)))
@@ -469,7 +512,14 @@ export function buildSwarmRoster({
 
   for (const scope of Array.isArray(opencodeModels) ? opencodeModels : []) {
     if (typeof scope !== 'string' || !scope.trim()) continue
-    addRawCandidate(resolveAgentModel(models, `opencode@${scope.trim()}`))
+    const trimmed = scope.trim()
+    addRawCandidate(resolveAgentModel(models, trimmed.includes('@') ? trimmed : `opencode@${trimmed}`))
+  }
+
+  for (const scope of Array.isArray(agyModels) ? agyModels : []) {
+    if (typeof scope !== 'string' || !scope.trim()) continue
+    const trimmed = scope.trim()
+    addRawCandidate(resolveAgentModel(models, trimmed.includes('@') ? trimmed : `agy@${trimmed}`))
   }
 
   for (const model of Array.isArray(models) ? models : []) {
@@ -549,7 +599,13 @@ export function buildSwarmRoster({
 
   let reviewer = null
   if (includeReviewer !== false && selectionPool.length > 0) {
-    const reviewerCandidate = rankedPool.find((entry) => entry.ok && !usedDomains.has(entry.groupKey))
+    const reviewerCandidate = selectionPool.find(
+      (entry) => entry.ok
+        && !usedDomains.has(entry.groupKey)
+        && entry.utilizationTier === 1
+        && !entry.aheadOfPace
+    )
+      ?? rankedPool.find((entry) => entry.ok && !usedDomains.has(entry.groupKey))
       ?? selectionPool.find((entry) => entry.ok && !usedDomains.has(entry.groupKey))
       ?? rankedPool.find((entry) => entry.ok)
       ?? selectionPool[0]

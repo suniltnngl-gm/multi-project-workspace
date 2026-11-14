@@ -145,9 +145,11 @@ function findScopedBillingMatch(categories, id, scope) {
   const scopeText = typeof scope === 'string' ? scope.trim() : ''
   const slash = scopeText.indexOf('/')
   const provider = slash > 0 ? scopeText.slice(0, slash) : ''
+  const agyPool = id === 'agy' ? agyQuotaPoolForScope(scopeText) : null
   const candidates = [
     id && scopeText ? `${id}@${scopeText}` : null,
     scopeText || null,
+    id && agyPool ? `${id}@${agyPool}` : null,
     id && provider ? `${id}@${provider}` : null,
     provider || null,
     id || null
@@ -217,6 +219,56 @@ export const OPENCODE_PROVIDERS = Object.freeze([
   'console-openrouter',
   'opencode'
 ])
+
+/**
+ * Antigravity (`agy`) separates its weekly usage into 3 distinct quota pools:
+ *   1. `gemini`         - standard Gemini 3.x / 2.5 Flash & Pro / Hydrogen models
+ *   2. `claude-gpt`     - Claude Sonnet/Opus and GPT/O-series models
+ *   3. `gemini-4-argon` - Gemini 4 Argon reasoning models
+ */
+export const AGY_QUOTA_POOLS = Object.freeze(['gemini', 'claude-gpt', 'gemini-4-argon'])
+
+export const AGY_POOL_DEFAULT_MODELS = Object.freeze({
+  gemini: 'gemini-3.8-flash-medium',
+  'claude-gpt': 'claude-sonnet-5-5-medium',
+  'gemini-4-argon': 'gemini-4-argon-medium'
+})
+
+export function agyQuotaPoolForScope(scope) {
+  let normalized = String(scope ?? '').trim().toLowerCase()
+  if (!normalized) return null
+  if (normalized.startsWith('agy@')) normalized = normalized.slice(4).trim()
+  if (normalized.startsWith('agy:')) normalized = normalized.slice(4).trim()
+  if (!normalized) return null
+  // Accept provider-prefixed scopes (`google/gemini-...`, `anthropic/claude-...`,
+  // `openai/gpt-...`) as well as bare Antigravity model names.
+  if (normalized.includes('/')) {
+    normalized = normalized.slice(normalized.lastIndexOf('/') + 1).trim()
+    if (!normalized) return null
+  }
+
+  if (
+    normalized === 'gemini-4-argon'
+    || normalized.startsWith('gemini-4-argon')
+    || normalized.includes('argon')
+  ) {
+    return 'gemini-4-argon'
+  }
+  if (
+    normalized === 'claude-gpt'
+    || normalized.startsWith('claude')
+    || normalized.startsWith('gpt')
+    || /^(o1|o3|o4)(-|$)/.test(normalized)
+    || normalized.startsWith('anthropic')
+    || normalized.startsWith('openai')
+  ) {
+    return 'claude-gpt'
+  }
+  if (normalized === 'gemini' || normalized.startsWith('gemini')) {
+    return 'gemini'
+  }
+  return null
+}
 
 /**
  * Web models call the Colab/Kaggle CLIs by default. Setting an HTTP URL opts
@@ -753,7 +805,17 @@ export function createModelRegistry({ env = process.env, localAiUrl } = {}) {
     if (backend === 'colab-cli') model.cli = cli.colab
     if (backend === 'kaggle-cli') model.cli = cli.kaggle
     if (backend === 'opencode-cli') model.cli = cli.opencode
-    if (backend === 'agy-cli') model.cli = cli.agy
+    if (backend === 'agy-cli') {
+      model.cli = cli.agy
+      const hasWeeklyAgyEnv = Boolean(
+        env.AGY_AI_MAX_REQUESTS_PER_WEEK
+        || env.AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK
+        || env.AGY_AI_CLAUDE_GPT_MAX_REQUESTS_PER_WEEK
+        || env.AGY_AI_ARGON_MAX_REQUESTS_PER_WEEK
+      )
+      model.quotaPools = AGY_QUOTA_POOLS
+      model.quotaWindow = hasWeeklyAgyEnv || !env.AGY_AI_MAX_REQUESTS_PER_DAY ? 'week' : 'day'
+    }
     return model
   })
 

@@ -360,3 +360,163 @@ test('buildSwarmRoster prefers configured free live pools over batch or unprofil
   assert.equal(roster.workers.length, 1)
   assert.equal(roster.workers[0].model, 'colab-3b')
 })
+
+test('buildSwarmRoster separates AGY 3 weekly pools, prioritizes Tier 0 workers, and assigns Tier 1 reviewer', () => {
+  const clock = clockAt('2026-01-12T08:00:00Z') // Monday UTC
+  const budget = createModelBudget({
+    env: {
+      OPENCODE_AI_MAX_REQUESTS_PER_DAY: '40',
+      AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK: '40',
+      AGY_AI_CLAUDE_GPT_MAX_REQUESTS_PER_WEEK: '40',
+      AGY_AI_ARGON_MAX_REQUESTS_PER_WEEK: '40'
+    },
+    now: clock.now
+  })
+
+  const models = [
+    model({
+      id: 'opencode',
+      provider: 'opencode',
+      backend: 'opencode-cli',
+      limitKind: 'provider_model',
+      cli: { command: 'opencode', model: 'opencode/deepseek-v4.1-flash-free' }
+    }),
+    model({
+      id: 'agy',
+      provider: 'agy',
+      backend: 'agy-cli',
+      limitKind: 'provider_model',
+      cli: { command: 'agy', model: 'gemini-3.8-flash-medium' }
+    })
+  ]
+
+  const gemHigh = resolveAgentModel(models, 'agy@gemini-3.8-flash-high')
+  const claude = resolveAgentModel(models, 'agy@claude-sonnet-5-5-medium')
+  const gpt = resolveAgentModel(models, 'agy@gpt-oss-120b-medium')
+  const argon = resolveAgentModel(models, 'agy@gemini-4-argon-medium')
+
+  assert.equal(modelProviderKey(gemHigh), 'agy:gemini')
+  assert.equal(modelProviderKey(claude), 'agy:claude-gpt')
+  assert.equal(modelProviderKey(gpt), 'agy:claude-gpt')
+  assert.equal(modelProviderKey(argon), 'agy:gemini-4-argon')
+  assert.equal(modelProviderKey(resolveAgentModel(models, 'agy@google/gemini-3.8-flash-high')), 'agy:gemini')
+  assert.equal(modelProviderKey(resolveAgentModel(models, 'agy@anthropic/claude-opus-4-1-high')), 'agy:claude-gpt')
+
+  // Spend routine daily/flash headroom slightly ahead or equal: Tier 0 carries workers while
+  // Tier 1 (claude-gpt / gemini-4-argon) serves as high-reasoning reviewer.
+  const roster = buildSwarmRoster({
+    models,
+    modelBudget: budget,
+    workerCount: 2,
+    includeReviewer: true,
+    opencodeModels: ['opencode/deepseek-v4.1-flash-free'],
+    agyModels: [
+      'gemini-3.8-flash-medium',
+      'gemini-3.8-flash-high',
+      'claude-sonnet-5-5-medium',
+      'gpt-oss-120b-medium',
+      'gemini-4-argon-medium'
+    ]
+  })
+
+  assert.equal(roster.workers.length, 2)
+  assert.deepEqual(
+    roster.workers.map((worker) => worker.groupKey).sort(),
+    ['agy:gemini', 'opencode:opencode/deepseek-v4.1-flash-free']
+  )
+  assert.equal(roster.reviewer.groupKey, 'agy:claude-gpt')
+
+  // When workerCount=4, workers fan out across all 3 AGY weekly pools plus OpenCode without colliding.
+  const wideRoster = buildSwarmRoster({
+    models,
+    modelBudget: budget,
+    workerCount: 4,
+    includeReviewer: false,
+    opencodeModels: ['opencode/deepseek-v4.1-flash-free'],
+    agyModels: [
+      'gemini-3.8-flash-medium',
+      'gemini-3.8-flash-high',
+      'claude-sonnet-5-5-medium',
+      'gpt-oss-120b-medium',
+      'gemini-4-argon-medium'
+    ]
+  })
+  assert.deepEqual(
+    wideRoster.workers.map((worker) => worker.groupKey).sort(),
+    ['agy:claude-gpt', 'agy:gemini', 'agy:gemini-4-argon', 'opencode:opencode/deepseek-v4.1-flash-free']
+  )
+
+  // Ahead-of-pace weekly pool steps back behind on-pace Tier 1 weekly pool.
+  budget.record('agy', 20, 'gemini-3.8-flash-medium') // 50% on Monday morning -> aheadOfPace
+  const pacedRoster = buildSwarmRoster({
+    models,
+    modelBudget: budget,
+    workerCount: 2,
+    includeReviewer: false,
+    opencodeModels: ['opencode/deepseek-v4.1-flash-free'],
+    agyModels: [
+      'gemini-3.8-flash-medium',
+      'claude-sonnet-5-5-medium',
+      'gemini-4-argon-medium'
+    ]
+  })
+  assert.ok(!pacedRoster.workers.some((worker) => worker.groupKey === 'agy:gemini'))
+  assert.ok(
+    pacedRoster.workers.some((worker) => worker.groupKey === 'opencode:opencode/deepseek-v4.1-flash-free')
+  )
+})
+
+test('buildSwarmRoster keeps on-pace Tier 0 AGY workers ahead of fresher Tier 1 pools', () => {
+  const clock = clockAt('2026-01-16T20:00:00Z') // Friday UTC, late in the quota week
+  const budget = createModelBudget({
+    env: {
+      OPENCODE_AI_MAX_REQUESTS_PER_DAY: '40',
+      AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK: '40',
+      AGY_AI_CLAUDE_GPT_MAX_REQUESTS_PER_WEEK: '40',
+      AGY_AI_ARGON_MAX_REQUESTS_PER_WEEK: '40'
+    },
+    now: clock.now
+  })
+  const models = [
+    model({
+      id: 'opencode',
+      provider: 'opencode',
+      backend: 'opencode-cli',
+      limitKind: 'provider_model',
+      cli: { command: 'opencode', model: 'opencode/deepseek-v4.1-flash-free' }
+    }),
+    model({
+      id: 'agy',
+      provider: 'agy',
+      backend: 'agy-cli',
+      limitKind: 'provider_model',
+      cli: { command: 'agy', model: 'gemini-3.8-flash-medium' }
+    })
+  ]
+
+  // Tier 0 gemini has less raw headroom than the untouched Tier 1 pools but is
+  // still on pace for the week, so workers should spend it before them.
+  budget.record('agy', 30, 'gemini-3.8-flash-medium')
+  const gemini = budget.snapshot('agy', 'gemini-3.8-flash-medium')
+  assert.equal(gemini.pacing.aheadOfPace, false)
+  assert.ok(gemini.pacedHeadroom < 1)
+
+  const roster = buildSwarmRoster({
+    models,
+    modelBudget: budget,
+    workerCount: 2,
+    includeReviewer: false,
+    opencodeModels: ['opencode/deepseek-v4.1-flash-free'],
+    agyModels: [
+      'gemini-3.8-flash-medium',
+      'claude-sonnet-5-5-medium',
+      'gemini-4-argon-medium'
+    ]
+  })
+  assert.ok(roster.workers.some((worker) => worker.groupKey === 'agy:gemini'))
+  assert.ok(
+    roster.workers.some((worker) => worker.groupKey === 'opencode:opencode/deepseek-v4.1-flash-free')
+  )
+  assert.ok(!roster.workers.some((worker) => worker.groupKey === 'agy:claude-gpt'))
+  assert.ok(!roster.workers.some((worker) => worker.groupKey === 'agy:gemini-4-argon'))
+})

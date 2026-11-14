@@ -22,6 +22,8 @@
  * never overwrites configured profiles; token usage is never guessed, so
  * recordUsage stays gated on configured metered limits.
  */
+import { agyQuotaPoolForScope } from './modelRegistry.js'
+
 const MINUTE = 60000
 const HOUR = 60 * MINUTE
 const DAY = 24 * HOUR
@@ -263,19 +265,48 @@ function buildComputeAndRequestLimits(env, entries) {
   return specs
 }
 
-export function resolveLimitsForScope(configs, id, scope) {
-  if (!configs) return undefined
+export function resolveQuotaTarget(configs, id, scope) {
+  if (id === 'agy' && scope) {
+    const exactKey = `agy@${scope}`
+    if (configs?.has(exactKey)) {
+      return { ledgerId: exactKey, limits: configs.get(exactKey), pool: agyQuotaPoolForScope(scope) }
+    }
+    const pool = agyQuotaPoolForScope(scope)
+    if (pool) {
+      const poolKey = `agy@${pool}`
+      return {
+        ledgerId: poolKey,
+        limits: configs?.get(poolKey) ?? configs?.get('agy'),
+        pool
+      }
+    }
+  }
+
+  const ledgerId = scope ? `${id}@${scope}` : id
+  if (!configs) return { ledgerId, limits: undefined, pool: null }
   if (scope) {
-    if (configs.has(`${id}@${scope}`)) return configs.get(`${id}@${scope}`)
-    if (configs.has(scope)) return configs.get(scope)
+    if (configs.has(`${id}@${scope}`)) {
+      return { ledgerId, limits: configs.get(`${id}@${scope}`), pool: null }
+    }
+    if (configs.has(scope)) {
+      return { ledgerId, limits: configs.get(scope), pool: null }
+    }
     const slash = String(scope).indexOf('/')
     if (slash > 0) {
       const provider = scope.slice(0, slash)
-      if (configs.has(`${id}@${provider}`)) return configs.get(`${id}@${provider}`)
-      if (configs.has(provider)) return configs.get(provider)
+      if (configs.has(`${id}@${provider}`)) {
+        return { ledgerId, limits: configs.get(`${id}@${provider}`), pool: null }
+      }
+      if (configs.has(provider)) {
+        return { ledgerId, limits: configs.get(provider), pool: null }
+      }
     }
   }
-  return configs.get(id)
+  return { ledgerId, limits: configs.get(id), pool: null }
+}
+
+export function resolveLimitsForScope(configs, id, scope) {
+  return resolveQuotaTarget(configs, id, scope).limits
 }
 
 /**
@@ -328,6 +359,27 @@ export function resolveQuotaProfiles({ env = process.env, profiles } = {}) {
       { key: 'KAGGLE_AI_MAX_REQUESTS_PER_DAY', unit: 'requests', window: 'day' }
     ])
     if (kaggleLimits.length > 0) result.set('kaggle-3b', normalizeLimits('kaggle-3b', kaggleLimits))
+  }
+
+  if (!result.has('agy')) {
+    const agyLimits = buildComputeAndRequestLimits(env, [
+      { key: 'AGY_AI_MAX_REQUESTS_PER_WEEK', unit: 'requests', window: 'week' },
+      { key: 'AGY_AI_MAX_REQUESTS_PER_DAY', unit: 'requests', window: 'day' }
+    ])
+    if (agyLimits.length > 0) result.set('agy', normalizeLimits('agy', agyLimits))
+  }
+
+  for (const [poolId, reqKey, tokenKey] of [
+    ['agy@gemini', 'AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK', 'AGY_AI_GEMINI_MAX_TOKENS_PER_WEEK'],
+    ['agy@claude-gpt', 'AGY_AI_CLAUDE_GPT_MAX_REQUESTS_PER_WEEK', 'AGY_AI_CLAUDE_GPT_MAX_TOKENS_PER_WEEK'],
+    ['agy@gemini-4-argon', 'AGY_AI_ARGON_MAX_REQUESTS_PER_WEEK', 'AGY_AI_ARGON_MAX_TOKENS_PER_WEEK']
+  ]) {
+    if (result.has(poolId)) continue
+    const poolLimits = buildComputeAndRequestLimits(env, [
+      { key: reqKey, unit: 'requests', window: 'week' },
+      { key: tokenKey, unit: 'tokens', window: 'week' }
+    ])
+    if (poolLimits.length > 0) result.set(poolId, normalizeLimits(poolId, poolLimits))
   }
 
   for (const [id, key] of LEGACY_LIMITS) {
@@ -544,7 +596,7 @@ export function createModelBudget({
 
   // Drop expired reservations before they can block a call; the caller owns
   // the TTL so a crashed dispatcher cannot reserve a provider forever.
-  function pendingReservations(id, scope, at) {
+  function pendingReservations(id, scope, at, ledgerId) {
     const scoped = scope ?? ''
     const pending = []
     for (const [reservationId, reservation] of reservations) {
@@ -552,11 +604,54 @@ export function createModelBudget({
         reservations.delete(reservationId)
         continue
       }
-      if (reservation.modelId !== id) continue
-      if ((reservation.scope ?? '') !== scoped) continue
+      const matchesTarget = (ledgerId && reservation.ledgerId === ledgerId)
+        || (reservation.modelId === id && (reservation.scope ?? '') === scoped)
+      if (!matchesTarget) continue
       pending.push(reservation)
     }
     return pending
+  }
+
+  function evaluateWeeklyPacing(limitConfigs, mappedLimiters, at) {
+    const finitePairs = []
+    for (let index = 0; index < mappedLimiters.length; index += 1) {
+      const limiter = mappedLimiters[index]
+      if (!Number.isFinite(limiter.limit) || limiter.limit <= 0) continue
+      finitePairs.push({ limiter, rule: limitConfigs?.[index] ?? null })
+    }
+    if (finitePairs.length === 0) return { pacedHeadroom: 1, pacing: undefined }
+
+    let minPacedRatio = 1
+    let worstWeekly = null
+    for (const { limiter, rule } of finitePairs) {
+      const rawRatio = Math.max(0, limiter.remaining / limiter.limit)
+      if (limiter.window === 'week' && rule && limiter.bucket !== null) {
+        const endMs = nextFixedBoundary(limiter.bucket, rule)
+        const spanMs = Math.max(1, endMs - limiter.bucket)
+        const elapsedFraction = Math.min(1, Math.max(0.05, (at - limiter.bucket) / spanMs))
+        const targetAllowance = Math.min(1, elapsedFraction + 0.15)
+        const usedFraction = limiter.used / limiter.limit
+        const aheadOfPace = usedFraction > targetAllowance
+        const pacedRatio = aheadOfPace
+          ? rawRatio * (targetAllowance / usedFraction)
+          : rawRatio
+        if (pacedRatio < minPacedRatio) minPacedRatio = pacedRatio
+        if (!worstWeekly || usedFraction > worstWeekly.usedFraction) {
+          worstWeekly = {
+            window: 'week',
+            elapsedFraction,
+            usedFraction,
+            aheadOfPace
+          }
+        }
+      } else if (rawRatio < minPacedRatio) {
+        minPacedRatio = rawRatio
+      }
+    }
+    return {
+      pacedHeadroom: minPacedRatio,
+      ...(worstWeekly ? { pacing: worstWeekly } : {})
+    }
   }
 
   function pendingAmount(pending, limit) {
@@ -586,10 +681,11 @@ export function createModelBudget({
   }
 
   function snapshot(id, scope) {
-    const limits = resolveLimitsForScope(configs, id, scope)
-    const observedId = scope ? `${id}@${scope}` : id
+    const target = resolveQuotaTarget(configs, id, scope)
+    const limits = target.limits
+    const observedId = target.ledgerId
     const at = now()
-    const pending = pendingReservations(id, scope, at)
+    const pending = pendingReservations(id, scope, at, observedId)
     const dayBucket = startOfFixedWindow(at, OBSERVED_DAY)
     const observedRequests = readBucket(observedId, OBSERVED_REQUESTS_POLICY, dayBucket)
       + pendingCalls(pending)
@@ -679,6 +775,8 @@ export function createModelBudget({
           ? null
           : Math.max(...waits)))
     const ok = blocked.length === 0 && cooldownSeconds === 0
+    const pacingEvaluation = evaluateWeeklyPacing(limits, limiters, at)
+    const pacedHeadroom = ok ? pacingEvaluation.pacedHeadroom : 0
 
     return {
       ok,
@@ -689,6 +787,8 @@ export function createModelBudget({
       used: primary.used,
       remaining: primary.remaining,
       resetsInSeconds: primary.resetsInSeconds,
+      pacedHeadroom,
+      ...(pacingEvaluation.pacing ? { pacing: pacingEvaluation.pacing } : {}),
       ...(primary.window === 'day' && primary.bucket !== null
         ? { day: dayKey(primary.bucket) }
         : {}),
@@ -717,8 +817,9 @@ export function createModelBudget({
     const at = now()
     const count = Number(amount)
     if (!Number.isFinite(count) || count <= 0) return
-    const observedId = scope ? `${id}@${scope}` : id
-    const limits = resolveLimitsForScope(configs, id, scope)
+    const target = resolveQuotaTarget(configs, id, scope)
+    const observedId = target.ledgerId
+    const limits = target.limits
     for (const limit of limits ?? []) {
       if (limit.unit === 'requests') addAmount(observedId, limit, count, at)
     }
@@ -734,8 +835,9 @@ export function createModelBudget({
   }
 
   function recordUsage(id, usage, scope) {
-    const observedId = scope ? `${id}@${scope}` : id
-    const limits = resolveLimitsForScope(configs, id, scope)
+    const target = resolveQuotaTarget(configs, id, scope)
+    const observedId = target.ledgerId
+    const limits = target.limits
     const metered = limits?.filter((limit) => limit.unit !== 'requests') ?? []
     if (metered.length === 0) return
 
@@ -780,7 +882,7 @@ export function createModelBudget({
   function cooldown(id, seconds, scope) {
     const value = Number(seconds)
     if (!Number.isFinite(value) || value <= 0) return
-    const observedId = scope ? `${id}@${scope}` : id
+    const observedId = resolveQuotaTarget(configs, id, scope).ledgerId
     cooldowns.set(observedId, now() + value * 1000)
   }
 
@@ -808,10 +910,12 @@ export function createModelBudget({
     }
     const at = now()
     const reservationId = `res_${at}_${++reservationSeq}`
+    const ledgerId = resolveQuotaTarget(configs, id, scope).ledgerId
     reservations.set(reservationId, {
       id: reservationId,
       modelId: id,
       scope: scope ?? '',
+      ledgerId,
       calls: Number.isFinite(requestedCalls) && requestedCalls > 0
         ? Math.floor(requestedCalls)
         : 1,
@@ -854,7 +958,15 @@ export function createModelBudget({
   // blocked, 1 means the least-constrained limiter is untouched.
   function headroom(id, scope) {
     const budget = snapshot(id, scope)
-    if (!budget) return { ok: true, ratio: 1, configured: false, observedRequests: 0 }
+    if (!budget) {
+      return {
+        ok: true,
+        ratio: 1,
+        pacedHeadroom: 1,
+        configured: false,
+        observedRequests: 0
+      }
+    }
     const scored = (budget.limiters ?? []).filter(
       (limiter) => Number.isFinite(limiter.limit) && limiter.limit > 0
     )
@@ -864,6 +976,8 @@ export function createModelBudget({
       return {
         ok: false,
         ratio: 0,
+        pacedHeadroom: 0,
+        ...(budget.pacing ? { pacing: budget.pacing } : {}),
         retryAfter: budget.retryAfter,
         configured,
         observedRequests,
@@ -873,7 +987,15 @@ export function createModelBudget({
     const ratio = scored.length === 0
       ? 1
       : Math.min(...scored.map((limiter) => limiter.remaining / limiter.limit))
-    return { ok: true, ratio, configured, observedRequests, budget }
+    return {
+      ok: true,
+      ratio,
+      pacedHeadroom: budget.pacedHeadroom ?? ratio,
+      ...(budget.pacing ? { pacing: budget.pacing } : {}),
+      configured,
+      observedRequests,
+      budget
+    }
   }
 
   // Learn from a live 429 without touching configured profiles: a marker
@@ -882,7 +1004,7 @@ export function createModelBudget({
   function observe429(id, { retryAfter, scope } = {}) {
     const seconds = Math.ceil(Number(retryAfter))
     if (!Number.isFinite(seconds) || seconds <= 0) return
-    const observedId = scope ? `${id}@${scope}` : id
+    const observedId = resolveQuotaTarget(configs, id, scope).ledgerId
     const at = now()
     const requests = readBucket(
       observedId,

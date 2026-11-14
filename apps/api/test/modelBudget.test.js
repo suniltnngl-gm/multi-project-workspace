@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { createDatabase } from '../src/database.js'
 import { createModelBudget } from '../src/modelBudget.js'
+import { agyQuotaPoolForScope } from '../src/modelRegistry.js'
 
 const MINUTE = 60000
 const HOUR = 60 * MINUTE
@@ -549,4 +550,84 @@ test('provider/model scoped limiters isolate request and token usage across mode
   budget.record('opencode', 1, 'opencode/big-pickle')
   assert.equal(budget.snapshot('opencode', 'opencode/big-pickle').used, 1)
   assert.equal(budget.snapshot('opencode', 'opencode/beam-free').used, 0)
+})
+
+test('antigravity (agy) shares weekly quotas and 429 cooldowns within each of its 3 pools', () => {
+  assert.equal(agyQuotaPoolForScope('gemini-3.8-flash-medium'), 'gemini')
+  assert.equal(agyQuotaPoolForScope('gemini-4-hydrogen-medium'), 'gemini')
+  assert.equal(agyQuotaPoolForScope('claude-sonnet-5-5-medium'), 'claude-gpt')
+  assert.equal(agyQuotaPoolForScope('gpt-oss-120b-medium'), 'claude-gpt')
+  assert.equal(agyQuotaPoolForScope('gemini-4-argon-high'), 'gemini-4-argon')
+  assert.equal(agyQuotaPoolForScope('agy@gemini-3.8-flash-medium'), 'gemini')
+  assert.equal(agyQuotaPoolForScope('agy:claude-sonnet-5-5-medium'), 'claude-gpt')
+  assert.equal(agyQuotaPoolForScope('google/gemini-3.8-flash-medium'), 'gemini')
+  assert.equal(agyQuotaPoolForScope('anthropic/claude-sonnet-5-5-medium'), 'claude-gpt')
+  assert.equal(agyQuotaPoolForScope('openai/o3-pro'), 'claude-gpt')
+  assert.equal(agyQuotaPoolForScope('google/gemini-4-argon-high'), 'gemini-4-argon')
+  assert.equal(agyQuotaPoolForScope('not-a-model'), null)
+
+  const clock = clockAt('2026-01-12T10:00:00Z') // Monday UTC
+  const budget = createModelBudget({
+    env: {
+      AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK: '20',
+      AGY_AI_CLAUDE_GPT_MAX_REQUESTS_PER_WEEK: '5',
+      AGY_AI_ARGON_MAX_REQUESTS_PER_WEEK: '8'
+    },
+    now: clock.now
+  })
+
+  // Models in the same AGY weekly pool share one counter and reservation ledger.
+  const reservation = budget.reserve('agy', { scope: 'claude-sonnet-5-5-medium', calls: 2 })
+  assert.equal(reservation.ok, true)
+  assert.equal(budget.snapshot('agy', 'gpt-oss-120b-medium').used, 2)
+  assert.equal(budget.snapshot('agy', 'gpt-oss-120b-medium').remaining, 3)
+  assert.equal(budget.snapshot('agy', 'gemini-3.8-flash-medium').used, 0)
+  assert.equal(budget.snapshot('agy', 'gemini-4-argon-medium').used, 0)
+
+  budget.settle(reservation.reservationId)
+  budget.record('agy', 1, 'gpt-oss-120b-medium')
+  assert.equal(budget.snapshot('agy', 'claude-sonnet-5-5-medium').used, 3)
+
+  // A 429 on one claude-gpt model cools down the whole claude-gpt pool, not gemini or argon.
+  budget.observe429('agy', { scope: 'claude-sonnet-5-5-medium', retryAfter: 300 })
+  assert.equal(budget.check('agy', 'gpt-oss-120b-medium').ok, false)
+  assert.equal(budget.check('agy', 'gemini-3.8-flash-high').ok, true)
+  assert.equal(budget.check('agy', 'gemini-4-argon-medium').ok, true)
+
+  // Cooldown expires after 300s, learned daily cap clears at next UTC midnight while weekly count stays,
+  // and weekly quota resets the following Monday.
+  clock.advance(301 * 1000)
+  const sameDayAfterCooldown = budget.check('agy', 'gpt-oss-120b-medium')
+  assert.equal(sameDayAfterCooldown.ok, false)
+  assert.equal(sameDayAfterCooldown.budget.cooldownSeconds, undefined)
+  assert.equal(sameDayAfterCooldown.budget.observed.cap, 3)
+
+  clock.set('2026-01-13T00:01:00Z')
+  assert.equal(budget.check('agy', 'gpt-oss-120b-medium').ok, true)
+  assert.equal(budget.snapshot('agy', 'claude-sonnet-5-5-medium').used, 3)
+
+  clock.set('2026-01-19T00:01:00Z')
+  assert.equal(budget.snapshot('agy', 'claude-sonnet-5-5-medium').used, 0)
+})
+
+test('weekly quota pacing flags ahead-of-pace burn early in the week and recovers late in the week', () => {
+  const clock = clockAt('2026-01-12T06:00:00Z') // Early Monday
+  const budget = createModelBudget({
+    env: { AGY_AI_CLAUDE_GPT_MAX_REQUESTS_PER_WEEK: '10' },
+    now: clock.now
+  })
+
+  budget.record('agy', 4, 'claude-sonnet-5-5-medium') // 40% used on Monday morning
+  const early = budget.headroom('agy', 'claude-sonnet-5-5-medium')
+  assert.equal(early.ok, true)
+  assert.equal(early.ratio, 0.6)
+  assert.equal(early.pacing.aheadOfPace, true)
+  assert.ok(early.pacedHeadroom < early.ratio)
+
+  clock.set('2026-01-17T12:00:00Z') // Saturday (5.5 / 7 days elapsed)
+  const late = budget.headroom('agy', 'claude-sonnet-5-5-medium')
+  assert.equal(late.ok, true)
+  assert.equal(late.ratio, 0.6)
+  assert.equal(late.pacing.aheadOfPace, false)
+  assert.equal(late.pacedHeadroom, 0.6)
 })

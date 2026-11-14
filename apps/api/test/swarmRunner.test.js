@@ -1192,3 +1192,61 @@ test('parallel self-improvement runs by default, detects portability gaps, dedup
   assert.equal(disabledExecuted.selfImprove, false)
   assert.equal(disabledExecuted.selfImprovement.strategy, 'disabled')
 })
+
+test('swarm planSwarm and CLI distribute across AGY 3 weekly pools and rotate-model supports AGY pools', () => {
+  const models = makeSampleModels().map((entry) => (
+    entry.id === 'agy' ? { ...entry, billingCategory: 'free' } : entry
+  ))
+  const budget = createModelBudget({
+    env: {
+      AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK: '50',
+      AGY_AI_CLAUDE_GPT_MAX_REQUESTS_PER_WEEK: '20',
+      AGY_AI_ARGON_MAX_REQUESTS_PER_WEEK: '20'
+    },
+    now: () => Date.parse('2026-11-13T12:00:00Z')
+  })
+  const bus = createAgentBus({ database, models, modelBudget: budget })
+  const runner = createSwarmRunner({ database, bus, models, modelBudget: budget })
+
+  const agyPlan = runner.planSwarm({
+    objective: 'Slice A; Slice B; Slice C',
+    includeReviewer: false,
+    agyModels: ['gemini-3.8-flash-medium', 'claude-sonnet-5-5-medium', 'gemini-4-argon-medium']
+  })
+  const agyWorkers = agyPlan.agents.filter((agent) => agent.role === 'worker')
+  const agyDomains = new Set(agyWorkers.map((agent) => agent.groupKey))
+  assert.ok(agyDomains.has('agy:gemini'))
+  assert.ok(agyDomains.has('agy:claude-gpt'))
+  assert.ok(agyDomains.has('agy:gemini-4-argon'))
+
+  const cliPlan = spawnSync(process.execPath, [
+    join(ROOT, 'scripts', 'ai-swarm.mjs'),
+    'plan',
+    'Slice A; Slice B',
+    '--agy-models',
+    'gemini-3.8-flash-medium,claude-sonnet-5-5-medium,gemini-4-argon-medium',
+    '--database',
+    join(tempDir, 'cli-agy-plan.sqlite'),
+    '--json'
+  ], {
+    cwd: ROOT,
+    encoding: 'utf8'
+  })
+  assert.equal(cliPlan.status, 0, cliPlan.stderr)
+  const parsedPlan = JSON.parse(cliPlan.stdout)
+  assert.ok(Array.isArray(parsedPlan.agents))
+
+  const rotated = spawnSync(process.execPath, [
+    join(ROOT, 'scripts', 'rotate-model.mjs'),
+    '--backend',
+    'agy',
+    '--pool',
+    'claude-gpt',
+    '--dry-run'
+  ], {
+    cwd: ROOT,
+    encoding: 'utf8'
+  })
+  assert.equal(rotated.status, 0, rotated.stderr)
+  assert.match(rotated.stdout, /agy \[claude-gpt\] model:/)
+})

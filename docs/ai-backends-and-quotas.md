@@ -38,6 +38,12 @@ Among ready candidates, automatic selection prefers healthy models with fewer fa
 ### OpenCode & Antigravity Headless CLIs
 
 - **`opencode` / `agy`**: Set `OPENCODE_AI_MODEL` (e.g. `opencode/beam-free` or `console-openrouter/openrouter/free`) and `OPENCODE_AI_AUTO_SELECT=false` to avoid unintended spend. Prompt cache keys isolate `(effectiveCliModel, agent)` across swaps.
+- **Antigravity (`agy`) 3 Weekly Quota Pools**: Antigravity splits weekly capacity across three shared weekly pools (`agyQuotaPoolForScope`):
+  1. **`agy@gemini`** — Gemini 3.x / 2.5 Flash & Pro / Hydrogen models (`AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK`, `AGY_AI_GEMINI_MAX_TOKENS_PER_WEEK`).
+  2. **`agy@claude-gpt`** — Claude Sonnet/Opus and GPT/O-series models (`AGY_AI_CLAUDE_GPT_MAX_REQUESTS_PER_WEEK`, `AGY_AI_CLAUDE_GPT_MAX_TOKENS_PER_WEEK`).
+  3. **`agy@gemini-4-argon`** — Gemini 4 Argon reasoning models (`AGY_AI_ARGON_MAX_REQUESTS_PER_WEEK`, `AGY_AI_ARGON_MAX_TOKENS_PER_WEEK`).
+  Models inside the same pool share one persisted weekly bucket and `429` cooldown, while parallel swarm workers can run across all 3 AGY pools (`agy:gemini`, `agy:claude-gpt`, `agy:gemini-4-argon`) concurrently without domain collisions (`AGY_AI_MODELS` / `--agy-models`).
+- **Model rotation (`scripts/rotate-model.mjs`)**: Supports `--backend opencode` (rotates across the 4+1 OpenCode providers) and `--backend agy` (rotates across the 3 AGY weekly pools in round-robin order, or pin one via `--pool gemini|claude-gpt|gemini-4-argon`).
 - **Discovery cache**: `GET /api/models/opencode` (`?refresh=1`) runs `opencode models` with a TTL cache (`OPENCODE_AI_DISCOVERY_TIMEOUT_MS=15000`, `OPENCODE_AI_DISCOVERY_TTL_MS=600000`) and persists the last healthy roster to `apps/api/data/opencode-roster-cache.json` (override with `OPENCODE_AI_ROSTER_CACHE_FILE`) for offline resilience.
 
 ### Serverless Slots (`SERVERLESS_AI_SLOTS` / `SERVERLESS_AI_URL`)
@@ -47,9 +53,12 @@ Among ready candidates, automatic selection prefers healthy models with fewer fa
 
 ---
 
-## Quota Profiles, Observation Mode & Fallback
+## Quota Profiles, Weekly Pacing & Fallback
 
-- **Daily caps**: Set `COLAB_AI_MAX_REQUESTS_PER_DAY`, `KAGGLE_AI_MAX_REQUESTS_PER_DAY`, `OPENCODE_AI_MAX_REQUESTS_PER_DAY`, `AGY_AI_MAX_REQUESTS_PER_DAY`, etc. (persisted in SQLite `ai_quota`, UTC midnight reset).
+- **Daily & Weekly caps**: Set `COLAB_AI_MAX_REQUESTS_PER_DAY`, `KAGGLE_AI_MAX_REQUESTS_PER_DAY`, `OPENCODE_AI_MAX_REQUESTS_PER_DAY`, `AGY_AI_MAX_REQUESTS_PER_WEEK`, and per-pool weekly limits `AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK`, `AGY_AI_CLAUDE_GPT_MAX_REQUESTS_PER_WEEK`, `AGY_AI_ARGON_MAX_REQUESTS_PER_WEEK` (persisted in SQLite `ai_quota`).
+- **Cross-Window Weekly Pacing & Tiering**:
+  - `modelBudget` tracks elapsed week fraction vs. consumed weekly fraction (`targetAllowance = min(1, max(0.05, elapsedFraction) + 0.15)`), surfacing `pacedHeadroom` and `pacing.aheadOfPace` so weekly pools that burn ahead of schedule automatically yield to renewable daily/hourly pools rather than exhausting early in the week.
+  - `providerQuota` classifies routine renewable/daily/flash pools (`local`, `opencode`, `colab`, `kaggle`, `agy@gemini`) as Tier 0 workhorses and high-reasoning scarce weekly pools (`agy@claude-gpt`, `agy@gemini-4-argon`) as Tier 1 — assigning routine swarm worker slices to Tier 0 first while prioritizing Tier 1 for parent-side `reviewer` verification (or complex slices when explicitly requested via `--agy-models` / `--models`).
 - **Rich profiles (`AI_QUOTA_PROFILES`)**: JSON object keyed by model id mapping to limiter arrays (`unit`: `requests | tokens | compute_seconds`, `limit`, `window`: `second | minute | hour | session | day | week | month | none`, `reset`: `rolling | fixed | pool`, optional `timezone`, `windowMs` / `hours`).
 - **Billing categories**: `free`, `payg`, `subscription` (`AI_BILLING_CATEGORIES` or per-backend `*_AI_BILLING`). Ordering metadata only — never bypasses quotas. HTTP `402` trips a `billing-cooldown` circuit breaker (6h default).
 - **Observation & Reservations**: Pre-dispatch `modelBudget.reserve` prevents concurrent over-spend; `observe429` records `observed-requests`, `observed-429`, and `observed-cooldown` rows across restarts; silent zero-usage responses incur conservative token estimates.
