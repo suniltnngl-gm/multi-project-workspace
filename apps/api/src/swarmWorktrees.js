@@ -87,3 +87,35 @@ export function cleanupRunWorktrees(worktrees = []) {
     }
   }
 }
+
+export function mergeWorktreeBranches(worktrees = []) {
+  const merged = []
+  const conflicts = []
+  for (const entry of worktrees) {
+    if (!entry?.repoRoot || !entry?.worktreePath || !entry?.branch) continue
+    try {
+      const dirty = runGit(entry.worktreePath, ['status', '--porcelain'])
+      if (dirty) {
+        runGit(entry.worktreePath, ['add', '-A'])
+        runGit(entry.worktreePath, ['commit', '-m', `chore(swarm): ${entry.branch}`])
+      }
+      const ahead = Number(runGit(entry.repoRoot, ['rev-list', '--count', `HEAD..${entry.branch}`]) || 0)
+      if (ahead > 0) {
+        try {
+          runGit(entry.repoRoot, ['merge', '--no-edit', entry.branch])
+          merged.push(entry.branch)
+        } catch (err) {
+          try {
+            runGit(entry.repoRoot, ['merge', '--abort'])
+          } catch {
+            // Ignore abort failure.
+          }
+          conflicts.push({ branch: entry.branch, error: err?.message || 'merge conflict' })
+        }
+      }
+    } catch (err) {
+      conflicts.push({ branch: entry.branch, error: err?.message || 'worktree merge failed' })
+    }
+  }
+  return { merged, conflicts }
+}

@@ -46,6 +46,7 @@ const FLAG_OPTIONS = new Set([
   '--auto-propose',
   '--dry-run',
   '--isolate-worktrees',
+  '--merge-worktrees',
   '--json',
   '--help',
   '-h'
@@ -174,6 +175,9 @@ function buildPlanOptions(objective, options) {
   }
   if (options['--isolate-worktrees']) {
     planOptions.isolateWorktrees = true
+  }
+  if (options['--merge-worktrees']) {
+    planOptions.mergeWorktrees = true
   }
   const budget = {}
   if (options['--max-tokens'] !== undefined) {

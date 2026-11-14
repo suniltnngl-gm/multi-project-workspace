@@ -1443,3 +1443,59 @@ test('isolateWorktrees provisions per-worker Git worktrees and cleans them up on
     await rm(tempDir, { recursive: true, force: true })
   }
 })
+
+test('isolateWorktrees feeds worktreeDiffs to reviewer and merges approved branches when mergeWorktrees is true', async () => {
+  const { execFileSync } = await import('node:child_process')
+  const { existsSync, writeFileSync } = await import('node:fs')
+  const tempDir = await mkdtemp(join(tmpdir(), 'swarm-merge-wt-'))
+  const repoDir = join(tempDir, 'repo')
+  const db = createDatabase(join(tempDir, 'workspace.sqlite'))
+  try {
+    execFileSync('git', ['init', repoDir], { stdio: 'ignore' })
+    execFileSync('git', ['-C', repoDir, 'config', 'user.email', 'test@example.com'], { stdio: 'ignore' })
+    execFileSync('git', ['-C', repoDir, 'config', 'user.name', 'Test'], { stdio: 'ignore' })
+    execFileSync('git', ['-C', repoDir, 'commit', '--allow-empty', '-m', 'init'], { stdio: 'ignore' })
+
+    let reviewerSawDiff = false
+    const runner = createSwarmRunner({
+      database: db,
+      bus: createAgentBus({ database: db }),
+      models: makeSampleModels(),
+      modelBudget: createModelBudget(),
+      modelClient: {
+        generate: async () => ({ text: 'ok' }),
+        complete: async (_model, req) => {
+          const userMsg = req.messages.find((m) => m.role === 'user')?.content || ''
+          if (req.worktreePath && !userMsg.includes('Review')) {
+            writeFileSync(join(req.worktreePath, 'worker-output.txt'), 'hello from isolated worktree\n')
+          }
+          if (userMsg.includes('worktreeDiffs') && userMsg.includes('worker-output.txt')) {
+            reviewerSawDiff = true
+          }
+          return JSON.stringify({
+            summary: 'done',
+            status: 'done',
+            approved: true,
+            verdict: 'approved'
+          })
+        }
+      },
+      rootDir: repoDir
+    })
+
+    const created = runner.createSwarm({
+      objective: 'Create worker-output.txt',
+      isolateWorktrees: true,
+      mergeWorktrees: true,
+      worktreePath: repoDir,
+      includeReviewer: true
+    })
+    const executed = await runner.executeSwarm(created.runId, { maxSteps: 10 })
+    assert.equal(executed.state, 'completed')
+    assert.equal(reviewerSawDiff, true)
+    assert.equal(existsSync(join(repoDir, 'worker-output.txt')), true)
+  } finally {
+    db.close()
+    await rm(tempDir, { recursive: true, force: true })
+  }
+})

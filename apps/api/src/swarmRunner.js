@@ -28,7 +28,7 @@ import {
 } from './providerQuota.js'
 import { scanWorkspaceUserFiles } from './workspaceScan.js'
 import { scanWorkspaceSensors } from './workspaceSensors.js'
-import { cleanupRunWorktrees, provisionWorkerWorktree } from './swarmWorktrees.js'
+import { cleanupRunWorktrees, collectWorktreeDiff, mergeWorktreeBranches, provisionWorkerWorktree } from './swarmWorktrees.js'
 
 const MAX_ARTIFACT_THRESHOLD = 500
 const DEFAULT_SWARM_MAX_TOKENS = 600
@@ -381,6 +381,7 @@ export function createSwarmRunner({
       selfImprove: rawSelfImprove = true,
       autoProposeSelfImprovement = false,
       isolateWorktrees = false,
+      mergeWorktrees = false,
       budget: runBudget
     } = hydrated
     const parseCsvOrEnv = (value, envValue) => (
@@ -550,6 +551,7 @@ export function createSwarmRunner({
       selfImprove,
       autoProposeSelfImprovement: Boolean(autoProposeSelfImprovement),
       isolateWorktrees: Boolean(isolateWorktrees),
+      mergeWorktrees: Boolean(mergeWorktrees),
       selfImprovementPlan: {
         enabled: selfImprove,
         strategy: selfImprove ? 'parallel' : 'disabled',
@@ -711,6 +713,7 @@ export function createSwarmRunner({
         ...(plan.sessionId !== undefined && plan.sessionId !== null ? { sessionId: plan.sessionId } : {}),
         autoSlicePending: plan.autoSlicePending,
         isolateWorktrees: Boolean(plan.isolateWorktrees),
+        mergeWorktrees: Boolean(plan.mergeWorktrees),
         worktreePath: resolvedWorktreePath
       },
       agents
@@ -1319,7 +1322,10 @@ export function createSwarmRunner({
       },
       {
         role: 'user',
-        content: `#${handoffMessage.seq} [handoff] Refs: ${refs}\n${summaries}${contextLine}`
+        content: `#${handoffMessage.seq} [handoff] Refs: ${refs}\n${summaries}${contextLine}` +
+          (handoffMessage.payload?.worktreeDiffs
+            ? `\nworktreeDiffs:\n${Object.entries(handoffMessage.payload.worktreeDiffs).map(([name, diff]) => `[@${name}]\n${diff}`).join('\n')}`
+            : '')
       }
     ]
 
@@ -1661,6 +1667,9 @@ export function createSwarmRunner({
     }
     const worktreesToClean = runWorktrees.get(run.id) ?? checkpoint?.workerWorktrees
     if (worktreesToClean) {
+      if (approved && run.plan?.mergeWorktrees) {
+        mergeWorktreeBranches(Object.values(worktreesToClean))
+      }
       cleanupRunWorktrees(Object.values(worktreesToClean))
       runWorktrees.delete(run.id)
     }
@@ -1938,6 +1947,12 @@ export function createSwarmRunner({
             .slice()
             .sort((a, b) => (a.sliceIndex ?? 0) - (b.sliceIndex ?? 0))
           const roundKey = checkpoint.reviewRound > 0 ? `-r${checkpoint.reviewRound}` : ''
+          const worktreeMap = runWorktrees.get(runId) ?? checkpoint?.workerWorktrees ?? {}
+          const worktreeDiffs = {}
+          for (const [agentName, entry] of Object.entries(worktreeMap)) {
+            const diffText = collectWorktreeDiff(entry?.worktreePath)
+            if (diffText) worktreeDiffs[agentName] = diffText
+          }
           bus.sendMessage({
             agentId: run.primaryAgentId,
             runId,
@@ -1948,6 +1963,7 @@ export function createSwarmRunner({
               slices: orderedSlices.map(
                 (slice) => `#${slice.seq} (${slice.from}, slice ${slice.sliceIndex}): ${slice.summary}`
               ),
+              ...(Object.keys(worktreeDiffs).length > 0 ? { worktreeDiffs } : {}),
               summary: `Review ${orderedSlices.length} completed slice(s).`
             },
             idempotencyKey: `handoff-review-${runId}${roundKey}`,
