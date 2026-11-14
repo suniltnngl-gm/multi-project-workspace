@@ -1385,3 +1385,61 @@ test('planSwarm and createSwarm surface syncAudit drift warnings when an AGY win
     await rm(tempDir, { recursive: true, force: true })
   }
 })
+
+test('isolateWorktrees provisions per-worker Git worktrees and cleans them up on finalization', async () => {
+  const { execFileSync } = await import('node:child_process')
+  const { existsSync } = await import('node:fs')
+  const tempDir = await mkdtemp(join(tmpdir(), 'swarm-worktree-'))
+  const repoDir = join(tempDir, 'repo')
+  const db = createDatabase(join(tempDir, 'workspace.sqlite'))
+  try {
+    execFileSync('git', ['init', repoDir], { stdio: 'ignore' })
+    execFileSync('git', ['-C', repoDir, 'config', 'user.email', 'test@example.com'], { stdio: 'ignore' })
+    execFileSync('git', ['-C', repoDir, 'config', 'user.name', 'Test'], { stdio: 'ignore' })
+    execFileSync('git', ['-C', repoDir, 'commit', '--allow-empty', '-m', 'init'], { stdio: 'ignore' })
+
+    const seenWorktrees = []
+    const runner = createSwarmRunner({
+      database: db,
+      bus: createAgentBus({ database: db }),
+      models: makeSampleModels(),
+      modelBudget: createModelBudget(),
+      modelClient: {
+        generate: async () => ({ text: 'ok' }),
+        complete: async (_model, req) => {
+          if (req.worktreePath) seenWorktrees.push(req.worktreePath)
+          return JSON.stringify({
+            summary: 'done',
+            status: 'done',
+            approved: true,
+            verdict: 'approved'
+          })
+        }
+      },
+      rootDir: repoDir
+    })
+
+    const created = runner.createSwarm({
+      objective: 'Slice 1; Slice 2',
+      isolateWorktrees: true,
+      worktreePath: repoDir,
+      includeReviewer: false
+    })
+    assert.ok(created.runId)
+    const worker1Wt = created.checkpoint.workerWorktrees['worker-1'].worktreePath
+    const worker2Wt = created.checkpoint.workerWorktrees['worker-2'].worktreePath
+    assert.notEqual(worker1Wt, worker2Wt)
+    assert.equal(existsSync(worker1Wt), true)
+    assert.equal(existsSync(worker2Wt), true)
+
+    const executed = await runner.executeSwarm(created.runId, { maxSteps: 10 })
+    assert.equal(executed.state, 'completed')
+    assert.ok(seenWorktrees.includes(worker1Wt))
+    assert.ok(seenWorktrees.includes(worker2Wt))
+    assert.equal(existsSync(worker1Wt), false)
+    assert.equal(existsSync(worker2Wt), false)
+  } finally {
+    db.close()
+    await rm(tempDir, { recursive: true, force: true })
+  }
+})

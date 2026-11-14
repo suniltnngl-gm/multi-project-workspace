@@ -28,6 +28,7 @@ import {
 } from './providerQuota.js'
 import { scanWorkspaceUserFiles } from './workspaceScan.js'
 import { scanWorkspaceSensors } from './workspaceSensors.js'
+import { cleanupRunWorktrees, provisionWorkerWorktree } from './swarmWorktrees.js'
 
 const MAX_ARTIFACT_THRESHOLD = 500
 const DEFAULT_SWARM_MAX_TOKENS = 600
@@ -218,6 +219,7 @@ export function createSwarmRunner({
   if (!database || !bus) {
     throw new Error('createSwarmRunner requires database and bus.')
   }
+  const runWorktrees = new Map()
 
   function hydrateTaskOptions(options = {}) {
     if (options.taskId === undefined || options.taskId === null || options.taskId === '') {
@@ -378,6 +380,7 @@ export function createSwarmRunner({
       syncFiles = false,
       selfImprove: rawSelfImprove = true,
       autoProposeSelfImprovement = false,
+      isolateWorktrees = false,
       budget: runBudget
     } = hydrated
     const parseCsvOrEnv = (value, envValue) => (
@@ -546,6 +549,7 @@ export function createSwarmRunner({
       syncFiles,
       selfImprove,
       autoProposeSelfImprovement: Boolean(autoProposeSelfImprovement),
+      isolateWorktrees: Boolean(isolateWorktrees),
       selfImprovementPlan: {
         enabled: selfImprove,
         strategy: selfImprove ? 'parallel' : 'disabled',
@@ -706,6 +710,7 @@ export function createSwarmRunner({
         ...(plan.contextBlock ? { contextBlock: plan.contextBlock } : {}),
         ...(plan.sessionId !== undefined && plan.sessionId !== null ? { sessionId: plan.sessionId } : {}),
         autoSlicePending: plan.autoSlicePending,
+        isolateWorktrees: Boolean(plan.isolateWorktrees),
         worktreePath: resolvedWorktreePath
       },
       agents
@@ -715,6 +720,25 @@ export function createSwarmRunner({
     bus.startRun(created.id)
     bus.transitionRun(created.id, 'dispatching')
     bus.transitionRun(created.id, 'running')
+
+    const workerWorktrees = {}
+    if (plan.isolateWorktrees) {
+      const baseRoot = resolvedWorktreePath || rootDir || process.cwd()
+      for (const agent of agents) {
+        if (agent.role !== 'worker') continue
+        const provisioned = provisionWorkerWorktree({
+          repoRoot: baseRoot,
+          runId: created.id,
+          agentName: agent.name
+        })
+        if (provisioned) {
+          workerWorktrees[agent.name] = provisioned
+        }
+      }
+      if (Object.keys(workerWorktrees).length > 0) {
+        runWorktrees.set(created.id, workerWorktrees)
+      }
+    }
 
     const { stillPending } = plan.autoSlicePending
       ? { stillPending: [] }
@@ -730,6 +754,7 @@ export function createSwarmRunner({
         reviewRound: 0,
         autoSlicePending: Boolean(plan.autoSlicePending),
         slices: plan.slices,
+        ...(Object.keys(workerWorktrees).length > 0 ? { workerWorktrees } : {}),
         selfImprovement: null,
         stepCount: 0
       }
@@ -949,11 +974,16 @@ export function createSwarmRunner({
       modelMetrics?.recordStart?.(baseId)
       try {
         inferenceStarted = true
+        const agentWorktree = activeAgent.role === 'worker'
+          ? (runWorktrees.get(run.id)?.[activeAgent.name]?.worktreePath
+            ?? run.checkpoint?.workerWorktrees?.[activeAgent.name]?.worktreePath)
+          : null
+        const effectiveWorktreePath = agentWorktree || run.plan?.worktreePath
         const content = await modelClient.complete(activeModel, {
           messages,
           maxTokens,
           sessionKey: activeAgent.promptCacheKey,
-          ...(run.plan?.worktreePath ? { worktreePath: run.plan.worktreePath } : {}),
+          ...(effectiveWorktreePath ? { worktreePath: effectiveWorktreePath } : {}),
           onUsage: (usage) => {
             reportedUsage = usage
           }
@@ -1628,6 +1658,11 @@ export function createSwarmRunner({
       } catch {
         // Ignore scan errors when the worktree path is synthetic or not registered on disk.
       }
+    }
+    const worktreesToClean = runWorktrees.get(run.id) ?? checkpoint?.workerWorktrees
+    if (worktreesToClean) {
+      cleanupRunWorktrees(Object.values(worktreesToClean))
+      runWorktrees.delete(run.id)
     }
     return { stepped: true, ...formatBoard(run.id) }
   }
