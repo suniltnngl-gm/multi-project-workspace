@@ -361,6 +361,7 @@ function printHelp() {
   log(row('local-ai [all|0.5b|1.5b]', 'Start local models within memory limits'))
   log(row('colab [status|stop] [session]', 'Inspect or stop the reusable Colab session'))
   log(row('ai doctor [...]', 'Check local and remote model configuration'))
+  log(row('ai local [up|down|status]', 'Start, stop, or check on-demand local llama-server lanes'))
   log(row('ai improve [SUBCMD] ...', 'Run the AI improvement flow on draft proposals'))
   log(row('ai ask [--model ID] ...', 'Ask the running API a direct AI question'))
   log(row('ai model [rotate|study]', 'Rotate or study OpenCode models daily'))
@@ -544,6 +545,82 @@ async function taskWorktree(args) {
     'Usage: ./workspace task worktree <id>\n' +
     '       ./workspace task worktree create <id> [--branch NAME] [--name NAME]\n' +
     '       ./workspace task worktree remove <id> [--force]',
+    2
+  )
+}
+
+async function probeLocalPort(port) {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/health`, {
+      signal: AbortSignal.timeout(1000)
+    })
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
+async function aiLocal(args) {
+  const json = args.includes('--json')
+  const positional = args.filter((arg) => arg !== '--json')
+  const action = positional[0] ?? 'status'
+  const target = positional[1] ?? 'all'
+  if (!['all', '0.5b', '1.5b'].includes(target)) {
+    fail(`Unknown local model target: ${target}. Expected all, 0.5b, or 1.5b.`, 2)
+  }
+
+  const targets = [
+    ...(target === 'all' || target === '0.5b'
+      ? [{ id: 'local-0.5b', key: '0.5b', port: Number(process.env.LOCAL_AI_0_5B_PORT || 8080) }]
+      : []),
+    ...(target === 'all' || target === '1.5b'
+      ? [{ id: 'local-1.5b', key: '1.5b', port: Number(process.env.LOCAL_AI_1_5B_PORT || 8081) }]
+      : [])
+  ]
+
+  if (action === 'up') {
+    return runNodeScript('local-models.mjs', [target])
+  }
+
+  if (action === 'status') {
+    const lanes = await Promise.all(targets.map(async (lane) => ({
+      ...lane,
+      running: await probeLocalPort(lane.port)
+    })))
+    if (json) {
+      log(JSON.stringify({ lanes }, null, 2))
+    } else {
+      for (const lane of lanes) {
+        log(`${lane.id} (:${lane.port}): ${lane.running ? 'running' : 'stopped (resource-gated)'}`)
+      }
+    }
+    return 0
+  }
+
+  if (action === 'down') {
+    const results = []
+    for (const lane of targets) {
+      const running = await probeLocalPort(lane.port)
+      if (!running) {
+        results.push({ ...lane, stopped: false, reason: 'already stopped' })
+        continue
+      }
+      await spawnProcess('pkill', ['-f', `llama-server.*--port ${lane.port}`]).catch(() => 1)
+      results.push({ ...lane, stopped: true })
+    }
+    if (json) {
+      log(JSON.stringify({ lanes: results }, null, 2))
+    } else {
+      for (const lane of results) {
+        log(`${lane.id} (:${lane.port}): ${lane.stopped ? 'stopped' : lane.reason}`)
+      }
+    }
+    return 0
+  }
+
+  fail(
+    `Unknown ai local subcommand: ${action}\n` +
+    'Usage: ./workspace ai local [up|down|status] [all|0.5b|1.5b] [--json]',
     2
   )
 }
@@ -1012,6 +1089,7 @@ async function dispatch(argv) {
     case 'ai': {
       const subcommand = rest[0] ?? 'doctor'
       if (subcommand === 'doctor') return runNodeScript('ai-doctor.mjs', rest.slice(1))
+      if (subcommand === 'local') return aiLocal(rest.slice(1))
       if (subcommand === 'improve') return aiImprove(rest.slice(1))
       if (subcommand === 'ask') return aiAsk(rest.slice(1))
       if (subcommand === 'model') return aiModel(rest.slice(1))
@@ -1020,6 +1098,7 @@ async function dispatch(argv) {
       fail(
         `Unknown ai subcommand: ${subcommand}\n` +
         'Usage: ./workspace ai doctor [--json] [--strict] [--offline]\n' +
+        '       ./workspace ai local [up|down|status] [all|0.5b|1.5b] [--json]\n' +
         '       ./workspace ai improve [run|list|approve <id>|reject <id>|rollback <id>]\n' +
         '       ./workspace ai ask [--model ID] [--session ID] "prompt"\n' +
         '       ./workspace ai model [rotate|status|list|providers|study]\n' +
