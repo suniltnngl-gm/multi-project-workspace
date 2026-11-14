@@ -859,9 +859,9 @@ test('prompt-size TPM guard rejects 8000-TPM Groq models for large prompts while
   assert.equal(knownModelTpmLimit({ cli: { model: 'console-groq/meta-llama/llama-3.1-8b-instant' } }), 6000)
   assert.equal(knownModelTpmLimit({ cli: { model: 'console-groq/meta-llama/llama-3.3-70b-versatile' } }), 12000)
   assert.equal(fitsPromptTpmLimit(groqOss120b, largePromptTokens), false)
-  // 5000 raw tokens + 2500 opencode CLI overhead = 7500 * 1.15 = 8625 > 8000
-  assert.equal(fitsPromptTpmLimit(groqOss120b, 5000), false)
-  // 3500 raw tokens + 2500 opencode CLI overhead = 6000 * 1.15 = 6900 <= 8000
-  assert.equal(fitsPromptTpmLimit(groqOss120b, 3500), true)
+  // 1500 raw tokens + 6000 opencode CLI overhead = 7500 * 1.15 = 8625 > 8000
+  assert.equal(fitsPromptTpmLimit(groqOss120b, 1500), false)
+  // 900 raw tokens + 6000 opencode CLI overhead = 6900 * 1.15 = 7935 <= 8000
+  assert.equal(fitsPromptTpmLimit(groqOss120b, 900), true)
   assert.equal(fitsPromptTpmLimit(groqScout, largePromptTokens), true)
 })

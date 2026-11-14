@@ -756,7 +756,7 @@ export function knownModelTpmLimit(model) {
 export function fitsPromptTpmLimit(
   model,
   estimatedPromptTokens,
-  { headroomRatio = 1.15, opencodeOverheadTokens = 2500 } = {}
+  { headroomRatio = 1.15, opencodeOverheadTokens = 6000 } = {}
 ) {
   if (!Number.isFinite(estimatedPromptTokens) || estimatedPromptTokens <= 0) return true
   const tpmLimit = knownModelTpmLimit(model)
