@@ -1427,7 +1427,10 @@ export function createModelBudget({
     weeklyRemainingPercent,
     weeklyResetSeconds,
     sessionRemainingPercent,
-    sessionResetSeconds
+    sessionResetSeconds,
+    resetPool = false,
+    poolUsdSpent,
+    poolTokensUsed
   } = {}) {
     const target = resolveQuotaTarget(configs, id, scope)
     const observedId = target.ledgerId
@@ -1441,6 +1444,24 @@ export function createModelBudget({
     }
 
     for (const limit of limits) {
+      if (limit.reset === 'pool') {
+        if (resetPool === true) {
+          deleteBucketPolicy(observedId, limit.policy)
+        }
+        if (limit.unit === 'usd_micros' && poolUsdSpent !== undefined) {
+          const parsedUsd = Number(poolUsdSpent)
+          if (Number.isFinite(parsedUsd) && parsedUsd >= 0) {
+            setBucket(observedId, limit.policy, 0, Math.round(parsedUsd * 1_000_000))
+          }
+        }
+        if (limit.unit === 'tokens' && poolTokensUsed !== undefined) {
+          const parsedTokens = Number(poolTokensUsed)
+          if (Number.isFinite(parsedTokens) && parsedTokens >= 0) {
+            setBucket(observedId, limit.policy, 0, Math.round(parsedTokens))
+          }
+        }
+        continue
+      }
       if (limit.window === 'week' && weeklyRemainingPercent !== undefined) {
         const pct = Math.min(100, Math.max(0, Number(weeklyRemainingPercent)))
         if (Number.isFinite(pct)) {

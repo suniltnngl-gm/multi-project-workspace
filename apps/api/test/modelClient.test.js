@@ -1618,7 +1618,7 @@ Credentials:
   }
 })
 
-test('gemini-api-paid allows gemini-4-argon, injects XDG_CONFIG_HOME and --user-project, and strips GEMINI_API_KEY', async () => {
+test('gemini-api-paid isolates HOME/XDG_CONFIG_HOME, enforces --no-keyring [config ], allows gemini-4-argon, and strips GEMINI_API_KEY', async () => {
   const calls = []
   const prevEnvKey = process.env.GEMINI_API_KEY
   process.env.GEMINI_API_KEY = 'should-not-leak-into-paid-cli'
@@ -1630,11 +1630,25 @@ test('gemini-api-paid allows gemini-4-argon, injects XDG_CONFIG_HOME and --user-
           command,
           args,
           envHasGeminiApiKey: 'GEMINI_API_KEY' in (options?.env ?? {}),
-          xdgConfigHome: options?.env?.XDG_CONFIG_HOME
+          home: options?.env?.HOME,
+          xdgConfigHome: options?.env?.XDG_CONFIG_HOME,
+          geminiNoKeyring: options?.env?.GEMINI_NO_KEYRING
         })
         if (args[0] === 'whoami') {
+          if (options?.env?.HOME === '/tmp/unset-paid-home') {
+            return {
+              stdout: '  --api-key                   [unset  ] (not set)\n',
+              stderr: ''
+            }
+          }
+          if (options?.env?.HOME === '/tmp/prepay-xdg-config') {
+            return {
+              stdout: '  --api-key                   [config ] Paid******Key\n',
+              stderr: ''
+            }
+          }
           return {
-            stdout: '  --api-key                   [keyring] Paid******Key\n',
+            stdout: '  --api-key                   [keyring] Free******Key\n',
             stderr: ''
           }
         }
@@ -1676,7 +1690,8 @@ test('gemini-api-paid allows gemini-4-argon, injects XDG_CONFIG_HOME and --user-
         command: 'gemini-api',
         userProject: 'prepay-gcp-proj',
         configHome: '/tmp/prepay-xdg-config',
-        probeArgs: ['whoami', '--user-project', 'prepay-gcp-proj'],
+        noKeyring: true,
+        probeArgs: ['whoami', '--no-keyring', '--user-project', 'prepay-gcp-proj'],
         model: 'gemini-4-argon',
         allowProModels: true
       }
@@ -1684,12 +1699,23 @@ test('gemini-api-paid allows gemini-4-argon, injects XDG_CONFIG_HOME and --user-
 
     const freeProbe = await client.probe(freeModel)
     const paidProbe = await client.probe(paidModel)
+    const unsetProbe = await client.probe({
+      ...paidModel,
+      id: 'gemini-api-paid-unset',
+      cli: { ...paidModel.cli, configHome: '/tmp/unset-paid-home' }
+    })
     assert.deepEqual(freeProbe, { ok: true, source: 'keyring' })
-    assert.deepEqual(paidProbe, { ok: true, source: 'keyring' })
-    assert.equal(calls.length, 2)
+    assert.deepEqual(paidProbe, { ok: true, source: 'config' })
+    assert.equal(unsetProbe.ok, false)
+    assert.match(unsetProbe.error, /\[config\]/)
+
+    assert.equal(calls[0].home, process.env.HOME)
     assert.equal(calls[0].xdgConfigHome, process.env.XDG_CONFIG_HOME)
+    assert.equal(calls[0].geminiNoKeyring, undefined)
+    assert.equal(calls[1].home, '/tmp/prepay-xdg-config')
     assert.equal(calls[1].xdgConfigHome, '/tmp/prepay-xdg-config')
-    assert.deepEqual(calls[1].args, ['whoami', '--user-project', 'prepay-gcp-proj'])
+    assert.equal(calls[1].geminiNoKeyring, '1')
+    assert.deepEqual(calls[1].args, ['whoami', '--no-keyring', '--user-project', 'prepay-gcp-proj'])
 
     const usages = []
     const reply = await client.complete(paidModel, {
@@ -1697,12 +1723,15 @@ test('gemini-api-paid allows gemini-4-argon, injects XDG_CONFIG_HOME and --user-
       onUsage: (u) => usages.push(u)
     })
     assert.equal(reply, 'PAID_OK')
-    assert.equal(calls[2].envHasGeminiApiKey, false)
-    assert.equal(calls[2].xdgConfigHome, '/tmp/prepay-xdg-config')
-    assert.ok(calls[2].args.includes('--model'))
-    assert.equal(calls[2].args[calls[2].args.indexOf('--model') + 1], 'gemini-4-argon')
-    assert.ok(calls[2].args.includes('--user-project'))
-    assert.equal(calls[2].args[calls[2].args.indexOf('--user-project') + 1], 'prepay-gcp-proj')
+    assert.equal(calls[3].envHasGeminiApiKey, false)
+    assert.equal(calls[3].home, '/tmp/prepay-xdg-config')
+    assert.equal(calls[3].xdgConfigHome, '/tmp/prepay-xdg-config')
+    assert.equal(calls[3].geminiNoKeyring, '1')
+    assert.ok(calls[3].args.includes('--no-keyring'))
+    assert.ok(calls[3].args.includes('--model'))
+    assert.equal(calls[3].args[calls[3].args.indexOf('--model') + 1], 'gemini-4-argon')
+    assert.ok(calls[3].args.includes('--user-project'))
+    assert.equal(calls[3].args[calls[3].args.indexOf('--user-project') + 1], 'prepay-gcp-proj')
     assert.deepEqual(usages[0], { promptTokens: 10, completionTokens: 25, totalTokens: 35 })
   } finally {
     if (prevEnvKey === undefined) delete process.env.GEMINI_API_KEY

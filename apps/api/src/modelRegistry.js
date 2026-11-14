@@ -676,6 +676,7 @@ function createGeminiApiPaidModel(env, billingCategories) {
   const url = readUrl(env, 'GEMINI_API_PAID_URL')
   const userProject = readText(env, 'GEMINI_API_PAID_USER_PROJECT', '')
   const configHome = readText(env, 'GEMINI_API_PAID_CONFIG_HOME', '')
+  const noKeyring = readBoolean(env, 'GEMINI_API_PAID_NO_KEYRING', Boolean(configHome))
   const model = readText(env, 'GEMINI_API_PAID_MODEL', 'gemini-4-argon')
   const models = readList(env, 'GEMINI_API_PAID_MODELS', ['gemini-4-argon', ...GEMINI_API_FREE_TIER_MODELS])
   const timeoutMs = readNumber(env, 'GEMINI_API_PAID_TIMEOUT_MS', 180000)
@@ -708,7 +709,12 @@ function createGeminiApiPaidModel(env, billingCategories) {
       command: readText(env, 'GEMINI_API_PAID_COMMAND', readText(env, 'GEMINI_API_COMMAND', 'gemini-api')),
       userProject,
       configHome,
-      probeArgs: ['whoami', ...(userProject ? ['--user-project', userProject] : [])],
+      noKeyring,
+      probeArgs: [
+        'whoami',
+        ...(noKeyring ? ['--no-keyring'] : []),
+        ...(userProject ? ['--user-project', userProject] : [])
+      ],
       model,
       models,
       allowProModels: true,

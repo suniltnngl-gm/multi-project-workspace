@@ -184,7 +184,11 @@ function geminiApiKeyringEnv(baseEnv = process.env, model = null) {
   delete cleanEnv.GEMINI_API_KEY
   const configHome = String(model?.cli?.configHome || '').trim()
   if (configHome) {
+    cleanEnv.HOME = configHome
     cleanEnv.XDG_CONFIG_HOME = configHome
+  }
+  if (model?.cli?.noKeyring) {
+    cleanEnv.GEMINI_NO_KEYRING = '1'
   }
   return cleanEnv
 }
@@ -220,14 +224,24 @@ function parseJsonObjectFromOutput(raw) {
   return null
 }
 
-export function parseGeminiApiWhoami(stdout) {
+export function parseGeminiApiWhoami(stdout, { allowConfigSource = false } = {}) {
   const text = stripAnsi(stdout)
   if (/--api-key\s+\[keyring\]/i.test(text)) {
     return { ok: true, source: 'keyring' }
   }
+  if (allowConfigSource) {
+    if (/--(?:api-key|access-token)\s+\[keyring\]/i.test(text)) {
+      return { ok: true, source: 'keyring' }
+    }
+    if (/--(?:api-key|access-token)\s+\[config\s*\]/i.test(text)) {
+      return { ok: true, source: 'config' }
+    }
+  }
   return {
     ok: false,
-    error: 'The gemini-api CLI does not have a [keyring] API key configured (run `gemini-api configure`).'
+    error: allowConfigSource
+      ? 'The gemini-api CLI does not have a [keyring] or [config] credential configured (run `HOME=<dir> gemini-api configure --no-keyring`).'
+      : 'The gemini-api CLI does not have a [keyring] API key configured (run `gemini-api configure`).'
   }
 }
 
@@ -573,7 +587,9 @@ export function createModelClient({
         : { timeoutMs: 20000 }
       const { stdout, stderr } = await runCommand(command, args, runOptions) ?? {}
       if (model.backend === 'gemini-api-cli') {
-        const whoami = parseGeminiApiWhoami(`${stdout ?? ''}\n${stderr ?? ''}`)
+        const whoami = parseGeminiApiWhoami(`${stdout ?? ''}\n${stderr ?? ''}`, {
+          allowConfigSource: Boolean(model.cli?.configHome || model.cli?.noKeyring)
+        })
         value = whoami.ok ? { ok: true, source: whoami.source } : { ok: false, error: whoami.error }
       } else {
         value = { ok: true }
@@ -1231,6 +1247,9 @@ export function createModelClient({
 
     const buildArgs = (interactionId) => {
       const args = ['generate', prompt, '--model', targetModel, '--stream=false', '--output-format', 'json']
+      if (model.cli?.noKeyring) {
+        args.push('--no-keyring')
+      }
       if (model.cli?.userProject) {
         args.push('--user-project', model.cli.userProject)
       }

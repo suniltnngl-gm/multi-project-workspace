@@ -1050,5 +1050,6 @@ test('createModelRegistry keeps gemini-api-paid dormant by default and enables e
   assert.equal(paid.autoSelect, false)
   assert.equal(paid.cli.userProject, 'prepay-gcp-1')
   assert.equal(paid.cli.configHome, '/tmp/gemini-paid-config')
-  assert.deepEqual(paid.cli.probeArgs, ['whoami', '--user-project', 'prepay-gcp-1'])
+  assert.equal(paid.cli.noKeyring, true)
+  assert.deepEqual(paid.cli.probeArgs, ['whoami', '--no-keyring', '--user-project', 'prepay-gcp-1'])
 })

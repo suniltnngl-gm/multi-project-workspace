@@ -32,10 +32,12 @@ const VALUE_OPTIONS = new Set([
   '--argon-weekly',
   '--argon-weekly-reset',
   '--argon-5h',
-  '--argon-5h-reset'
+  '--argon-5h-reset',
+  '--paid-usd-spent',
+  '--paid-tokens-used'
 ])
 
-const FLAG_OPTIONS = new Set(['--json', '--help', '-h'])
+const FLAG_OPTIONS = new Set(['--reset-paid-pool', '--json', '--help', '-h'])
 
 export function parseDurationSeconds(raw) {
   if (raw === undefined || raw === null || raw === '') return undefined
@@ -122,7 +124,10 @@ function usageText() {
     '  --claude-gpt-weekly <0-100>   --claude-gpt-weekly-reset <duration>',
     '  --claude-gpt-5h <0-100>       --claude-gpt-5h-reset <duration>',
     '  --argon-weekly <0-100>        --argon-weekly-reset <duration>',
-    '  --argon-5h <0-100>            --argon-5h-reset <duration>'
+    '  --argon-5h <0-100>            --argon-5h-reset <duration>',
+    '  --reset-paid-pool             Reset gemini-api-paid prepay USD/token pool counters to 0',
+    '  --paid-usd-spent <usd>        Set cumulative gemini-api-paid USD spend in SQLite',
+    '  --paid-tokens-used <count>    Set cumulative gemini-api-paid token spend in SQLite'
   ].join('\n')
 }
 
@@ -470,6 +475,26 @@ function main() {
           || spec.sessionResetSeconds !== undefined
         if (!hasValues) continue
         budget.syncPoolState('agy', spec)
+      }
+
+      const syncPaidPool = options['--reset-paid-pool']
+        || options['--paid-usd-spent'] !== undefined
+        || options['--paid-tokens-used'] !== undefined
+      if (syncPaidPool) {
+        const parseNonNegative = (raw, flag) => {
+          if (raw === undefined) return undefined
+          const num = Number(raw)
+          if (!Number.isFinite(num) || num < 0) {
+            throw new Error(`${flag} must be a non-negative number.`)
+          }
+          return num
+        }
+        budget.syncPoolState('gemini-api-paid', {
+          scope: process.env.GEMINI_API_PAID_MODEL?.trim() || 'gemini-4-argon',
+          resetPool: Boolean(options['--reset-paid-pool']),
+          poolUsdSpent: parseNonNegative(options['--paid-usd-spent'], '--paid-usd-spent'),
+          poolTokensUsed: parseNonNegative(options['--paid-tokens-used'], '--paid-tokens-used')
+        })
       }
     }
 

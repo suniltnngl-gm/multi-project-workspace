@@ -828,6 +828,26 @@ test('gemini-api-paid enforces local prepay safety-ratio USD & token depleting p
       const reloadedUsd = budget2.snapshot('gemini-api-paid', 'gemini-4-argon').limiters.find((e) => e.unit === 'usd_micros')
       assert.equal(reloadedUsd.usedUsd, 4.4)
       assert.equal(reloadedUsd.remainingUsd, 0)
+
+      // Calibrate after partial adjustment, then reset pool after a fresh Prepay top-up
+      budget2.syncPoolState('gemini-api-paid', {
+        scope: 'gemini-4-argon',
+        poolUsdSpent: 1.5,
+        poolTokensUsed: 120_000
+      })
+      assert.equal(budget2.check('gemini-api-paid', 'gemini-4-argon').ok, true)
+      const adjustedSnap = budget2.snapshot('gemini-api-paid', 'gemini-4-argon')
+      assert.equal(adjustedSnap.limiters.find((e) => e.unit === 'usd_micros').usedUsd, 1.5)
+      assert.equal(adjustedSnap.limiters.find((e) => e.unit === 'tokens' && e.reset === 'pool').used, 120_000)
+
+      budget2.syncPoolState('gemini-api-paid', {
+        scope: 'gemini-4-argon',
+        resetPool: true
+      })
+      const resetSnap = budget2.snapshot('gemini-api-paid', 'gemini-4-argon')
+      assert.equal(resetSnap.ok, true)
+      assert.equal(resetSnap.limiters.find((e) => e.unit === 'usd_micros').usedUsd, 0)
+      assert.equal(resetSnap.limiters.find((e) => e.unit === 'tokens' && e.reset === 'pool').used, 0)
     } finally {
       db2.close()
     }
