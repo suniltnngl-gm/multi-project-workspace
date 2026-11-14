@@ -895,4 +895,5 @@ test('capability-aware worker routing prefers supportsLocalTools backends for re
     requiresLocalTools: true
   })
   assert.equal(modelSupportsLocalTools(roster.workers[0]), true)
+  assert.equal(roster.workers[0]?.provider, 'agy')
 })

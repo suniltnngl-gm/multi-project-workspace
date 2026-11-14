@@ -494,6 +494,7 @@ function toRosterCandidate(candidate, modelBudget, resourceMap = null) {
     ...described,
     modelSpec: candidate.id,
     groupKey: modelProviderKey(candidate),
+    fitsTpm: fitsPromptTpmLimit(candidate, 1000),
     ...(candidate.limitKind ? { limitKind: candidate.limitKind } : {})
   }
 }
@@ -624,6 +625,7 @@ export function buildSwarmRoster({
   const seenSpecs = new Set()
   for (const entry of [...preferredPool, ...rankedPool]) {
     if (seenSpecs.has(entry.modelSpec)) continue
+    if (preferredModels.length === 0 && entry.fitsTpm === false) continue
     seenSpecs.add(entry.modelSpec)
     selectionPool.push(entry)
   }
