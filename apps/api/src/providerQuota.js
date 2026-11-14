@@ -720,11 +720,7 @@ const KNOWN_MODEL_TPM_LIMITS = Object.freeze({
   'console-groq/qwen/qwen3.8-27b': 8000,
   'openai/gpt-oss-120b': 8000,
   'openai/gpt-oss-20b': 8000,
-  'qwen/qwen3.8-27b': 8000,
-  'console-groq/meta-llama/llama-3.3-70b-versatile': 12000,
-  'meta-llama/llama-3.3-70b-versatile': 12000,
-  'console-groq/meta-llama/llama-4-scout-17b-16e-instruct': 30000,
-  'meta-llama/llama-4-scout-17b-16e-instruct': 30000
+  'qwen/qwen3.8-27b': 8000
 })
 
 export function estimatePromptTokensForMessages(messages = []) {
