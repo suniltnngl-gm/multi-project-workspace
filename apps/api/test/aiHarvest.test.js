@@ -8,6 +8,9 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createApp } from '../src/app.js'
 import { createDatabase } from '../src/database.js'
+import { harvestClineSession } from '../../../scripts/harvest-adapters/cline.mjs'
+import { harvestOpenCodeSession } from '../../../scripts/harvest-adapters/opencode.mjs'
+import { harvestTranscriptFile } from '../../../scripts/harvest-adapters/transcript.mjs'
 import {
   buildAgyHarvestArgs,
   HANDOFF_SCHEMA,
@@ -162,4 +165,46 @@ test('GET /api/agents/handoffs returns [] when session_handoffs table does not e
   } finally {
     server.close()
   }
+})
+
+test('cline, opencode, and transcript adapters normalize local sessions read-only', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-harvest-adapters-'))
+
+  // Cline adapter
+  const clineTasksDir = path.join(tmpDir, 'cline-tasks')
+  const clineTaskDir = path.join(clineTasksDir, 'task-42')
+  fs.mkdirSync(clineTaskDir, { recursive: true })
+  fs.writeFileSync(
+    path.join(clineTaskDir, 'api_conversation_history.json'),
+    JSON.stringify([
+      { role: 'user', content: [{ type: 'text', text: 'Fix bug' }] },
+      { role: 'assistant', content: [{ type: 'tool_use', input: { path: 'src/app.js' } }, { type: 'text', text: 'Fixed src/app.js' }] },
+    ]),
+    'utf8',
+  )
+  const clineOut = harvestClineSession({ tasksDir: clineTasksDir })
+  assert.equal(clineOut.source_agent, 'cline')
+  assert.equal(clineOut.session_id, 'task-42')
+  assert.deepEqual(clineOut.files_touched, ['src/app.js'])
+  assert.equal(clineOut.summary, 'Fixed src/app.js')
+
+  // OpenCode adapter
+  const opencodeDir = path.join(tmpDir, 'opencode')
+  fs.mkdirSync(opencodeDir, { recursive: true })
+  fs.writeFileSync(
+    path.join(opencodeDir, 'oc-1.jsonl'),
+    `${JSON.stringify({ role: 'assistant', content: 'OpenCode summary ready' })}\n`,
+    'utf8',
+  )
+  const ocOut = harvestOpenCodeSession({ opencodeDir })
+  assert.equal(ocOut.source_agent, 'opencode')
+  assert.equal(ocOut.session_id, 'oc-1')
+  assert.equal(ocOut.summary, 'OpenCode summary ready')
+
+  // Generic transcript adapter
+  const transcriptPath = path.join(tmpDir, 'gemini-chat.json')
+  fs.writeFileSync(transcriptPath, JSON.stringify({ messages: [{ content: 'Gemini CLI finished' }] }), 'utf8')
+  const trOut = harvestTranscriptFile({ sourceAgent: 'gemini-cli', transcriptPath })
+  assert.equal(trOut.source_agent, 'gemini-cli')
+  assert.equal(trOut.summary, 'Gemini CLI finished')
 })

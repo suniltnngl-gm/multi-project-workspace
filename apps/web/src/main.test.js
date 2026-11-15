@@ -719,7 +719,7 @@ describe('user files and folders sections', () => {
     })
 
     const listText = document.querySelector('#swarm-telemetry-list').textContent
-    expect(listText).toContain('handoff:conv-handoff-7')
+    expect(listText).toContain('[agy] conv-handoff-7')
     expect(listText).toContain('multi-project-workspace')
     expect(listText).toContain('task #82')
     expect(listText).toContain('Surfaced handoffs in telemetry')

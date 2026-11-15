@@ -6,6 +6,9 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createDatabase } from '../apps/api/src/database.js'
 import { loadWorkspaceEnv, resolveDatabasePath } from './env.mjs'
+import { harvestClineSession } from './harvest-adapters/cline.mjs'
+import { harvestOpenCodeSession } from './harvest-adapters/opencode.mjs'
+import { harvestTranscriptFile } from './harvest-adapters/transcript.mjs'
 
 loadWorkspaceEnv()
 
@@ -107,39 +110,61 @@ export function ensureSessionHandoffsTable(db) {
     CREATE TABLE IF NOT EXISTS session_handoffs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       conversation_id TEXT NOT NULL,
+      source_agent TEXT NOT NULL DEFAULT 'agy',
       task_id INTEGER,
       target_repo TEXT NOT NULL DEFAULT '',
+      model_used TEXT NOT NULL DEFAULT '',
       summary TEXT NOT NULL DEFAULT '',
       completed_commits_json TEXT NOT NULL DEFAULT '[]',
+      files_touched_json TEXT NOT NULL DEFAULT '[]',
       next_actions_json TEXT NOT NULL DEFAULT '[]',
       blockers_json TEXT NOT NULL DEFAULT '[]',
       raw_envelope_json TEXT NOT NULL DEFAULT '{}',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `)
+  const cols = new Set(sqlite.prepare('PRAGMA table_info(session_handoffs)').all().map((c) => c.name))
+  if (!cols.has('source_agent')) {
+    sqlite.exec("ALTER TABLE session_handoffs ADD COLUMN source_agent TEXT NOT NULL DEFAULT 'agy'")
+  }
+  if (!cols.has('files_touched_json')) {
+    sqlite.exec("ALTER TABLE session_handoffs ADD COLUMN files_touched_json TEXT NOT NULL DEFAULT '[]'")
+  }
+  if (!cols.has('model_used')) {
+    sqlite.exec("ALTER TABLE session_handoffs ADD COLUMN model_used TEXT NOT NULL DEFAULT ''")
+  }
 }
 
-export function saveSessionHandoff(db, { conversationId, taskId = null, structuredOutput, rawEnvelope }) {
+export function saveSessionHandoff(
+  db,
+  { conversationId, sourceAgent = 'agy', taskId = null, modelUsed = '', structuredOutput, rawEnvelope },
+) {
   ensureSessionHandoffsTable(db)
   const sqlite = db.db || db
   const stmt = sqlite.prepare(`
     INSERT INTO session_handoffs (
       conversation_id,
+      source_agent,
       task_id,
       target_repo,
+      model_used,
       summary,
       completed_commits_json,
+      files_touched_json,
       next_actions_json,
       blockers_json,
       raw_envelope_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
   const info = stmt.run(
     conversationId,
+    sourceAgent || structuredOutput.source_agent || 'agy',
     taskId,
     structuredOutput.target_repo || '',
+    modelUsed || structuredOutput.model_used || '',
     structuredOutput.summary || '',
     JSON.stringify(structuredOutput.completed_commits || []),
+    JSON.stringify(structuredOutput.files_touched || []),
     JSON.stringify(structuredOutput.next_actions || []),
     JSON.stringify(structuredOutput.blockers || []),
     JSON.stringify(rawEnvelope || {}),
@@ -149,7 +174,9 @@ export function saveSessionHandoff(db, { conversationId, taskId = null, structur
 
 function parseCliArgs(argv) {
   const opts = {
+    source: 'agy',
     conversation: null,
+    transcript: null,
     latest: false,
     task: null,
     createTask: false,
@@ -168,7 +195,9 @@ function parseCliArgs(argv) {
     else if (a === '--allow-conserve') opts.allowConserve = true
     else if (a === '--json') opts.json = true
     else if (a === '--dry-run') opts.dryRun = true
-    else if (a === '--conversation' && argv[i + 1]) opts.conversation = argv[++i]
+    else if (a === '--source' && argv[i + 1]) opts.source = argv[++i]
+    else if ((a === '--conversation' || a === '--session') && argv[i + 1]) opts.conversation = argv[++i]
+    else if (a === '--transcript' && argv[i + 1]) opts.transcript = argv[++i]
     else if (a === '--task' && argv[i + 1]) opts.task = Number(argv[++i])
     else if (a === '--model' && argv[i + 1]) opts.model = argv[++i]
     else if (a === '--database' && argv[i + 1]) opts.database = argv[++i]
@@ -180,8 +209,53 @@ async function main() {
   const opts = parseCliArgs(process.argv.slice(2))
   if (opts.help) {
     console.log(
-      'Usage: ./workspace ai harvest [--conversation <id> | --latest] [--task <id>] [--create-task] [--model <m>] [--allow-conserve] [--dry-run] [--json]',
+      'Usage: ./workspace ai harvest [--source agy|opencode|cline|<agent>] [--conversation|--session <id> | --latest] [--transcript <path>] [--task <id>] [--create-task] [--model <m>] [--allow-conserve] [--dry-run] [--json]',
     )
+    return
+  }
+
+  if (opts.transcript) {
+    const normalized = harvestTranscriptFile({
+      sourceAgent: opts.source,
+      transcriptPath: opts.transcript,
+      sessionId: opts.conversation,
+    })
+    if (opts.dryRun) {
+      console.log(opts.json ? JSON.stringify({ dryRun: true, ...normalized }, null, 2) : `[dry-run] ${normalized.summary}`)
+      return
+    }
+    const db = createDatabase(resolveDatabasePath(opts.database))
+    const saved = saveSessionHandoff(db, {
+      conversationId: normalized.session_id || 'transcript',
+      sourceAgent: normalized.source_agent,
+      taskId: opts.task,
+      modelUsed: normalized.model_used,
+      structuredOutput: normalized,
+      rawEnvelope: normalized,
+    })
+    console.log(opts.json ? JSON.stringify({ id: saved.id, ...normalized }, null, 2) : `Harvested ${normalized.source_agent} -> handoff #${saved.id}`)
+    return
+  }
+
+  if (opts.source === 'cline' || opts.source === 'opencode') {
+    const normalized =
+      opts.source === 'cline'
+        ? harvestClineSession({ sessionId: opts.conversation })
+        : harvestOpenCodeSession({ sessionId: opts.conversation })
+    if (opts.dryRun) {
+      console.log(opts.json ? JSON.stringify({ dryRun: true, ...normalized }, null, 2) : `[dry-run] ${normalized.summary}`)
+      return
+    }
+    const db = createDatabase(resolveDatabasePath(opts.database))
+    const saved = saveSessionHandoff(db, {
+      conversationId: normalized.session_id || opts.source,
+      sourceAgent: normalized.source_agent,
+      taskId: opts.task,
+      modelUsed: normalized.model_used,
+      structuredOutput: normalized,
+      rawEnvelope: normalized,
+    })
+    console.log(opts.json ? JSON.stringify({ id: saved.id, ...normalized }, null, 2) : `Harvested ${normalized.source_agent} -> handoff #${saved.id}`)
     return
   }
 

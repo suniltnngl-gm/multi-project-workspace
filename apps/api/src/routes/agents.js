@@ -125,6 +125,7 @@ export function createAgentsRouter({ database, bus, swarmRunner } = {}) {
   router.get('/api/agents/handoffs', (request, response) => {
     const rawLimit = Number.parseInt(String(request.query.limit ?? '5'), 10)
     const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 50) : 5
+    const sourceFilter = typeof request.query.source === 'string' ? request.query.source.trim() : ''
     const sqlite = database.db || database
     if (!sqlite || typeof sqlite.prepare !== 'function') {
       return response.json([])
@@ -134,15 +135,24 @@ export function createAgentsRouter({ database, bus, swarmRunner } = {}) {
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_handoffs'")
         .get()
       if (!table) return response.json([])
-      const rows = sqlite
-        .prepare(
-          `SELECT id, conversation_id, task_id, target_repo, summary,
-                  completed_commits_json, next_actions_json, blockers_json, created_at
-           FROM session_handoffs
-           ORDER BY id DESC
-           LIMIT ?`,
-        )
-        .all(limit)
+      const cols = new Set(sqlite.prepare('PRAGMA table_info(session_handoffs)').all().map((c) => c.name))
+      const selectCols = [
+        'id',
+        'conversation_id',
+        cols.has('source_agent') ? 'source_agent' : "'agy' AS source_agent",
+        'task_id',
+        'target_repo',
+        cols.has('model_used') ? 'model_used' : "'' AS model_used",
+        'summary',
+        'completed_commits_json',
+        cols.has('files_touched_json') ? 'files_touched_json' : "'[]' AS files_touched_json",
+        'next_actions_json',
+        'blockers_json',
+        'created_at',
+      ].join(', ')
+      const whereClause = sourceFilter && cols.has('source_agent') ? 'WHERE source_agent = ?' : ''
+      const sql = `SELECT ${selectCols} FROM session_handoffs ${whereClause} ORDER BY id DESC LIMIT ?`
+      const rows = whereClause ? sqlite.prepare(sql).all(sourceFilter, limit) : sqlite.prepare(sql).all(limit)
       const parseArr = (raw) => {
         try {
           const parsed = JSON.parse(raw || '[]')
@@ -155,10 +165,13 @@ export function createAgentsRouter({ database, bus, swarmRunner } = {}) {
         rows.map((row) => ({
           id: row.id,
           conversation_id: row.conversation_id,
+          source_agent: row.source_agent || 'agy',
           task_id: row.task_id ?? null,
           target_repo: row.target_repo || '',
+          model_used: row.model_used || '',
           summary: row.summary || '',
           completed_commits: parseArr(row.completed_commits_json),
+          files_touched: parseArr(row.files_touched_json),
           next_actions: parseArr(row.next_actions_json),
           blockers: parseArr(row.blockers_json),
           created_at: row.created_at,
