@@ -14,6 +14,7 @@ import { createModelClient } from '../apps/api/src/modelClient.js'
 import { parseFallbackChain } from '../apps/api/src/modelFallback.js'
 import { createModelRegistry, modelQuotaProfiles } from '../apps/api/src/modelRegistry.js'
 import { createSwarmRunner } from '../apps/api/src/swarmRunner.js'
+import { computeCacheFingerprint, formatCompactHandoffPrefix, getLatestSessionHandoff } from '../apps/api/src/sessionCache.js'
 import { loadWorkspaceEnv, resolveDatabasePath, ROOT_DIR } from './env.mjs'
 import { getEnvSnapshot } from './workspace-env.mjs'
 
@@ -357,11 +358,22 @@ async function main() {
           return 1
         }
         const envSnapshot = getEnvSnapshot()
+        const enabledPlugins = envSnapshot.agy.plugins.filter((p) => p.enabled).map((p) => p.name)
+        const cacheFingerprint = computeCacheFingerprint({
+          profile: envSnapshot.activeProfile,
+          enabledPlugins,
+          model: options['--reviewer-model'] || '',
+          systemPrefix: objective || '',
+        })
+        const latestHandoff = getLatestSessionHandoff(database)
+        const handoffPrefix = formatCompactHandoffPrefix(latestHandoff)
         const payload = {
           dryRun: true,
           env: {
             activeProfile: envSnapshot.activeProfile,
-            enabledPlugins: envSnapshot.agy.plugins.filter((p) => p.enabled).map((p) => p.name),
+            enabledPlugins,
+            cacheFingerprint,
+            handoffInjected: Boolean(handoffPrefix),
             localInference: envSnapshot.localInference.status,
             ok: envSnapshot.ok,
           },
@@ -371,7 +383,7 @@ async function main() {
         else {
           console.log('[dry-run] No run created and no models invoked.')
           console.log(
-            `[env] profile=${envSnapshot.activeProfile} plugins=${payload.env.enabledPlugins.join(',') || 'none'} local=${envSnapshot.localInference.status}`,
+            `[env] profile=${envSnapshot.activeProfile} plugins=${payload.env.enabledPlugins.join(',') || 'none'} cache=${cacheFingerprint.slice(0, 12)} handoff=${payload.env.handoffInjected ? 'yes' : 'no'} local=${envSnapshot.localInference.status}`,
           )
           printPlan(plan)
         }
