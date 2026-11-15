@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "repoId": "multi-project-workspace",
+  "role": "core",
+  "defaultBranch": "master",
+  "observedBranch": "master",
+  "contractVersion": "1.0",
+  "runtime": {
+    "kind": "mixed",
+    "node": ">=22",
+    "python": ">=3.12",
+    "pythonPin": "3.14",
+    "pythonManager": "uv"
+  },
+  "dependencyInstall": {
+    "policy": "frozen-lockfile",
+    "manager": "npm",
+    "lockfile": "package-lock.json",
+    "frozen": true,
+    "command": "npm ci && uv sync --frozen --project apps/python"
+  },
+  "verification": {
+    "targets": {
+      "verify:unit": "node scripts/workspace-verify.mjs unit",
+      "verify:contract": "node scripts/workspace-verify.mjs contract",
+      "verify:readiness": "node scripts/workspace-verify.mjs readiness"
+    }
+  },
+  "governance": {
+    "file": "AGENTS.md",
+    "status": "present"
+  },
+  "capabilityMetadata": {
+    "authority": "descriptive-only",
+    "executionAuthority": false,
+    "supportedModels": [],
+    "declaredLanes": [
+      "offline-validation"
+    ],
+    "liveProviderExecution": "requires-separate-authorization",
+    "liveSwarmDispatch": "requires-separate-authorization",
+    "localOnlyCompatibility": "not-assessed"
+  },
+  "provenance": {
+    "emits": true,
+    "fields": [
+      "repo",
+      "commitSha",
+      "contractVersion",
+      "supportedModels"
+    ],
+    "authority": "descriptive-only"
+  },
+  "portabilityFiles": [
+    "workspace.manifest.json",
+    "workspace-repo.json",
+    "schemas/workspace-manifest.schema.json",
+    "schemas/workspace-repo.schema.json",
+    "scripts/workspace-schema.mjs",
+    "scripts/workspace-federation.mjs",
+    "scripts/workspace-verify.mjs",
+    "scripts/workspace-subtree.mjs",
+    ".github/workflows/reusable-repo-verify.yml",
+    "AGENTS.md",
+    "tests/workspace-federation/workspace-federation.test.mjs",
+    "docs/federated-workspace-kit.md",
+    "tests/workspace-federation/fixtures/bridge-reusable-workflow-caller.yml"
+  ]
+}

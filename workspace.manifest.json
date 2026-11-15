@@ -1,0 +1,46 @@
+{
+  "manifestVersion": 1,
+  "contractVersion": "1.0",
+  "topology": "model-3-hybrid-core-plugin-split",
+  "registryAuthority": "descriptive-only",
+  "repositories": [
+    {
+      "repoId": "multi-project-workspace",
+      "role": "core",
+      "path": ".",
+      "defaultBranch": "master",
+      "observedBranch": "master",
+      "descriptor": "workspace-repo.json",
+      "contractVersion": "1.0",
+      "runtimeKind": "mixed",
+      "capabilityMetadata": {
+        "authority": "descriptive-only",
+        "executionAuthority": false,
+        "supportedModels": [],
+        "declaredLanes": [
+          "offline-validation"
+        ],
+        "localOnlyCompatibility": "not-assessed"
+      }
+    },
+    {
+      "repoId": "curl-ai-bridge",
+      "role": "adapter",
+      "path": "../curl-ai-bridge",
+      "defaultBranch": "main",
+      "observedBranch": "test/ubuntu-self-hosted-runner-smoke",
+      "descriptor": "workspace-repo.json",
+      "contractVersion": "1.0",
+      "runtimeKind": "node",
+      "capabilityMetadata": {
+        "authority": "descriptive-only",
+        "executionAuthority": false,
+        "supportedModels": [],
+        "declaredLanes": [
+          "offline-validation"
+        ],
+        "localOnlyCompatibility": "not-assessed"
+      }
+    }
+  ]
+}

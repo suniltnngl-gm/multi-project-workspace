@@ -1,0 +1,275 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:workspace:repo-descriptor:1",
+  "title": "Federated workspace repository descriptor",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "repoId",
+    "role",
+    "defaultBranch",
+    "observedBranch",
+    "contractVersion",
+    "runtime",
+    "dependencyInstall",
+    "verification",
+    "governance",
+    "capabilityMetadata",
+    "provenance",
+    "portabilityFiles"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "repoId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "minLength": 3
+    },
+    "role": {
+      "type": "string",
+      "enum": [
+        "core",
+        "adapter",
+        "plugin",
+        "service"
+      ]
+    },
+    "defaultBranch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "observedBranch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "contractVersion": {
+      "const": "1.0"
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "node"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "node",
+            "python",
+            "mixed"
+          ]
+        },
+        "node": {
+          "type": "string",
+          "minLength": 1
+        },
+        "python": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pythonPin": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pythonManager": {
+          "type": "string",
+          "enum": [
+            "uv"
+          ]
+        }
+      }
+    },
+    "dependencyInstall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy",
+        "manager",
+        "lockfile",
+        "frozen",
+        "command"
+      ],
+      "properties": {
+        "policy": {
+          "type": "string",
+          "enum": [
+            "frozen-lockfile",
+            "no-package-manifest"
+          ]
+        },
+        "manager": {
+          "type": "string",
+          "enum": [
+            "npm",
+            "none"
+          ]
+        },
+        "lockfile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "frozen": {
+          "type": "boolean"
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "targets"
+      ],
+      "properties": {
+        "targets": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "verify:unit",
+            "verify:contract",
+            "verify:readiness"
+          ],
+          "properties": {
+            "verify:unit": {
+              "type": "string",
+              "minLength": 1
+            },
+            "verify:contract": {
+              "type": "string",
+              "minLength": 1
+            },
+            "verify:readiness": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "governance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file",
+        "status"
+      ],
+      "properties": {
+        "file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "present",
+            "deferred-priority-2"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "capabilityMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority",
+        "executionAuthority",
+        "supportedModels",
+        "declaredLanes",
+        "liveProviderExecution",
+        "liveSwarmDispatch",
+        "localOnlyCompatibility"
+      ],
+      "properties": {
+        "authority": {
+          "const": "descriptive-only"
+        },
+        "executionAuthority": {
+          "const": false
+        },
+        "supportedModels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true,
+          "maxItems": 0
+        },
+        "declaredLanes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "liveProviderExecution": {
+          "const": "requires-separate-authorization"
+        },
+        "liveSwarmDispatch": {
+          "const": "requires-separate-authorization"
+        },
+        "localOnlyCompatibility": {
+          "type": "string",
+          "enum": [
+            "declared-compatible-not-authoritative",
+            "not-assessed"
+          ]
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "emits",
+        "fields",
+        "authority"
+      ],
+      "properties": {
+        "emits": {
+          "const": true
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "repo",
+              "commitSha",
+              "contractVersion",
+              "supportedModels"
+            ]
+          },
+          "minItems": 4,
+          "uniqueItems": true
+        },
+        "authority": {
+          "const": "descriptive-only"
+        }
+      }
+    },
+    "portabilityFiles": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    }
+  }
+}

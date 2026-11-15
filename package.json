@@ -11,10 +11,15 @@
     "dev:api": "npm run dev --workspace apps/api",
     "dev:python": "node scripts/run-python.mjs apps/python/src/server.py",
     "build": "npm run build --workspace apps/web",
-    "test": "npm test --workspace apps/web && npm test --workspace apps/api && node scripts/run-python.mjs -m unittest discover -s apps/python/tests",
+    "test": "npm test --workspace apps/web && npm test --workspace apps/api && node scripts/run-python.mjs -m unittest discover -s apps/python/tests && node tests/workspace-federation/workspace-federation.test.mjs",
     "test:python": "node scripts/run-python.mjs -m unittest discover -s apps/python/tests",
     "lint": "npm run lint --workspace apps/web && eslint apps/api/src scripts",
-    "start:api": "npm run start --workspace apps/api"
+    "start:api": "npm run start --workspace apps/api",
+    "verify:unit": "node scripts/workspace-verify.mjs unit",
+    "verify:contract": "node scripts/workspace-verify.mjs contract",
+    "verify:readiness": "node scripts/workspace-verify.mjs readiness",
+    "verify:subtree": "node scripts/workspace-subtree.mjs",
+    "test:workspace-federation": "node tests/workspace-federation/workspace-federation.test.mjs"
   },
   "engines": {
     "node": ">=22"

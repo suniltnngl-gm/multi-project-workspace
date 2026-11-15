@@ -1,0 +1,7 @@
+# Offline contract fixture only; not installed in curl-ai-bridge.
+jobs:
+  governance:
+    uses: suniltnngl-gm/multi-project-workspace/.github/workflows/reusable-repo-verify.yml@<PINNED_CORE_COMMIT_SHA>
+    with:
+      descriptor_path: workspace-repo.json
+      governance_required: false

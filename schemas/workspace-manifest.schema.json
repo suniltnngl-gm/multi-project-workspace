@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:workspace:manifest:1",
+  "title": "Federated workspace control-plane manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifestVersion",
+    "contractVersion",
+    "topology",
+    "registryAuthority",
+    "repositories"
+  ],
+  "properties": {
+    "manifestVersion": {
+      "const": 1
+    },
+    "contractVersion": {
+      "const": "1.0"
+    },
+    "topology": {
+      "const": "model-3-hybrid-core-plugin-split"
+    },
+    "registryAuthority": {
+      "const": "descriptive-only"
+    },
+    "repositories": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "repoId",
+          "role",
+          "path",
+          "defaultBranch",
+          "observedBranch",
+          "descriptor",
+          "contractVersion",
+          "runtimeKind",
+          "capabilityMetadata"
+        ],
+        "properties": {
+          "repoId": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "core",
+              "adapter",
+              "plugin",
+              "service"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "defaultBranch": {
+            "type": "string",
+            "minLength": 1
+          },
+          "observedBranch": {
+            "type": "string",
+            "minLength": 1
+          },
+          "descriptor": {
+            "const": "workspace-repo.json"
+          },
+          "contractVersion": {
+            "const": "1.0"
+          },
+          "runtimeKind": {
+            "type": "string",
+            "enum": [
+              "node",
+              "python",
+              "mixed"
+            ]
+          },
+          "capabilityMetadata": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "authority",
+              "executionAuthority",
+              "supportedModels",
+              "declaredLanes",
+              "localOnlyCompatibility"
+            ],
+            "properties": {
+              "authority": {
+                "const": "descriptive-only"
+              },
+              "executionAuthority": {
+                "const": false
+              },
+              "supportedModels": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "uniqueItems": true,
+                "maxItems": 0
+              },
+              "declaredLanes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "uniqueItems": true
+              },
+              "localOnlyCompatibility": {
+                "type": "string",
+                "enum": [
+                  "declared-compatible-not-authoritative",
+                  "not-assessed"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
