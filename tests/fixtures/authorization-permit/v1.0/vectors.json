@@ -1,0 +1,123 @@
+{
+  "vectorSet": "authorization-permit-v1.0-offline",
+  "contractVersion": "1.0",
+  "positive": [
+    {
+      "id": "V-POS-001",
+      "fixture": "valid-permit.json",
+      "expected": "accept"
+    }
+  ],
+  "negative": [
+    {
+      "id": "V-NEG-001",
+      "case": "duplicate-json-member",
+      "expected": "CONTRACT_SCHEMA_INVALID"
+    },
+    {
+      "id": "V-NEG-002",
+      "case": "missing-required-claim",
+      "expected": "CONTRACT_REQUIRED_CLAIM_MISSING"
+    },
+    {
+      "id": "V-NEG-003",
+      "case": "unknown-key-id",
+      "expected": "PERMIT_KEY_UNKNOWN"
+    },
+    {
+      "id": "V-NEG-004",
+      "case": "altered-claims-signature",
+      "expected": "PERMIT_SIGNATURE_INVALID"
+    },
+    {
+      "id": "V-NEG-005",
+      "case": "noncanonical-claims-json",
+      "expected": "PERMIT_SIGNATURE_INVALID"
+    },
+    {
+      "id": "V-NEG-006",
+      "case": "audience-mismatch",
+      "expected": "PERMIT_AUDIENCE_MISMATCH"
+    },
+    {
+      "id": "V-NEG-007",
+      "case": "task-run-request-binding-mismatch",
+      "expected": "PERMIT_REQUEST_MISMATCH"
+    },
+    {
+      "id": "V-NEG-008",
+      "case": "expired-permit",
+      "expected": "PERMIT_EXPIRED"
+    },
+    {
+      "id": "V-NEG-009",
+      "case": "future-issued-permit",
+      "expected": "PERMIT_NOT_YET_VALID"
+    },
+    {
+      "id": "V-NEG-010",
+      "case": "overlong-permit",
+      "expected": "EXECUTION_LIMIT_EXCEEDED"
+    },
+    {
+      "id": "V-NEG-011",
+      "case": "parent-model-not-allowed",
+      "expected": "MODEL_NOT_ALLOWED"
+    },
+    {
+      "id": "V-NEG-012",
+      "case": "parent-role-not-allowed",
+      "expected": "ROLE_NOT_ALLOWED"
+    },
+    {
+      "id": "V-NEG-013",
+      "case": "sibling-binding-missing",
+      "expected": "SIBLING_NOT_BOUND"
+    },
+    {
+      "id": "V-NEG-014",
+      "case": "sibling-model-mapping-mismatch",
+      "expected": "SIBLING_MODEL_MAPPING_MISMATCH"
+    },
+    {
+      "id": "V-NEG-015",
+      "case": "local-only-unclassified",
+      "expected": "LOCAL_ONLY_VIOLATION"
+    },
+    {
+      "id": "V-NEG-016",
+      "case": "execution-limit-exceeded",
+      "expected": "EXECUTION_LIMIT_EXCEEDED"
+    },
+    {
+      "id": "V-NEG-017",
+      "case": "idempotency-base64url-noncanonical-trailing-bits",
+      "expected": "CONTRACT_SCHEMA_INVALID"
+    },
+    {
+      "id": "V-NEG-018",
+      "case": "unknown-claim-or-envelope-field",
+      "expected": "CONTRACT_SCHEMA_INVALID"
+    },
+    {
+      "id": "V-NEG-019",
+      "case": "missing-permit-null-or-undefined",
+      "expected": "PERMIT_MISSING"
+    },
+    {
+      "id": "V-NEG-020",
+      "case": "revoked-signing-key-id",
+      "expected": "PERMIT_KEY_REVOKED"
+    },
+    {
+      "id": "V-NEG-021",
+      "case": "expired-trust-bundle",
+      "expected": "PERMIT_TRUST_BUNDLE_STALE"
+    },
+    {
+      "id": "V-NEG-022",
+      "case": "trust-bundle-freshness-without-valid-clock",
+      "expected": "PERMIT_TRUST_BUNDLE_STALE"
+    }
+  ]
+}

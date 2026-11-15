@@ -1,0 +1,14 @@
+{
+  "profileId": "RFC8785-JCS-CORE-BRIDGE-1.0",
+  "standard": "RFC 8785 — JSON Canonicalization Scheme (JCS)",
+  "profileVersion": "1.0",
+  "signedObject": "claims object only; detached integrity envelope excluded",
+  "encoding": "UTF-8 without BOM",
+  "propertyOrdering": "ECMAScript UTF-16 code-unit ordering as required by RFC 8785",
+  "stringSerialization": "ECMAScript-compatible JSON string serialization; reject lone surrogates; do not normalize Unicode",
+  "numberPolicy": "Authorization numbers are safe integers only; reject non-finite, fractional, and unsafe integer values",
+  "duplicateMemberNames": "Reject before ordinary object materialization",
+  "canonicalClaimsInput": "The raw claims JSON value must be byte-for-byte equal to its RFC 8785 JCS serialization",
+  "signature": "Ed25519 signs the canonical UTF-8 JCS bytes of claims only",
+  "inputBindingDigest": "SHA-256 over the canonical authenticated dispatch-envelope body, excluding the permit and transport-only metadata; Bridge compares its computed body digest with expectedContext.inputSha256. This digest is not a claim and is not the hash of the claims object."
+}

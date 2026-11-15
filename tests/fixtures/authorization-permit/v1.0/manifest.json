@@ -1,0 +1,32 @@
+{
+  "manifestVersion": 1,
+  "contractVersion": "1.0",
+  "fixtureSet": "authorization-permit-v1.0",
+  "hashAlgorithm": "SHA-256",
+  "artifacts": {
+    "schema": {
+      "path": "contracts/core-bridge/authorization-permit.v1.schema.json",
+      "sha256": "09ea97dc21b22014c99b3f324a6a823356e9018cbe78dbd73ea4244235f7df85"
+    },
+    "validPermit": {
+      "path": "tests/fixtures/authorization-permit/v1.0/valid-permit.json",
+      "sha256": "b38c1211483519568cde8cb74e86bb13ddc9b347f831b777da5bfddc73ba01aa"
+    },
+    "canonicalClaims": {
+      "path": "tests/fixtures/authorization-permit/v1.0/canonical-claims.jcs",
+      "sha256": "2f01ad0a272758f9b81a260563dbc7f9130d59e56881129ffb4ac6391404062e"
+    },
+    "testPublicKey": {
+      "path": "tests/fixtures/authorization-permit/v1.0/test-public-key.pem",
+      "sha256": "fb9d17e6b2850bd46b271730a082c694b0dcab8a396e0bcfdcc8473fe097a7cf"
+    },
+    "vectors": {
+      "path": "tests/fixtures/authorization-permit/v1.0/vectors.json",
+      "sha256": "4cd7a2a15428952f8fe3726cb07ef032d1521b3e417f06e34a52b061c8d468f8"
+    },
+    "canonicalizationProfile": {
+      "path": "tests/fixtures/authorization-permit/v1.0/canonicalization-profile.json",
+      "sha256": "4635995634c05bf60037f83d3fc8746ad4eb01879f561fdc9553ca791116ba06"
+    }
+  }
+}

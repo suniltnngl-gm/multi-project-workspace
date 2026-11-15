@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -123,3 +124,114 @@ console.log('PASS: execution-authority and provenance invariants remain descript
 console.log('PASS: Core and Bridge repository descriptors are registered and schema-valid');
 console.log('PASS: subtree preflight/postflight is inspect-only and detects commit mismatch');
 console.log('PASS: supportedModels is empty; descriptor paths reject traversal/symlinks; npm/uv frozen-lockfile invariants reject missing locks');
+
+const permitFixtureRelative = 'tests/fixtures/authorization-permit/v1.0';
+const permitCoreRoot = join(root, permitFixtureRelative);
+const permitBridgeRoot = join(bridge, permitFixtureRelative);
+const permitFixtureNames = [
+  'valid-permit.json',
+  'canonical-claims.jcs',
+  'test-public-key.pem',
+  'vectors.json',
+  'manifest.json',
+  'canonicalization-profile.json'
+];
+const permitArtifactPaths = [
+  'contracts/core-bridge/authorization-permit.v1.schema.json',
+  ...permitFixtureNames.map((name) => join(permitFixtureRelative, name))
+];
+const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+for (const relativePath of permitArtifactPaths) {
+  const coreBytes = readFileSync(join(root, relativePath));
+  const bridgeBytes = readFileSync(join(bridge, relativePath));
+  assert.deepEqual(bridgeBytes, coreBytes, `Core/Bridge authorization artifact differs: ${relativePath}`);
+}
+const permitSchema = JSON.parse(readFileSync(join(root, permitArtifactPaths[0]), 'utf8'));
+assert.equal(permitSchema.type, 'object');
+assert.equal(permitSchema.additionalProperties, false);
+assert.deepEqual(permitSchema.required, ['claims', 'integrity']);
+assert.equal(permitSchema.properties.integrity.additionalProperties, false);
+assert.equal(permitSchema.properties.claims.additionalProperties, false);
+assert.deepEqual(permitSchema.properties.claims.required, [
+  'contractVersion', 'permitId', 'issuedAt', 'expiresAt', 'audience',
+  'taskId', 'runId', 'projectId', 'requestId', 'idempotencyKey', 'operation',
+  'allowedModelIds', 'allowedRoles', 'siblingBindings', 'localOnly', 'executionLimits'
+]);
+assert.deepEqual(
+  permitSchema.properties.claims.properties.executionLimits.required,
+  ['maxTurns', 'maxSiblingCalls', 'maxTokensPerCall', 'maxTotalTokens', 'timeoutSeconds']
+);
+assert.equal(permitSchema.properties.claims.properties.allowedModelIds.uniqueItems, true);
+assert.equal(permitSchema.properties.claims.properties.allowedModelIds.maxItems, undefined, 'v1.0 must not invent an unapproved model-list ceiling');
+assert.equal(permitSchema.properties.claims.properties.allowedRoles.uniqueItems, true);
+assert.equal(permitSchema.properties.claims.properties.siblingBindings.uniqueItems, true);
+assert.equal(permitSchema.properties.claims.properties.siblingBindings.maxItems, undefined, 'v1.0 must not invent an unapproved sibling-binding ceiling');
+assert.deepEqual(
+  permitSchema.properties.claims.properties.allowedRoles.items.enum,
+  ['parent', 'reviewer', 'worker']
+);
+assert.equal(permitSchema.properties.claims.properties.executionLimits.properties.maxSiblingCalls.minimum, 1);
+assert.match(
+  permitSchema.properties.claims.properties.idempotencyKey.pattern,
+  /A-Za-z0-9_-/
+);
+const permitManifestBytes = readFileSync(join(permitCoreRoot, 'manifest.json'));
+const permitManifest = JSON.parse(permitManifestBytes.toString('utf8'));
+const expectedPermitArtifacts = {
+  schema: 'contracts/core-bridge/authorization-permit.v1.schema.json',
+  validPermit: join(permitFixtureRelative, 'valid-permit.json'),
+  canonicalClaims: join(permitFixtureRelative, 'canonical-claims.jcs'),
+  testPublicKey: join(permitFixtureRelative, 'test-public-key.pem'),
+  vectors: join(permitFixtureRelative, 'vectors.json'),
+  canonicalizationProfile: join(permitFixtureRelative, 'canonicalization-profile.json')
+};
+assert.equal(permitManifest.contractVersion, '1.0');
+assert.equal(permitManifest.hashAlgorithm, 'SHA-256');
+assert.deepEqual(Object.keys(permitManifest.artifacts).sort(), Object.keys(expectedPermitArtifacts).sort());
+for (const [artifactName, expectedPath] of Object.entries(expectedPermitArtifacts)) {
+  const pinned = permitManifest.artifacts[artifactName];
+  assert.equal(pinned.path, expectedPath);
+  assert.equal(pinned.sha256, sha256(readFileSync(join(root, expectedPath))), `manifest digest mismatch: ${artifactName}`);
+}
+const permitEnvelopeText = readFileSync(join(permitCoreRoot, 'valid-permit.json'), 'utf8').trimEnd();
+const claimsStart = permitEnvelopeText.indexOf('"claims":') + '"claims":'.length;
+const integrityStart = permitEnvelopeText.lastIndexOf(',"integrity":');
+assert.ok(claimsStart >= '"claims":'.length && integrityStart > claimsStart);
+assert.equal(
+  permitEnvelopeText.slice(claimsStart, integrityStart),
+  readFileSync(join(permitCoreRoot, 'canonical-claims.jcs'), 'utf8'),
+  'valid permit claims must be byte-identical to canonical-claims.jcs'
+);
+const publicKeyPem = readFileSync(join(permitCoreRoot, 'test-public-key.pem'), 'utf8');
+assert.match(publicKeyPem, /-----BEGIN PUBLIC KEY-----/);
+assert.doesNotMatch(publicKeyPem, /PRIVATE KEY/);
+const canonicalizationProfile = JSON.parse(readFileSync(join(permitCoreRoot, 'canonicalization-profile.json'), 'utf8'));
+assert.equal(canonicalizationProfile.standard, 'RFC 8785 — JSON Canonicalization Scheme (JCS)');
+assert.equal(canonicalizationProfile.profileVersion, '1.0');
+assert.equal(canonicalizationProfile.signedObject, 'claims object only; detached integrity envelope excluded');
+assert.match(canonicalizationProfile.inputBindingDigest, /excluding the permit and transport-only metadata/);
+assert.match(canonicalizationProfile.inputBindingDigest, /not the hash of the claims object/);
+const permitVectors = JSON.parse(readFileSync(join(permitCoreRoot, 'vectors.json'), 'utf8'));
+assert.ok(permitVectors.positive.some((vector) => vector.expected === 'accept'));
+assert.ok(permitVectors.negative.length >= 15);
+for (const [id, expected] of [['V-NEG-019', 'PERMIT_MISSING'], ['V-NEG-020', 'PERMIT_KEY_REVOKED'], ['V-NEG-021', 'PERMIT_TRUST_BUNDLE_STALE'], ['V-NEG-022', 'PERMIT_TRUST_BUNDLE_STALE']]) {
+  assert.ok(permitVectors.negative.some((vector) => vector.id === id && vector.expected === expected), 'missing remediation vector ' + id);
+}
+for (const [id, expected] of [['V-NEG-019', 'PERMIT_MISSING'], ['V-NEG-020', 'PERMIT_KEY_REVOKED'], ['V-NEG-021', 'PERMIT_TRUST_BUNDLE_STALE'], ['V-NEG-022', 'PERMIT_TRUST_BUNDLE_STALE']]) {
+  assert.ok(permitVectors.negative.some((vector) => vector.id === id && vector.expected === expected), 'missing remediation vector ' + id);
+}
+
+// Compatibility samples use the Core's observed numeric task IDs, run_<opaque>
+// run IDs, and slug-like project names. requestId/kid/audience are new v1.0
+// contract identities; no existing Core producer convention was found for them.
+const coreIdentityPattern = /^[A-Za-z0-9._:-]{1,128}$/;
+assert.match(String(105), coreIdentityPattern);
+assert.match('run_0123456789abcdef', coreIdentityPattern);
+assert.match('multi-project-workspace', coreIdentityPattern);
+assert.match('req_0123456789abcdef', coreIdentityPattern);
+assert.match('test-ed25519-v1', coreIdentityPattern);
+assert.match('curl-ai-bridge:dev', /^[a-z0-9][a-z0-9._:-]{1,127}$/);
+console.log('PASS: Core/Bridge v1.0 permit schema and fixture artifacts are byte-identical');
+console.log('PASS: fixture manifest pins schema, all fixture vectors, public key and RFC 8785 profile');
+console.log('PASS: valid permit embeds exact canonical claims; test fixture contains public key only');
+console.log('PASS: Core task/run/project identity examples fit the v1.0 patterns; new request/key/audience identities are bounded');
