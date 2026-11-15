@@ -5,6 +5,7 @@
 // Important Context: User file. The zero-token half of provider-aware routing.
 
 import { isConsoleGoogleScope } from './modelBudget.js'
+import { createSwarmModelAuthorization } from './swarmAuthorization.js'
 import {
   agyQuotaPoolForScope,
   isProOnlyGeminiModel,
@@ -533,9 +534,17 @@ export function buildSwarmRoster({
   geminiApiPaidModels = [],
   allowPaidEscalation = false,
   requiresLocalTools = false,
-  reviewerModel = null
+  reviewerModel = null,
+  modelAllowlist = null,
+  localOnly = false
 } = {}) {
+  if (reviewerModel !== null && (typeof reviewerModel !== 'string' || !reviewerModel.trim())) {
+    throw new Error('--reviewer-model requires a non-empty model ID.')
+  }
   const resourceMap = normalizeResourceMap(resourceStatus)
+  const authorization = modelAllowlist !== null || localOnly
+    ? createSwarmModelAuthorization({ models, requestedModels: modelAllowlist, localOnly })
+    : null
   const count = Math.max(1, Math.min(6, Math.floor(Number(workerCount) || 2)))
   const rawPool = []
   const seenBaseScope = new Set()
@@ -624,13 +633,16 @@ export function buildSwarmRoster({
 
   const selectionPool = []
   const seenSpecs = new Set()
-  for (const entry of [...preferredPool, ...rankedPool]) {
+  const candidatePool = authorization?.constrained
+    ? authorization.allowedModels.map((model) => toRosterCandidate(model, modelBudget, resourceMap))
+    : [...preferredPool, ...rankedPool]
+  for (const entry of candidatePool) {
     if (seenSpecs.has(entry.modelSpec)) continue
-    if (preferredModels.length === 0 && entry.fitsTpm === false) continue
+    if (!authorization?.constrained && preferredModels.length === 0 && entry.fitsTpm === false) continue
     seenSpecs.add(entry.modelSpec)
     selectionPool.push(entry)
   }
-  if (requiresLocalTools && preferredModels.length === 0) {
+  if (requiresLocalTools && preferredModels.length === 0 && !authorization?.constrained) {
     selectionPool.sort((a, b) => Number(modelSupportsLocalTools(b)) - Number(modelSupportsLocalTools(a)))
   }
 
@@ -672,13 +684,17 @@ export function buildSwarmRoster({
   )
 
   let reviewer = null
+  let resolvedReviewer = null
+  if (typeof reviewerModel === 'string' && reviewerModel.trim()) {
+    const trimmedReviewer = reviewerModel.trim()
+    resolvedReviewer = resolveAgentModel(models, trimmedReviewer)
+    if (!resolvedReviewer) throw new Error(`Unknown reviewer model: ${trimmedReviewer}`)
+    if (authorization?.constrained && !authorization.allows(resolvedReviewer)) {
+      throw new Error(`Reviewer model ${trimmedReviewer} is outside the active swarm model allowlist.`)
+    }
+  }
   if (includeReviewer !== false) {
-    if (typeof reviewerModel === 'string' && reviewerModel.trim()) {
-      const trimmedReviewer = reviewerModel.trim()
-      const resolvedReviewer = resolveAgentModel(models, trimmedReviewer)
-      if (!resolvedReviewer) {
-        throw new Error(`Unknown reviewer model: ${trimmedReviewer}`)
-      }
+    if (resolvedReviewer) {
       reviewer = toAgentEntry('reviewer', 'reviewer', toRosterCandidate(resolvedReviewer, modelBudget, resourceMap))
     } else if (selectionPool.length > 0) {
       const isNonLocal = (entry) => entry.provider !== 'local'
@@ -697,22 +713,24 @@ export function buildSwarmRoster({
             && entry.utilizationTier === 1
             && !entry.aheadOfPace
         )
-        ?? rankedPool.find((entry) => entry.ok && isNonLocal(entry) && !usedDomains.has(entry.groupKey))
+        ?? (authorization?.constrained ? undefined : rankedPool.find((entry) => entry.ok && isNonLocal(entry) && !usedDomains.has(entry.groupKey)))
         ?? selectionPool.find((entry) => entry.ok && isNonLocal(entry) && !usedDomains.has(entry.groupKey))
-        ?? rankedPool.find((entry) => entry.ok && isNonLocal(entry))
+        ?? (authorization?.constrained ? undefined : rankedPool.find((entry) => entry.ok && isNonLocal(entry)))
         ?? selectionPool.find((entry) => entry.ok && isNonLocal(entry))
-        ?? rankedPool.find((entry) => entry.ok && !usedDomains.has(entry.groupKey))
+        ?? (authorization?.constrained ? undefined : rankedPool.find((entry) => entry.ok && !usedDomains.has(entry.groupKey)))
         ?? selectionPool.find((entry) => entry.ok && !usedDomains.has(entry.groupKey))
-        ?? rankedPool.find((entry) => entry.ok)
+        ?? (authorization?.constrained ? undefined : rankedPool.find((entry) => entry.ok))
         ?? selectionPool[0]
       reviewer = toAgentEntry('reviewer', 'reviewer', reviewerCandidate)
     }
   }
 
-  const parentCandidate = rankedPool.find((entry) => entry.id === 'local-0.5b')
-    ?? rankedPool.find((entry) => entry.id === 'local-1.5b')
-    ?? rankedPool[0]
-    ?? selectionPool[0]
+  const parentCandidate = authorization?.constrained
+    ? (selectionPool.find((entry) => entry.ok) ?? selectionPool[0])
+    : (rankedPool.find((entry) => entry.id === 'local-0.5b')
+      ?? rankedPool.find((entry) => entry.id === 'local-1.5b')
+      ?? rankedPool[0]
+      ?? selectionPool[0])
     ?? {
       id: 'deterministic',
       modelSpec: 'deterministic',
@@ -723,13 +741,22 @@ export function buildSwarmRoster({
       ok: true,
       headroom: 1
     }
+  if (authorization?.constrained && selectionPool.length === 0) {
+    throw new Error('Active swarm model allowlist has no usable candidates; refusing to broaden selection.')
+  }
   const parent = toAgentEntry('parent', 'parent', parentCandidate)
 
   return {
     parent,
     reviewer,
     workers,
-    agents: [parent, ...(reviewer ? [reviewer] : []), ...workers]
+    agents: [parent, ...(reviewer ? [reviewer] : []), ...workers],
+    authorization: authorization ? {
+      constrained: true,
+      explicit: authorization.explicit,
+      localOnly: authorization.localOnly,
+      allowedModelIds: [...authorization.allowedModelIds]
+    } : { constrained: false, explicit: false, localOnly: false, allowedModelIds: null }
   }
 }
 

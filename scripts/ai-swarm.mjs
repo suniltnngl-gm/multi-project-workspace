@@ -14,6 +14,7 @@ import { createModelClient } from '../apps/api/src/modelClient.js'
 import { parseFallbackChain } from '../apps/api/src/modelFallback.js'
 import { createModelRegistry, modelQuotaProfiles } from '../apps/api/src/modelRegistry.js'
 import { createSwarmRunner } from '../apps/api/src/swarmRunner.js'
+import { assertSwarmAgentAuthorization } from '../apps/api/src/swarmAuthorization.js'
 import { computeCacheFingerprint, formatCompactHandoffPrefix, getLatestSessionHandoff } from '../apps/api/src/sessionCache.js'
 import { loadWorkspaceEnv, resolveDatabasePath, ROOT_DIR } from './env.mjs'
 import { getEnvSnapshot } from './workspace-env.mjs'
@@ -43,6 +44,7 @@ const VALUE_OPTIONS = new Set([
 
 const FLAG_OPTIONS = new Set([
   '--no-reviewer',
+  '--local-only',
   '--allow-paid',
   '--complete-task',
   '--self-improve',
@@ -59,8 +61,8 @@ const FLAG_OPTIONS = new Set([
 function usageText() {
   return [
     'Usage:',
-    '  ./workspace ai swarm plan [objective] [--task ID] [--slices "s1;s2"] [--workers N] [--models m1,m2] [--reviewer-model m] [--opencode-models m1,m2] [--agy-models m1,m2] [--gemini-api-models m1,m2] [--parent-mode MODE] [--review-rounds N] [--no-reviewer] [--self-improve|--no-self-improve] [--auto-propose] [--json]',
-    '  ./workspace ai swarm run [objective] [--task ID] [--slices "s1;s2"] [--workers N] [--models m1,m2] [--reviewer-model m] [--opencode-models m1,m2] [--agy-models m1,m2] [--gemini-api-models m1,m2] [--parent-mode MODE] [--review-rounds N] [--complete-task] [--no-reviewer] [--self-improve|--no-self-improve] [--auto-propose] [--max-tokens N] [--max-calls N] [--max-steps N] [--dry-run] [--json]',
+    '  ./workspace ai swarm plan [objective] [--task ID] [--slices "s1;s2"] [--workers N] [--models m1,m2] [--local-only] [--reviewer-model m] [--opencode-models m1,m2] [--agy-models m1,m2] [--gemini-api-models m1,m2] [--parent-mode MODE] [--review-rounds N] [--no-reviewer] [--self-improve|--no-self-improve] [--auto-propose] [--json]',
+    '  ./workspace ai swarm run [objective] [--task ID] [--slices "s1;s2"] [--workers N] [--models m1,m2] [--local-only] [--reviewer-model m] [--opencode-models m1,m2] [--agy-models m1,m2] [--gemini-api-models m1,m2] [--parent-mode MODE] [--review-rounds N] [--complete-task] [--no-reviewer] [--self-improve|--no-self-improve] [--auto-propose] [--max-tokens N] [--max-calls N] [--max-steps N] [--dry-run] [--json]',
     '  ./workspace ai swarm board <runId> [--json]',
     '  ./workspace ai swarm step <runId> [--json]',
     '  ./workspace ai swarm list [--state STATE] [--json]'
@@ -125,11 +127,14 @@ function buildPlanOptions(objective, options) {
   if (options['--workers'] !== undefined) {
     planOptions.workerCount = parsePositiveInt(options['--workers'], '--workers')
   }
-  if (options['--models']) {
+  if (Object.hasOwn(options, '--models')) {
     planOptions.models = splitCsv(options['--models'])
+    if (planOptions.models.length === 0) throw new Error('--models requires at least one non-empty model ID.')
   }
-  if (options['--reviewer-model']) {
+  if (options['--local-only']) planOptions.localOnly = true
+  if (Object.hasOwn(options, '--reviewer-model')) {
     planOptions.reviewerModel = String(options['--reviewer-model']).trim()
+    if (!planOptions.reviewerModel) throw new Error('--reviewer-model requires a non-empty model ID.')
   }
   if (options['--opencode-models']) {
     planOptions.opencodeModels = splitCsv(options['--opencode-models'])
@@ -352,7 +357,25 @@ async function main() {
         return 2
       }
       if (options['--dry-run']) {
-        const plan = runner.planSwarm(runOptions)
+        let plan
+        try {
+          plan = runner.planSwarm(runOptions)
+          if (!plan?.error && plan?.modelAuthorization?.constrained) {
+            const authorization = {
+              constrained: true,
+              localOnly: Boolean(plan.modelAuthorization.localOnly),
+              allowedModelIds: plan.modelAuthorization.allowedModelIds,
+              allows(model) { return this.allowedModelIds.includes(model.id) && (!this.localOnly || model.provider === 'local') }
+            }
+            assertSwarmAgentAuthorization(plan.agents, authorization)
+            const eligibleFallbacks = Array.isArray(plan.fallbackCandidates) ? plan.fallbackCandidates : []
+            const invalidFallbacks = eligibleFallbacks.filter((id) => !authorization.allowedModelIds.includes(id))
+            if (invalidFallbacks.length) throw new Error(`Dry-run fallback authorization failed: ${invalidFallbacks.join(', ')}`)
+          }
+        } catch (error) {
+          console.error(`Dry-run authorization failed: ${error.message}`)
+          return 1
+        }
         if (plan?.error) {
           console.error(plan.error.body?.error || 'Failed to plan swarm.')
           return 1

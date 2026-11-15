@@ -384,6 +384,7 @@ export function createSwarmRunner({
       isolateWorktrees = false,
       mergeWorktrees = false,
       reviewerModel = null,
+      localOnly = false,
       budget: runBudget
     } = hydrated
     const parseCsvOrEnv = (value, envValue) => (
@@ -395,6 +396,15 @@ export function createSwarmRunner({
             ? envValue.split(',').map((entry) => entry.trim()).filter(Boolean)
             : []))
     )
+    if (typeof localOnly !== 'boolean') {
+      return { error: { status: 400, body: { error: '--local-only must be a boolean flag.' } } }
+    }
+    if (!Array.isArray(preferredModels)) {
+      return { error: { status: 400, body: { error: 'Explicit --models constraint must be an array of model IDs.' } } }
+    }
+    if (reviewerModel !== null && (typeof reviewerModel !== 'string' || !reviewerModel.trim())) {
+      return { error: { status: 400, body: { error: '--reviewer-model requires a non-empty model ID.' } } }
+    }
     const resolvedAgyModels = parseCsvOrEnv(agyModels, process.env.AGY_AI_MODELS)
     const resolvedGeminiApiModels = parseCsvOrEnv(geminiApiModels, process.env.GEMINI_API_MODELS)
     const resolvedGeminiApiPaidModels = parseCsvOrEnv(geminiApiPaidModels)
@@ -428,12 +438,21 @@ export function createSwarmRunner({
       geminiApiPaidModels: resolvedGeminiApiPaidModels,
       allowPaidEscalation: resolvedAllowPaidEscalation,
       requiresLocalTools,
-      reviewerModel
+      reviewerModel,
+      modelAllowlist: preferredModels.length > 0 ? preferredModels : null,
+      localOnly
     })
 
     const agentsForPlan = Array.isArray(customAgents) && customAgents.length > 0
       ? customAgents
       : roster.agents
+    if (roster.authorization?.constrained) {
+      const allowed = new Set(roster.authorization.allowedModelIds ?? [])
+      const violations = agentsForPlan.filter((agent) => !allowed.has(agent.model))
+      if (violations.length) {
+        return { error: { status: 403, body: { error: `Swarm model authorization failed: ${violations.map((a) => `${a.role}:${a.name}=${a.model}`).join(', ')}` } } }
+      }
+    }
     const workersForSlices = agentsForPlan.filter((agent) => agent.role === 'worker')
     const mappedSlices = normalizedSlices.map((slice, index) => ({
       ...slice,
@@ -567,6 +586,10 @@ export function createSwarmRunner({
       maxReviewRounds,
       autoSlicePending,
       agents: agentsForPlan,
+      modelAuthorization: roster.authorization,
+      fallbackCandidates: roster.authorization?.constrained
+        ? [...roster.authorization.allowedModelIds]
+        : models.filter((model) => model && model.callable !== false).map((model) => model.id),
       slices: mappedSlices,
       dispatchPlan,
       quotaSummary: {
@@ -717,6 +740,7 @@ export function createSwarmRunner({
         autoSlicePending: plan.autoSlicePending,
         isolateWorktrees: Boolean(plan.isolateWorktrees),
         mergeWorktrees: Boolean(plan.mergeWorktrees),
+        modelAuthorization: plan.modelAuthorization,
         worktreePath: resolvedWorktreePath
       },
       agents
@@ -779,7 +803,7 @@ export function createSwarmRunner({
     }
   }
 
-  function pickFallbackModel(currentModelId, excludedIds, resourceStatus = null, { estimatedPromptTokens = 0 } = {}) {
+  function pickFallbackModel(currentModelId, excludedIds, resourceStatus = null, { estimatedPromptTokens = 0, authorization = null } = {}) {
     const callableModels = models.filter((model) => model && model.callable !== false)
     const snapshotPlan = callableModels.length > 0
       ? planAgentDispatch({
@@ -834,6 +858,7 @@ export function createSwarmRunner({
 
     const candidateSpecs = [
       ...fallbackChain,
+      ...(authorization?.constrained ? authorization.allowedModelIds ?? [] : []),
       ...rankedRegistryIds
     ]
     const seen = new Set()
@@ -844,6 +869,11 @@ export function createSwarmRunner({
         continue
       }
       seen.add(cand.id)
+      if (authorization?.constrained) {
+        const allowed = Array.isArray(authorization.allowedModelIds) && authorization.allowedModelIds.includes(cand.id)
+        const localAllowed = !authorization.localOnly || cand.provider === 'local'
+        if (!allowed || !localAllowed) continue
+      }
       if (!fitsPromptTpmLimit(cand, estimatedPromptTokens)) {
         continue
       }
@@ -879,7 +909,10 @@ export function createSwarmRunner({
     if (attempt >= maxAttempts - 1) return null
     excludedIds.add(activeModel.id)
     const resourceStatus = await readAsyncResourceStatus()
-    const nextModel = pickFallbackModel(activeModel.id, excludedIds, resourceStatus, { estimatedPromptTokens })
+    const nextModel = pickFallbackModel(activeModel.id, excludedIds, resourceStatus, {
+      estimatedPromptTokens,
+      authorization: run?.plan?.modelAuthorization ?? null
+    })
     if (!nextModel) return null
 
     const switched = bus.switchAgentModel({

@@ -946,3 +946,32 @@ test('workspace-cli.mjs derives local model ports from LOCAL_MODEL_DEFINITIONS w
   assert.doesNotMatch(cliSource, /LOCAL_AI_0_5B_PORT\s*\|\|\s*8080/)
   assert.doesNotMatch(cliSource, /LOCAL_AI_1_5B_PORT\s*\|\|\s*8081/)
 })
+
+
+test('strict swarm allowlist covers parent, reviewer, and every worker; rejects unknown and contradictory constraints', () => {
+  const models = createModelRegistry({ env: {} })
+  const budget = createModelBudget({ profiles: resolveQuotaProfiles({ env: {} }) })
+  const roster = buildSwarmRoster({
+    models, modelBudget: budget, workerCount: 3,
+    modelAllowlist: ['local-1.5b'], reviewerModel: 'local-1.5b',
+    opencodeModels: ['opencode/minimax-m2.5-free'],
+    agyModels: ['claude-sonnet-5-5-medium'],
+    geminiApiModels: ['gemini-2.5-flash']
+  })
+  assert.deepEqual(roster.agents.map((agent) => agent.model), [
+    'local-1.5b', 'local-1.5b', 'local-1.5b', 'local-1.5b', 'local-1.5b'
+  ])
+  assert.equal(roster.authorization.constrained, true)
+  assert.throws(() => buildSwarmRoster({ models, modelBudget: budget, modelAllowlist: ['missing-model'] }), /Unknown or non-callable/)
+  assert.throws(() => buildSwarmRoster({ models, modelBudget: budget, modelAllowlist: ['local-1.5b'], reviewerModel: 'gemini-api@gemini-2.5-flash' }), /outside the active swarm model allowlist/)
+  assert.throws(() => buildSwarmRoster({ models, modelBudget: budget, modelAllowlist: ['gemini-api@gemini-2.5-flash'], localOnly: true }), /not an approved local provider/)
+})
+
+test('--local-only constrains every roster role to registered local models', () => {
+  const models = createModelRegistry({ env: {} })
+  const budget = createModelBudget({ profiles: resolveQuotaProfiles({ env: {} }) })
+  const roster = buildSwarmRoster({ models, modelBudget: budget, workerCount: 3, localOnly: true })
+  assert.ok(roster.agents.length >= 4)
+  assert.ok(roster.agents.every((agent) => agent.provider === 'local'))
+  assert.equal(roster.authorization.localOnly, true)
+})

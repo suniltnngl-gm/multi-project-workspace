@@ -263,7 +263,7 @@ test('createSwarm without reviewer completes deterministically after worker slic
   assert.deepEqual(executed.board.map((entry) => entry.kind), ['assign', 'assign', 'result', 'result'])
 })
 
-test('worker 429 triggers observe429 cooldown, switches to fallback model, and completes', async () => {
+test('worker 429 cannot switch outside the explicit model allowlist', async () => {
   const models = makeSampleModels()
   let nowMs = Date.parse('2026-11-13T12:00:00Z')
   const budget = createModelBudget({
@@ -302,12 +302,12 @@ test('worker 429 triggers observe429 cooldown, switches to fallback model, and c
     models: ['opencode@opencode/minimax-m2.5-free']
   })
   const executed = await runner.executeSwarm(created.runId)
-  assert.equal(executed.state, 'completed')
-  assert.deepEqual(attemptedModels, ['opencode@opencode/minimax-m2.5-free', 'colab-3b'])
+  assert.equal(executed.state, 'failed')
+  assert.deepEqual(attemptedModels, ['opencode@opencode/minimax-m2.5-free'])
 
-  // The switched worker agent persists its new model on the run.
+  // No cross-provider model switch is recorded when the allowlist excludes it.
   const worker = executed.agents.find((agent) => agent.role === 'worker')
-  assert.equal(worker.model, 'colab-3b')
+  assert.equal(worker.model, 'opencode@opencode/minimax-m2.5-free')
 
   // observe429 recorded a cooldown on the throttled scope.
   const throttled = budget.check('opencode', 'opencode/minimax-m2.5-free')
@@ -315,7 +315,7 @@ test('worker 429 triggers observe429 cooldown, switches to fallback model, and c
   assert.ok(throttled.retryAfter > 0)
 
   const runDetail = bus.getRun(created.runId)
-  assert.ok(runDetail.events.some((event) => event.type === 'agent_model_switched'))
+  assert.ok(!runDetail.events.some((event) => event.type === 'agent_model_switched'))
 })
 
 test('HTTP swarm routes and scripts/ai-swarm.mjs CLI work end to end', async () => {
@@ -450,6 +450,56 @@ test('HTTP swarm routes and scripts/ai-swarm.mjs CLI work end to end', async () 
     assert.equal(parsedDryRun.dryRun, true)
     assert.equal(parsedDryRun.includeReviewer, false)
 
+    const strictCliDryRun = spawnSync(
+      process.execPath,
+      [join(ROOT, 'scripts', 'ai-swarm.mjs'), 'run', 'Strict local objective',
+        '--models', 'local-1.5b', '--dry-run', '--database', cliDb, '--json'],
+      { cwd: ROOT, encoding: 'utf8' }
+    )
+    assert.equal(strictCliDryRun.status, 0, strictCliDryRun.stderr)
+    const strictPlan = JSON.parse(strictCliDryRun.stdout)
+    assert.ok(strictPlan.agents.every((agent) => agent.model === 'local-1.5b'))
+    assert.deepEqual(strictPlan.modelAuthorization.allowedModelIds, ['local-1.5b'])
+    assert.ok(strictPlan.fallbackCandidates.every((id) => id === 'local-1.5b'))
+
+    const localOnlyDryRun = spawnSync(
+      process.execPath,
+      [join(ROOT, 'scripts', 'ai-swarm.mjs'), 'run', 'Local only objective',
+        '--local-only', '--dry-run', '--database', cliDb, '--json'],
+      { cwd: ROOT, encoding: 'utf8' }
+    )
+    assert.equal(localOnlyDryRun.status, 0, localOnlyDryRun.stderr)
+    const localOnlyPlan = JSON.parse(localOnlyDryRun.stdout)
+    assert.ok(localOnlyPlan.agents.every((agent) => agent.provider === 'local'))
+
+    const contradictoryDryRun = spawnSync(
+      process.execPath,
+      [join(ROOT, 'scripts', 'ai-swarm.mjs'), 'run', 'Contradictory objective',
+        '--models', 'local-1.5b', '--reviewer-model', 'gemini-api@gemini-2.5-flash',
+        '--dry-run', '--database', cliDb, '--json'],
+      { cwd: ROOT, encoding: 'utf8' }
+    )
+    assert.notEqual(contradictoryDryRun.status, 0)
+    assert.match(contradictoryDryRun.stderr, /outside the active swarm model allowlist|Dry-run authorization failed/)
+
+    const unknownModelDryRun = spawnSync(
+      process.execPath,
+      [join(ROOT, 'scripts', 'ai-swarm.mjs'), 'run', 'Unknown model objective',
+        '--models', 'unknown-model-xyz', '--dry-run', '--database', cliDb, '--json'],
+      { cwd: ROOT, encoding: 'utf8' }
+    )
+    assert.notEqual(unknownModelDryRun.status, 0)
+    assert.match(unknownModelDryRun.stderr, /Unknown or non-callable model|Dry-run authorization failed/)
+
+    const emptyAllowlistDryRun = spawnSync(
+      process.execPath,
+      [join(ROOT, 'scripts', 'ai-swarm.mjs'), 'run', 'Empty allowlist objective',
+        '--models', '', '--dry-run', '--database', cliDb, '--json'],
+      { cwd: ROOT, encoding: 'utf8' }
+    )
+    assert.notEqual(emptyAllowlistDryRun.status, 0)
+    assert.match(emptyAllowlistDryRun.stderr, /--models requires at least one non-empty model ID/)
+
     const cliList = spawnSync(
       process.execPath,
       [join(ROOT, 'scripts', 'ai-swarm.mjs'), 'list', '--database', cliDb, '--json'],
@@ -535,7 +585,7 @@ test('local resource gate busy blocks local-1.5b, switches to healthy fallback, 
     objective: 'Run local worker slice',
     workerCount: 1,
     includeReviewer: false,
-    models: ['local-1.5b']
+    models: ['local-1.5b', 'colab-3b']
   })
   const executed = await runner.executeSwarm(created.runId)
   assert.equal(executed.state, 'completed')
