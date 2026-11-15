@@ -122,6 +122,53 @@ export function createAgentsRouter({ database, bus, swarmRunner } = {}) {
     return response.json(runs)
   })
 
+  router.get('/api/agents/handoffs', (request, response) => {
+    const rawLimit = Number.parseInt(String(request.query.limit ?? '5'), 10)
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 50) : 5
+    const sqlite = database.db || database
+    if (!sqlite || typeof sqlite.prepare !== 'function') {
+      return response.json([])
+    }
+    try {
+      const table = sqlite
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_handoffs'")
+        .get()
+      if (!table) return response.json([])
+      const rows = sqlite
+        .prepare(
+          `SELECT id, conversation_id, task_id, target_repo, summary,
+                  completed_commits_json, next_actions_json, blockers_json, created_at
+           FROM session_handoffs
+           ORDER BY id DESC
+           LIMIT ?`,
+        )
+        .all(limit)
+      const parseArr = (raw) => {
+        try {
+          const parsed = JSON.parse(raw || '[]')
+          return Array.isArray(parsed) ? parsed : []
+        } catch {
+          return []
+        }
+      }
+      return response.json(
+        rows.map((row) => ({
+          id: row.id,
+          conversation_id: row.conversation_id,
+          task_id: row.task_id ?? null,
+          target_repo: row.target_repo || '',
+          summary: row.summary || '',
+          completed_commits: parseArr(row.completed_commits_json),
+          next_actions: parseArr(row.next_actions_json),
+          blockers: parseArr(row.blockers_json),
+          created_at: row.created_at,
+        })),
+      )
+    } catch {
+      return response.json([])
+    }
+  })
+
   router.get('/api/agents/runs/:id', (request, response) => {
     const runId = request.params.id
     if (!isOpaqueId(runId, 'run')) {

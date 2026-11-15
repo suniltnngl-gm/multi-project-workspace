@@ -350,9 +350,10 @@ function populateDraftModels(models) {
   }
 }
 
-function renderTelemetry(providerData, runsData) {
+function renderTelemetry(providerData, runsData, handoffsData = []) {
   const providers = Array.isArray(providerData?.providers) ? providerData.providers : []
   const runs = Array.isArray(runsData?.runs) ? runsData.runs : (Array.isArray(runsData) ? runsData : [])
+  const handoffs = Array.isArray(handoffsData) ? handoffsData : []
 
   quotaTelemetryList.replaceChildren()
   if (providers.length === 0) {
@@ -386,7 +387,7 @@ function renderTelemetry(providerData, runsData) {
   }
 
   swarmTelemetryList.replaceChildren()
-  if (runs.length === 0) {
+  if (runs.length === 0 && handoffs.length === 0) {
     const empty = document.createElement('li')
     empty.className = 'telemetry-item'
     empty.textContent = 'No recent swarm runs.'
@@ -439,10 +440,51 @@ function renderTelemetry(providerData, runsData) {
 
       swarmTelemetryList.append(item)
     }
+
+    for (const handoff of handoffs.slice(0, 5)) {
+      const item = document.createElement('li')
+      item.className = 'telemetry-item'
+      const name = document.createElement('strong')
+      name.textContent = `handoff:${handoff.conversation_id || handoff.id}`
+      const details = document.createElement('span')
+      details.className = 'model-meta'
+      const parts = []
+      if (handoff.target_repo) parts.push(handoff.target_repo)
+      if (handoff.task_id) parts.push(`task #${handoff.task_id}`)
+      if (handoff.summary) parts.push(String(handoff.summary).slice(0, 80))
+      details.textContent = parts.join(' · ') || 'session handoff'
+      item.append(name, details)
+
+      const commits = Array.isArray(handoff.completed_commits) ? handoff.completed_commits : []
+      const nextActions = Array.isArray(handoff.next_actions) ? handoff.next_actions : []
+      if (commits.length > 0 || nextActions.length > 0) {
+        const handoffKey = `handoff:${handoff.id || handoff.conversation_id}`
+        const handoffDetails = document.createElement('details')
+        handoffDetails.className = 'telemetry-diff'
+        handoffDetails.open = openTelemetryDiffKeys.has(handoffKey)
+        handoffDetails.addEventListener('toggle', () => {
+          if (handoffDetails.open) openTelemetryDiffKeys.add(handoffKey)
+          else openTelemetryDiffKeys.delete(handoffKey)
+        })
+        const summary = document.createElement('summary')
+        summary.textContent = `Handoff (${commits.length} commits, ${nextActions.length} next)`
+        const pre = document.createElement('pre')
+        const lines = []
+        if (commits.length > 0) lines.push(`Commits: ${commits.join(', ')}`)
+        if (nextActions.length > 0) lines.push(`Next: ${nextActions.join(' | ')}`)
+        pre.textContent = lines.join('\n')
+        handoffDetails.append(summary, pre)
+        item.append(handoffDetails)
+      }
+
+      swarmTelemetryList.append(item)
+    }
   }
 
-  const hasData = providers.length > 0 || runs.length > 0
-  telemetryStatus.textContent = hasData ? `${providers.length} providers · ${runs.length} runs` : 'Unavailable'
+  const hasData = providers.length > 0 || runs.length > 0 || handoffs.length > 0
+  telemetryStatus.textContent = hasData
+    ? `${providers.length} providers · ${runs.length} runs${handoffs.length > 0 ? ` · ${handoffs.length} handoffs` : ''}`
+    : 'Unavailable'
   telemetryStatus.classList.toggle('is-error', !hasData)
 }
 
@@ -452,13 +494,15 @@ async function loadTelemetry() {
   refreshTelemetryButton.disabled = true
   refreshTelemetryButton.textContent = 'Refreshing…'
   try {
-    const [providersResult, runsResult] = await Promise.allSettled([
+    const [providersResult, runsResult, handoffsResult] = await Promise.allSettled([
       request('/api/models/providers'),
-      request('/api/agents/runs?limit=5')
+      request('/api/agents/runs?limit=5'),
+      request('/api/agents/handoffs?limit=5')
     ])
     const providerData = providersResult.status === 'fulfilled' ? providersResult.value : null
     const runsData = runsResult.status === 'fulfilled' ? runsResult.value : null
-    renderTelemetry(providerData, runsData)
+    const handoffsData = handoffsResult.status === 'fulfilled' ? handoffsResult.value : []
+    renderTelemetry(providerData, runsData, handoffsData)
   } finally {
     telemetryInFlight = false
     refreshTelemetryButton.disabled = false
