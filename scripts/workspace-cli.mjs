@@ -990,6 +990,9 @@ async function dispatch(argv) {
       return runNodeScript('colab-session.mjs', [rest[0] ?? 'status', rest[1] ?? ''])
     case 'doctor':
       return runNodeScript('ai-doctor.mjs', rest)
+    case 'env':
+    case 'profile':
+      return runNodeScript('workspace-env.mjs', rest)
     case 'install': {
       const npm = requireNpm()
       const uvBin = requireUv()

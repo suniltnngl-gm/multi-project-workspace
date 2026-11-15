@@ -1,0 +1,122 @@
+{
+  "$schema": "https://multi-project-workspace.local/schemas/workspace-profiles.v1.json",
+  "defaultProfile": "default",
+  "profiles": {
+    "default": {
+      "description": "Balanced everyday workspace profile with core plugins and conserve guard.",
+      "plugins": {
+        "enable": ["gemini-api", "google-antigravity-sdk", "gdrive"],
+        "disable": []
+      },
+      "agy": {
+        "conserveModels": ["agy@gemini-4-argon"],
+        "preferredPools": ["agy@gemini", "agy@claude-gpt"]
+      },
+      "env": {
+        "required": [],
+        "optional": ["GEMINI_API_KEY", "GROQ_API_KEY", "OPENCODE_API_KEY", "LOCAL_AI_URL"]
+      },
+      "python": {
+        "venvPath": ".venv",
+        "expectedVersionPrefix": "3.11"
+      },
+      "cloud": {
+        "gcpProject": null,
+        "gcpRegion": null,
+        "firebaseAlias": null,
+        "cloudflareAccount": null
+      },
+      "localInference": {
+        "resourceGated": true,
+        "lanes": ["local-0.5b", "local-1.5b"]
+      }
+    },
+    "gcp-firebase": {
+      "description": "GCP, BigQuery/Dataform, and Firebase app development.",
+      "plugins": {
+        "enable": ["firebase", "data-agent-kit-plugin", "gemini-api"],
+        "disable": ["cloudflare"]
+      },
+      "agy": {
+        "conserveModels": ["agy@gemini-4-argon"],
+        "preferredPools": ["agy@gemini", "agy@claude-gpt"]
+      },
+      "env": {
+        "required": ["GEMINI_API_KEY"],
+        "optional": ["GOOGLE_CLOUD_PROJECT", "FIREBASE_PROJECT"]
+      },
+      "python": {
+        "venvPath": ".venv",
+        "expectedVersionPrefix": "3.11"
+      },
+      "cloud": {
+        "gcpProject": "DASHBOARDAIORG",
+        "gcpRegion": "us-central1",
+        "firebaseAlias": "default",
+        "cloudflareAccount": null
+      },
+      "localInference": {
+        "resourceGated": true,
+        "lanes": ["local-0.5b", "local-1.5b"]
+      }
+    },
+    "cloudflare-connector": {
+      "description": "Cloudflare Workers, curl-ai-bridge, and Web API connector workflows.",
+      "plugins": {
+        "enable": ["cloudflare", "gemini-api"],
+        "disable": ["data-agent-kit-plugin"]
+      },
+      "agy": {
+        "conserveModels": ["agy@gemini-4-argon"],
+        "preferredPools": ["agy@gemini", "agy@claude-gpt"]
+      },
+      "env": {
+        "required": [],
+        "optional": ["CLOUDFLARE_API_TOKEN", "RENDER_API_KEY", "GEMINI_API_KEY"]
+      },
+      "python": {
+        "venvPath": ".venv",
+        "expectedVersionPrefix": "3.11"
+      },
+      "cloud": {
+        "gcpProject": null,
+        "gcpRegion": null,
+        "firebaseAlias": null,
+        "cloudflareAccount": "default"
+      },
+      "localInference": {
+        "resourceGated": true,
+        "lanes": ["local-0.5b", "local-1.5b"]
+      }
+    },
+    "conserve": {
+      "description": "Minimal-footprint profile disabling heavy plugins to save context/quota.",
+      "plugins": {
+        "enable": ["gemini-api"],
+        "disable": ["cloudflare", "data-agent-kit-plugin", "firebase"]
+      },
+      "agy": {
+        "conserveModels": ["agy@gemini-4-argon"],
+        "preferredPools": ["agy@gemini"]
+      },
+      "env": {
+        "required": [],
+        "optional": ["GEMINI_API_KEY", "GROQ_API_KEY"]
+      },
+      "python": {
+        "venvPath": ".venv",
+        "expectedVersionPrefix": "3.11"
+      },
+      "cloud": {
+        "gcpProject": null,
+        "gcpRegion": null,
+        "firebaseAlias": null,
+        "cloudflareAccount": null
+      },
+      "localInference": {
+        "resourceGated": true,
+        "lanes": ["local-0.5b", "local-1.5b"]
+      }
+    }
+  }
+}

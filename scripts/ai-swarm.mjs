@@ -14,6 +14,7 @@ import { parseFallbackChain } from '../apps/api/src/modelFallback.js'
 import { createModelRegistry, modelQuotaProfiles } from '../apps/api/src/modelRegistry.js'
 import { createSwarmRunner } from '../apps/api/src/swarmRunner.js'
 import { loadWorkspaceEnv, resolveDatabasePath, ROOT_DIR } from './env.mjs'
+import { getEnvSnapshot } from './workspace-env.mjs'
 
 loadWorkspaceEnv()
 
@@ -354,10 +355,23 @@ async function main() {
           console.error(plan.error.body?.error || 'Failed to plan swarm.')
           return 1
         }
-        const payload = { dryRun: true, ...plan }
+        const envSnapshot = getEnvSnapshot()
+        const payload = {
+          dryRun: true,
+          env: {
+            activeProfile: envSnapshot.activeProfile,
+            enabledPlugins: envSnapshot.agy.plugins.filter((p) => p.enabled).map((p) => p.name),
+            localInference: envSnapshot.localInference.status,
+            ok: envSnapshot.ok,
+          },
+          ...plan,
+        }
         if (options['--json']) console.log(JSON.stringify(payload, null, 2))
         else {
           console.log('[dry-run] No run created and no models invoked.')
+          console.log(
+            `[env] profile=${envSnapshot.activeProfile} plugins=${payload.env.enabledPlugins.join(',') || 'none'} local=${envSnapshot.localInference.status}`,
+          )
           printPlan(plan)
         }
         return 0

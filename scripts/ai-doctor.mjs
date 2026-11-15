@@ -12,6 +12,7 @@
 import { createModelClient } from '../apps/api/src/modelClient.js'
 import { describeError, runDoctorChecks } from './ai-doctor-checks.mjs'
 import { loadWorkspaceEnv, resolveDatabasePath, ROOT_DIR } from './env.mjs'
+import { getEnvSnapshot } from './workspace-env.mjs'
 
 const arguments_ = process.argv.slice(2)
 const asJson = arguments_.includes('--json')
@@ -27,6 +28,12 @@ async function main() {
     databasePath,
     modelClient: offline ? undefined : createModelClient(),
     offline
+  })
+  const envSnapshot = getEnvSnapshot()
+  checks.push({
+    area: 'workspace-env',
+    level: envSnapshot.ok ? 'ok' : 'warn',
+    message: `profile=${envSnapshot.activeProfile}, plugins=${envSnapshot.agy.plugins.filter((p) => p.enabled).length} enabled, python=${envSnapshot.python.exists ? 'ok' : 'missing'}, local=${envSnapshot.localInference.status}`,
   })
   const summary = {
     ok: checks.filter((check) => check.level === 'ok').length,
