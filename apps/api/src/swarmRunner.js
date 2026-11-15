@@ -5,6 +5,7 @@
 // Important Context: User file. Implements the permanent parallel swarm + self-improvement workflow strategy over SQLite.
 // Work State: Completed: Non-native 2+2+2 swarm runner, parallel self-improvement lane, task/worktree/agentTaskOps/jobStore sync, AI parent/sibling hooks, context hydration & session compaction; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { isTerminalRunState } from './agentProtocol.js'
+import { buildWorkerHandoffPrefix } from './sessionCache.js'
 import {
   backfillTaskRegisters,
   formatAgentContextBlock,
@@ -1117,7 +1118,7 @@ export function createSwarmRunner({
       },
       {
         role: 'user',
-        content: `#${message.seq} [assign] ${message.payload?.title ? `${message.payload.title}: ` : ''}${message.payload?.goal ?? ''}${files}${refs}${answerLine}${contextLine}`
+        content: `${buildWorkerHandoffPrefix({ database, model: worker?.model || '', injectHandoff: run?.injectHandoff !== false }) ? `${buildWorkerHandoffPrefix({ database, model: worker?.model || '', injectHandoff: run?.injectHandoff !== false })}\n` : ''}#${message.seq} [assign] ${message.payload?.title ? `${message.payload.title}: ` : ''}${message.payload?.goal ?? ''}${files}${refs}${answerLine}${contextLine}`
       }
     ]
 

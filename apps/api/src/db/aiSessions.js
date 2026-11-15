@@ -4,7 +4,13 @@
 // Relevant Files: apps/api/src/db/aiSessions.js, apps/api/src/database.js
 // Important Context: User file. Composed into the createDatabase surface.
 // Work State: Completed: Extracted from database.js as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
+import { detectCacheDrift } from '../sessionCache.js'
+
 export function createAiSessionsStore(connection) {
+  const cols = new Set(connection.prepare('PRAGMA table_info(ai_sessions)').all().map((c) => c.name))
+  if (!cols.has('profile')) connection.exec("ALTER TABLE ai_sessions ADD COLUMN profile TEXT NOT NULL DEFAULT 'default'")
+  if (!cols.has('model')) connection.exec("ALTER TABLE ai_sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+  if (!cols.has('cache_fingerprint')) connection.exec("ALTER TABLE ai_sessions ADD COLUMN cache_fingerprint TEXT NOT NULL DEFAULT ''")
   return {
     listAiSessions() {
       return connection.prepare('SELECT * FROM ai_sessions ORDER BY updated_at DESC').all().map((row) => ({
@@ -12,6 +18,9 @@ export function createAiSessionsStore(connection) {
         taskId: row.task_id,
         title: row.title,
         summary: row.summary,
+        profile: row.profile || 'default',
+        model: row.model || '',
+        cacheFingerprint: row.cache_fingerprint || '',
         createdAt: row.created_at,
         updatedAt: row.updated_at
       }))
@@ -32,17 +41,32 @@ export function createAiSessionsStore(connection) {
         taskId: session.task_id,
         title: session.title,
         summary: session.summary,
+        profile: session.profile || 'default',
+        model: session.model || '',
+        cacheFingerprint: session.cache_fingerprint || '',
         messages,
         createdAt: session.created_at,
         updatedAt: session.updated_at
       }
     },
-    createAiSession({ title = '', taskId = null } = {}) {
+    createAiSession({ title = '', taskId = null, profile = 'default', model = '', cacheFingerprint = '' } = {}) {
       const now = new Date().toISOString()
       const result = connection.prepare(
-        'INSERT INTO ai_sessions (task_id, title, summary, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
-      ).run(taskId, title, '', now, now)
+        'INSERT INTO ai_sessions (task_id, title, summary, profile, model, cache_fingerprint, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+      ).run(taskId, title, '', profile, model, cacheFingerprint, now, now)
       return this.getAiSession(Number(result.lastInsertRowid))
+    },
+    checkAiSessionCacheDrift(id, { profile = '', model = '', cacheFingerprint = '' } = {}) {
+      const session = connection.prepare('SELECT profile, model, cache_fingerprint FROM ai_sessions WHERE id = ?').get(id)
+      if (!session) return { drifted: false, reasons: [] }
+      return detectCacheDrift({
+        previousFingerprint: session.cache_fingerprint || '',
+        currentFingerprint: cacheFingerprint,
+        previousProfile: session.profile || '',
+        currentProfile: profile,
+        previousModel: session.model || '',
+        currentModel: model,
+      })
     },
     addAiMessage(sessionId, { role, content }) {
       const session = connection.prepare('SELECT id FROM ai_sessions WHERE id = ?').get(sessionId)

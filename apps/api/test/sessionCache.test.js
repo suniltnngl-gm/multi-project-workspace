@@ -5,11 +5,13 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 import {
+  buildWorkerHandoffPrefix,
   computeCacheFingerprint,
   detectCacheDrift,
   formatCompactHandoffPrefix,
   getLatestSessionHandoff,
 } from '../src/sessionCache.js'
+import { createDatabase } from '../src/database.js'
 import { saveSessionHandoff } from '../../../scripts/ai-harvest.mjs'
 
 test('computeCacheFingerprint is deterministic and order-independent for plugins', () => {
@@ -88,4 +90,60 @@ test('getLatestSessionHandoff returns null when table is missing and returns lat
   const latest = getLatestSessionHandoff(db)
   assert.equal(latest.conversation_id, 'conv-cache-1')
   assert.equal(latest.summary, 'Wired session cache')
+})
+
+test('ai_sessions persists cache_fingerprint and checkAiSessionCacheDrift flags drift', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-db-'))
+  const database = createDatabase(path.join(tmpDir, 'sessions.sqlite'))
+  const fp1 = computeCacheFingerprint({ profile: 'default', model: 'agy@gemini-3.8-flash-medium' })
+  const created = database.createAiSession({
+    title: 'Cache test',
+    profile: 'default',
+    model: 'agy@gemini-3.8-flash-medium',
+    cacheFingerprint: fp1,
+  })
+  assert.equal(created.profile, 'default')
+  assert.equal(created.model, 'agy@gemini-3.8-flash-medium')
+  assert.equal(created.cacheFingerprint, fp1)
+
+  const noDrift = database.checkAiSessionCacheDrift(created.id, {
+    profile: 'default',
+    model: 'agy@gemini-3.8-flash-medium',
+    cacheFingerprint: fp1,
+  })
+  assert.equal(noDrift.drifted, false)
+
+  const fp2 = computeCacheFingerprint({ profile: 'conserve', model: 'agy@claude-sonnet-5-5-medium' })
+  const drift = database.checkAiSessionCacheDrift(created.id, {
+    profile: 'conserve',
+    model: 'agy@claude-sonnet-5-5-medium',
+    cacheFingerprint: fp2,
+  })
+  assert.equal(drift.drifted, true)
+  assert.equal(drift.reasons.length, 2)
+})
+
+test('buildWorkerHandoffPrefix clamps tight-TPM models (opencode/groq) and respects injectHandoff=false', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'handoff-clamp-'))
+  const dbPath = path.join(tmpDir, 'clamp.sqlite')
+  const database = createDatabase(dbPath)
+  const sqlite = new DatabaseSync(dbPath)
+  saveSessionHandoff(sqlite, {
+    conversationId: 'conv-clamp',
+    sourceAgent: 'agy',
+    structuredOutput: {
+      summary: 'S'.repeat(500),
+      completed_commits: ['abc1234'],
+      next_actions: ['Next step'],
+      blockers: [],
+      target_repo: 'multi-project-workspace',
+    },
+    rawEnvelope: {},
+  })
+
+  assert.equal(buildWorkerHandoffPrefix({ database, model: 'opencode/grok', injectHandoff: false }), '')
+  const tight = buildWorkerHandoffPrefix({ database, model: 'groq/llama-3.1-8b-instant' })
+  assert.ok(tight.length > 0 && tight.length <= 240)
+  const normal = buildWorkerHandoffPrefix({ database, model: 'agy@gemini-3.8-flash-medium' })
+  assert.ok(normal.length > 240 && normal.length <= 600)
 })

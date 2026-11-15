@@ -98,3 +98,17 @@ export function formatCompactHandoffPrefix(handoff, { maxChars = 600 } = {}) {
   if (joined.length <= maxChars) return joined
   return `${joined.slice(0, Math.max(0, maxChars - 1))}…`
 }
+
+export function buildWorkerHandoffPrefix({
+  database,
+  model = '',
+  injectHandoff = true,
+  maxChars = 600,
+} = {}) {
+  if (!injectHandoff || !database) return ''
+  const lower = String(model || '').toLowerCase()
+  const isTightTpm = lower.includes('opencode') || lower.includes('groq')
+  const effectiveMaxChars = isTightTpm ? Math.min(maxChars, 240) : maxChars
+  const latest = getLatestSessionHandoff(database)
+  return formatCompactHandoffPrefix(latest, { maxChars: effectiveMaxChars })
+}
