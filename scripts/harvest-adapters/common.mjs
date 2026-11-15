@@ -1,3 +1,4 @@
+// Objective: Define the canonical session handoff schema and shared message-normalization helpers for harvest adapters.
 export const CANONICAL_HANDOFF_SCHEMA = {
   type: 'object',
   additionalProperties: false,

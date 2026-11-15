@@ -1,3 +1,4 @@
+// Objective: Compute deterministic session cache fingerprints, detect cache drift, and format bounded session_handoffs prefixes.
 import { createHash } from 'node:crypto'
 
 export function computeCacheFingerprint({

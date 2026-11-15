@@ -1,3 +1,4 @@
+// Objective: Manage declarative workspace profiles, agy plugin state, scoped env checks, Python venv binding, and local inference status.
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'

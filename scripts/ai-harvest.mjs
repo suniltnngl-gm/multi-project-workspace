@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Objective: Harvest structured session handoffs from agy, opencode, cline, and transcript logs into SQLite session_handoffs.
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'

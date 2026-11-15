@@ -1,3 +1,4 @@
+// Objective: Parse generic JSON/JSONL chat transcripts read-only into normalized session handoff payloads.
 import fs from 'node:fs'
 import path from 'node:path'
 import { extractTextFromMessages, normalizeHandoffPayload } from './common.mjs'
