@@ -1,0 +1,110 @@
+{
+  "contractVersion": "1.0",
+  "canonicalization": "RFC 8785 JCS UTF-8, restricted to JSON safe integers; negative zero canonicalizes to zero; arrays retain source order.",
+  "digestDefinition": "lowercase SHA-256 of canonical dispatchEnvelope bytes only; excludes authorizationPermit and detached inputSha256.",
+  "vectors": [
+    {
+      "name": "parent-only",
+      "dispatchEnvelope": {
+        "context": {
+          "audience": "curl-ai-bridge:local",
+          "idempotencyKey": "abcdefghijklmnopqrstuv",
+          "localOnly": true,
+          "operation": "agent.dispatch",
+          "operationTargetsSibling": false,
+          "parentModelId": "local-1.5b",
+          "parentRole": "parent",
+          "projectId": "multi-project-workspace",
+          "requestId": "req-001",
+          "runId": "run-001",
+          "taskId": "task-114"
+        },
+        "contractVersion": "1.0",
+        "operationInput": {
+          "action": "summarize",
+          "payload": {
+            "a": "café",
+            "enabled": true,
+            "optional": null,
+            "z": 1
+          },
+          "sequence": [
+            3,
+            1,
+            2
+          ]
+        }
+      },
+      "byteLength": 460,
+      "sha256": "7535cc0711c7bb5f77df9e314f2e91b6dd3dab5afec8341ef842f17a0034639e"
+    },
+    {
+      "name": "sibling-targeting",
+      "dispatchEnvelope": {
+        "context": {
+          "audience": "curl-ai-bridge:local",
+          "idempotencyKey": "abcdefghijklmnopqrstuv",
+          "localOnly": true,
+          "modelId": "local-reviewer",
+          "operation": "agent.dispatch",
+          "operationTargetsSibling": true,
+          "parentModelId": "local-1.5b",
+          "parentRole": "parent",
+          "projectId": "multi-project-workspace",
+          "requestId": "req-001",
+          "role": "reviewer",
+          "runId": "run-001",
+          "siblingTarget": {
+            "modelId": "local-reviewer",
+            "role": "reviewer",
+            "siblingId": "sib-01"
+          },
+          "taskId": "task-114"
+        },
+        "contractVersion": "1.0",
+        "operationInput": {
+          "action": "review",
+          "items": [
+            {
+              "id": 2
+            },
+            {
+              "id": 1
+            }
+          ],
+          "limits": {
+            "maxTokens": 4096
+          }
+        }
+      },
+      "byteLength": 561,
+      "sha256": "3869c7c20efa89b7ac920d1655d268fa30fbbf039c38689ca1479add8e7f3022"
+    }
+  ],
+  "negativeCases": [
+    {
+      "name": "duplicate-member",
+      "input": "{\"context\":{\"x\":1,\"x\":2},\"contractVersion\":\"1.0\",\"operationInput\":{}}",
+      "expected": "CONTRACT_SCHEMA_INVALID"
+    },
+    {
+      "name": "float",
+      "value": 1.25,
+      "expected": "CONTRACT_SCHEMA_INVALID"
+    },
+    {
+      "name": "unsafe-integer",
+      "value": 9007199254740992,
+      "expected": "CONTRACT_SCHEMA_INVALID"
+    },
+    {
+      "name": "parent-null-siblingTarget",
+      "expected": "CONTRACT_SCHEMA_INVALID"
+    },
+    {
+      "name": "invalid-utf8",
+      "bytesHex": "c328",
+      "expected": "CONTRACT_SCHEMA_INVALID"
+    }
+  ]
+}

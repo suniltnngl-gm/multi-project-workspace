@@ -1,0 +1,187 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://curl-ai-bridge.local/contracts/dispatch-envelope.v1.schema.json",
+  "title": "Core–Bridge authenticated dispatch body v1.0",
+  "type": "object",
+  "required": [
+    "authorizationPermit",
+    "inputSha256",
+    "dispatchEnvelope"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "authorizationPermit": {
+      "type": "object",
+      "required": [
+        "claims",
+        "integrity"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "claims": {
+          "type": "object"
+        },
+        "integrity": {
+          "type": "object"
+        }
+      }
+    },
+    "inputSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "dispatchEnvelope": {
+      "type": "object",
+      "required": [
+        "contractVersion",
+        "context",
+        "operationInput"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "contractVersion": {
+          "type": "string",
+          "const": "1.0"
+        },
+        "context": {
+          "type": "object",
+          "required": [
+            "taskId",
+            "runId",
+            "projectId",
+            "requestId",
+            "idempotencyKey",
+            "operation",
+            "audience",
+            "localOnly",
+            "parentModelId",
+            "parentRole",
+            "operationTargetsSibling"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "taskId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "runId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "projectId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "requestId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "idempotencyKey": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "type": "string",
+              "minLength": 1
+            },
+            "audience": {
+              "type": "string",
+              "minLength": 1
+            },
+            "localOnly": {
+              "type": "boolean"
+            },
+            "parentModelId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "parentRole": {
+              "type": "string",
+              "const": "parent"
+            },
+            "operationTargetsSibling": {
+              "type": "boolean"
+            },
+            "modelId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "role": {
+              "enum": [
+                "parent",
+                "reviewer",
+                "worker"
+              ]
+            },
+            "siblingTarget": {
+              "type": "object",
+              "required": [
+                "siblingId",
+                "role",
+                "modelId"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "siblingId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "role": {
+                  "enum": [
+                    "reviewer",
+                    "worker"
+                  ]
+                },
+                "modelId": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "operationTargetsSibling": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "operationTargetsSibling"
+                ]
+              },
+              "then": {
+                "required": [
+                  "siblingTarget"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "operationTargetsSibling": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "operationTargetsSibling"
+                ]
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "siblingTarget"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "operationInput": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}
