@@ -5,6 +5,7 @@
 // Relevant Files: scripts/ai-swarm.mjs, scripts/workspace-cli.mjs, apps/api/src/swarmRunner.js, apps/api/src/providerQuota.js, apps/api/src/agentBus.js
 // Important Context: User file. Implements ./workspace ai swarm [plan|run|board|step|list].
 // Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
+import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import { createAgentBus } from '../apps/api/src/agentBus.js'
 import { createDatabase } from '../apps/api/src/database.js'
@@ -387,6 +388,18 @@ async function main() {
       if (executed?.error) {
         console.error(executed.error.body?.error || executed.error)
         return 1
+      }
+      const usedColab = Array.isArray(executed?.agents) && executed.agents.some((a) => String(a.model || '').startsWith('colab'))
+      if (usedColab && !options['--keep-colab']) {
+        try {
+          execFileSync(process.execPath, [resolve(ROOT_DIR, 'scripts', 'colab-session.mjs'), 'stop'], {
+            cwd: ROOT_DIR,
+            stdio: 'ignore',
+            timeout: 15000,
+          })
+        } catch {
+          // Best-effort cleanup; do not fail swarm exit code.
+        }
       }
       if (options['--json']) console.log(JSON.stringify(executed, null, 2))
       else printBoard(executed)
