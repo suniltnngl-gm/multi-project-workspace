@@ -32,8 +32,8 @@ async function main() {
   const envSnapshot = getEnvSnapshot()
   checks.push({
     area: 'workspace-env',
-    level: envSnapshot.ok ? 'ok' : 'warn',
-    message: `profile=${envSnapshot.activeProfile}, plugins=${envSnapshot.agy.plugins.filter((p) => p.enabled).length} enabled, python=${envSnapshot.python.exists ? 'ok' : 'missing'}, local=${envSnapshot.localInference.status}`,
+    level: !envSnapshot.executionReady ? 'error' : envSnapshot.toolingReady ? 'ok' : 'warn',
+    message: `profile=${envSnapshot.activeProfile}, execution=${envSnapshot.executionReady ? 'ready' : 'blocked'}, tooling=${envSnapshot.toolingReady ? 'ready' : 'incomplete'}, plugins=${envSnapshot.agy.plugins.filter((p) => p.enabled).length} enabled, python=${envSnapshot.python.compatible ? 'compatible' : 'unavailable/incompatible'}, local=${envSnapshot.localInference.status}`,
   })
   const summary = {
     ok: checks.filter((check) => check.level === 'ok').length,

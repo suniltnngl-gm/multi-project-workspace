@@ -107,22 +107,71 @@ export function getAgyPluginState() {
   return { source: 'filesystem-fallback', plugins }
 }
 
-function getPythonVenvState(profile) {
-  const venvRel = profile?.python?.venvPath || '.venv'
-  const venvAbs = path.resolve(ROOT_DIR, venvRel)
+export function isPythonVersionCompatible(versionText) {
+  const match = String(versionText || '').match(/Python\s+(\d+)\.(\d+)(?:\.(\d+))?/i)
+  if (!match) return false
+  const major = Number(match[1])
+  const minor = Number(match[2])
+  return major > 3 || (major === 3 && minor >= 12)
+}
+
+export function getPythonVenvState(_profile, { rootDir = ROOT_DIR, probePython } = {}) {
+  const venvAbs = path.join(rootDir, 'apps', 'python', '.venv')
   const pyBin = process.platform === 'win32'
     ? path.join(venvAbs, 'Scripts', 'python.exe')
     : path.join(venvAbs, 'bin', 'python')
 
   if (!fs.existsSync(pyBin)) {
-    return { exists: false, path: pyBin, version: null, matchesExpected: false }
+    return { exists: false, path: pyBin, version: null, compatible: false, matchesPreferredPin: false, preferredPin: null }
   }
 
-  const ver = runCommandSafe(pyBin, ['--version'])
-  const versionText = ver.ok ? ver.stdout : null
-  const expectedPrefix = profile?.python?.expectedVersionPrefix || '3.11'
-  const matchesExpected = Boolean(versionText && versionText.includes(expectedPrefix))
-  return { exists: true, path: pyBin, version: versionText, matchesExpected }
+  const probe = probePython
+    ? probePython(pyBin)
+    : runCommandSafe(pyBin, ['--version'])
+  const versionText = probe?.ok ? probe.stdout : null
+  const compatible = isPythonVersionCompatible(versionText)
+  let preferredPin = null
+  try {
+    preferredPin = fs.readFileSync(path.join(rootDir, 'apps', 'python', '.python-version'), 'utf8').trim() || null
+  } catch {
+    // The compatibility floor remains authoritative when no preference pin is present.
+  }
+  return {
+    exists: true,
+    path: pyBin,
+    version: versionText,
+    compatible,
+    matchesPreferredPin: Boolean(versionText && preferredPin && versionText.includes(preferredPin)),
+    preferredPin,
+  }
+}
+
+export function evaluateReadiness({ nodeVersion = process.versions.node, requiredEnv = [], python, agy, operation = 'core' } = {}) {
+  const nodeMatch = String(nodeVersion).match(/^(\d+)\./)
+  const nodeOk = Boolean(nodeMatch && Number(nodeMatch[1]) >= 22)
+  const missingRequired = requiredEnv.filter((item) => !item.present)
+  const pythonOk = Boolean(python?.exists && python?.compatible)
+  const pluginToolingOk = Boolean(agy && agy.source !== 'unavailable')
+  const diagnostics = [
+    ...(!nodeOk ? [{ code: 'NODE_VERSION_UNSUPPORTED', lane: 'execution', severity: 'error', message: 'Node.js >=22 is required.' }] : []),
+    ...missingRequired.map((item) => ({ code: 'REQUIRED_ENV_MISSING', lane: 'execution', severity: 'error', key: item.key, message: `Missing required env var: ${item.key}` })),
+    ...(!pythonOk ? [{
+      code: !python?.exists ? 'PYTHON_TOOLING_VENV_MISSING' : 'PYTHON_TOOLING_VERSION_UNSUPPORTED',
+      lane: operation === 'python' ? 'execution' : 'tooling',
+      severity: operation === 'python' ? 'error' : 'warning',
+      message: !python?.exists ? 'Python satellite venv is missing.' : 'Python >=3.12 is required for Python satellite operations.',
+    }] : []),
+    ...(!pluginToolingOk ? [{ code: 'AGY_PLUGIN_TOOLING_UNAVAILABLE', lane: 'tooling', severity: 'warning', message: 'Optional AGY plugin discovery is unavailable.' }] : []),
+    ...(pythonOk && python.matchesPreferredPin === false && python.preferredPin
+      ? [{ code: 'PYTHON_PREFERRED_PIN_MISMATCH', lane: 'tooling', severity: 'info', message: `Preferred Python pin: ${python.preferredPin}` }]
+      : []),
+  ]
+  const executionReady = nodeOk && missingRequired.length === 0 && (operation !== 'python' || pythonOk)
+  const toolingReady = pythonOk && pluginToolingOk
+  const issues = diagnostics
+    .filter((item) => item.severity === 'error' || item.severity === 'warning')
+    .map((item) => item.message)
+  return { executionReady, toolingReady, ok: executionReady && toolingReady, diagnostics, issues }
 }
 
 function getLocalInferenceState() {
@@ -135,7 +184,7 @@ function getLocalInferenceState() {
   }
 }
 
-export function getEnvSnapshot(profileName = getActiveProfileName()) {
+export function getEnvSnapshot(profileName = getActiveProfileName(), { operation = 'core' } = {}) {
   const { profiles } = loadProfiles()
   const profile = profiles[profileName] || profiles.default || {}
 
@@ -149,14 +198,7 @@ export function getEnvSnapshot(profileName = getActiveProfileName()) {
   const agy = getAgyPluginState()
   const python = getPythonVenvState(profile)
   const localInference = getLocalInferenceState()
-
-  const issues = []
-  for (const item of requiredEnv) {
-    if (!item.present) issues.push(`Missing required env var: ${item.key}`)
-  }
-  if (!python.exists) {
-    issues.push(`Python venv not found at ${python.path}`)
-  }
+  const readiness = evaluateReadiness({ requiredEnv, python, agy, operation })
 
   return {
     activeProfile: profileName,
@@ -171,8 +213,11 @@ export function getEnvSnapshot(profileName = getActiveProfileName()) {
     python,
     cloud: profile.cloud || {},
     localInference,
-    issues,
-    ok: issues.length === 0,
+    executionReady: readiness.executionReady,
+    toolingReady: readiness.toolingReady,
+    diagnostics: readiness.diagnostics,
+    issues: readiness.issues,
+    ok: readiness.ok,
   }
 }
 
@@ -223,7 +268,8 @@ export function formatEnvStatus(snapshot) {
   const enabledPlugins = snapshot.agy.plugins.filter((p) => p.enabled).map((p) => p.name)
   lines.push(`AGY plugins (${snapshot.agy.pluginSource}): ${enabledPlugins.length ? enabledPlugins.join(', ') : 'none'}`)
   lines.push(`AGY pools: ${snapshot.agy.preferredPools.join(', ')} | [CONSERVE]: ${snapshot.agy.conserveModels.join(', ')}`)
-  lines.push(`Python venv: ${snapshot.python.exists ? `${snapshot.python.version || 'found'} (${snapshot.python.path})` : `missing (${snapshot.python.path})`}`)
+  lines.push(`Python satellite venv: ${snapshot.python.exists ? `${snapshot.python.version || 'found'} (${snapshot.python.path})` : `missing (${snapshot.python.path})`}`)
+  lines.push(`Readiness: execution=${snapshot.executionReady ? 'ready' : 'blocked'}, tooling=${snapshot.toolingReady ? 'ready' : 'incomplete'}`)
   lines.push(`Local inference: ${snapshot.localInference.status}`)
   if (snapshot.env.required.length > 0) {
     lines.push(`Required env: ${snapshot.env.required.map((e) => `${e.key}=${e.present ? 'set' : 'MISSING'}`).join(', ')}`)

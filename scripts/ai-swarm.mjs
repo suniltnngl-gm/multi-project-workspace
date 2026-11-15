@@ -398,6 +398,8 @@ async function main() {
             cacheFingerprint,
             handoffInjected: Boolean(handoffPrefix),
             localInference: envSnapshot.localInference.status,
+            executionReady: envSnapshot.executionReady,
+            toolingReady: envSnapshot.toolingReady,
             ok: envSnapshot.ok,
           },
           ...plan,
