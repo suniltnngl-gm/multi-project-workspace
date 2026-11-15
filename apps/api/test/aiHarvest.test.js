@@ -6,6 +6,8 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { createApp } from '../src/app.js'
+import { createDatabase } from '../src/database.js'
 import {
   buildAgyHarvestArgs,
   HANDOFF_SCHEMA,
@@ -106,4 +108,58 @@ test('ai-harvest CLI --dry-run --json outputs planned agy args without invoking 
   assert.equal(payload.dryRun, true)
   assert.equal(payload.conversationId, 'conv-dry')
   assert.equal(payload.agyArgs[payload.agyArgs.length - 2], '-p')
+})
+
+test('GET /api/agents/handoffs returns [] when session_handoffs table does not exist and returns seeded rows in DESC order', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-harvest-route-'))
+  const dbPath = path.join(tmpDir, 'route.sqlite')
+  const database = createDatabase(dbPath)
+  const server = createApp(database, { models: [] }).listen(0, '127.0.0.1')
+  await new Promise((resolve) => server.once('listening', resolve))
+  try {
+    const { port } = server.address()
+    const baseUrl = `http://127.0.0.1:${port}`
+
+    const emptyRes = await fetch(`${baseUrl}/api/agents/handoffs?limit=5`)
+    assert.equal(emptyRes.status, 200)
+    assert.deepEqual(await emptyRes.json(), [])
+
+    const sqlite = new DatabaseSync(dbPath)
+    saveSessionHandoff(sqlite, {
+      conversationId: 'conv-1',
+      taskId: 10,
+      structuredOutput: {
+        summary: 'First handoff',
+        completed_commits: ['aaa1111'],
+        next_actions: ['Step 1'],
+        blockers: [],
+        target_repo: 'multi-project-workspace',
+      },
+      rawEnvelope: {},
+    })
+    saveSessionHandoff(sqlite, {
+      conversationId: 'conv-2',
+      taskId: 11,
+      structuredOutput: {
+        summary: 'Second handoff',
+        completed_commits: ['bbb2222'],
+        next_actions: ['Step 2'],
+        blockers: ['None'],
+        target_repo: 'curl-ai-bridge',
+      },
+      rawEnvelope: {},
+    })
+
+    const seededRes = await fetch(`${baseUrl}/api/agents/handoffs?limit=1`)
+    assert.equal(seededRes.status, 200)
+    const rows = await seededRes.json()
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].conversation_id, 'conv-2')
+    assert.equal(rows[0].task_id, 11)
+    assert.deepEqual(rows[0].completed_commits, ['bbb2222'])
+    assert.deepEqual(rows[0].next_actions, ['Step 2'])
+    assert.deepEqual(rows[0].blockers, ['None'])
+  } finally {
+    server.close()
+  }
 })

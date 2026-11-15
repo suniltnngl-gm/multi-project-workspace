@@ -676,4 +676,64 @@ describe('user files and folders sections', () => {
     expect(document.querySelector('.telemetry-diff pre').textContent).toContain('+++ b/file.js')
     window.dispatchEvent(new Event('beforeunload'))
   })
+
+  it('renders session handoffs in #swarm-telemetry-list and preserves open <details> state across refreshes', async () => {
+    vi.useFakeTimers()
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false })
+
+    globalThis.fetch = vi.fn(async (url) => {
+      const path = new URL(url, 'http://localhost').pathname + new URL(url, 'http://localhost').search
+      if (path === '/api/models/providers') {
+        return jsonResponse({ providers: [{ id: 'agy', ok: true, headroomPercent: 90, windows: {} }] })
+      }
+      if (path === '/api/agents/runs?limit=5') {
+        return jsonResponse({ runs: [] })
+      }
+      if (path === '/api/agents/handoffs?limit=5') {
+        return jsonResponse([
+          {
+            id: 7,
+            conversation_id: 'conv-handoff-7',
+            task_id: 82,
+            target_repo: 'multi-project-workspace',
+            summary: 'Surfaced handoffs in telemetry',
+            completed_commits: ['36d81ee'],
+            next_actions: ['Add tests'],
+            blockers: [],
+          },
+        ])
+      }
+      if (path === '/api/models') return jsonResponse([])
+      if (path === '/api/tasks') return jsonResponse([])
+      if (path === '/api/files') return jsonResponse([])
+      if (path === '/api/folders') return jsonResponse([])
+      return jsonResponse({})
+    })
+
+    document.body.innerHTML = '<div id="app"></div>'
+    vi.resetModules()
+    await import('./main.js')
+
+    await vi.waitFor(() => {
+      expect(document.querySelector('#telemetry-status').textContent).toBe('1 providers · 0 runs · 1 handoffs')
+    })
+
+    const listText = document.querySelector('#swarm-telemetry-list').textContent
+    expect(listText).toContain('handoff:conv-handoff-7')
+    expect(listText).toContain('multi-project-workspace')
+    expect(listText).toContain('task #82')
+    expect(listText).toContain('Surfaced handoffs in telemetry')
+
+    const handoffDetails = document.querySelector('#swarm-telemetry-list .telemetry-diff')
+    expect(handoffDetails).not.toBeNull()
+    handoffDetails.open = true
+    handoffDetails.dispatchEvent(new Event('toggle'))
+
+    await vi.advanceTimersByTimeAsync(15_000)
+    await vi.waitFor(() => {
+      expect(document.querySelector('#swarm-telemetry-list .telemetry-diff').open).toBe(true)
+    })
+    expect(document.querySelector('#swarm-telemetry-list .telemetry-diff pre').textContent).toContain('36d81ee')
+    window.dispatchEvent(new Event('beforeunload'))
+  })
 })

@@ -69,6 +69,7 @@ export function createDatabase(
     ...createAiSessionsStore(connection),
     ...createPromptTemplatesStore(connection),
     ...toolRuns,
+    db: connection,
     close() {
       connection.close()
     }
