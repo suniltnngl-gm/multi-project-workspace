@@ -1,8 +1,34 @@
 // Local SQLite project-wide lease coordinator; not a multi-host distributed lock.
 import { createHash, randomUUID } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
+import { existsSync, lstatSync, realpathSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
 const stable = (v) => Array.isArray(v) ? '['+v.map(stable).join(',')+']' : v && typeof v==='object' ? '{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+stable(v[k])).join(',')+'}' : JSON.stringify(v)
 const digest = (v) => createHash('sha256').update(stable(v)).digest('hex')
 const iso = (n) => new Date(n).toISOString()
+const listGitWorktrees = (repoRoot) => { const out = execFileSync('git', ['-C', repoRoot, 'worktree', 'list', '--porcelain', '-z'], { encoding: 'buffer' }); const entries = out.toString('utf8').split('\0').filter(Boolean); return entries.filter((line) => line.startsWith('worktree ')).map((line) => line.slice('worktree '.length)) }
+const normalizePath = (p) => { if (typeof p !== 'string' || !p) throw Error('worktree_path_invalid'); if (!existsSync(p)) throw Error('worktree_path_missing'); if (lstatSync(p).isSymbolicLink()) throw Error('worktree_path_symlink'); return realpathSync(p) }
+const assertNoSymlinkComponents = (p) => { let cur = resolve(p); const chain = []; while (true) { chain.push(cur); const parent = dirname(cur); if (parent === cur) break; cur = parent } for (const part of chain) { if (lstatSync(part).isSymbolicLink()) throw Error('worktree_path_symlink') } }
+function validateWorktreePin({ db, pin, repoRow }) {
+  if (!pin.worktreePath) return
+  const canonicalBranch = execFileSync('git', ['-C', repoRow.root_path, 'branch', '--show-current'], { encoding: 'utf8' }).trim()
+  const canonicalHead = execFileSync('git', ['-C', repoRow.root_path, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+  if (canonicalBranch !== pin.branch || canonicalHead !== pin.headCommit) throw Error('writer_lease_repository_anchor_changed:' + pin.name)
+  const row = db.prepare('SELECT * FROM git_worktrees WHERE worktree_path = ?').get(pin.worktreePath)
+  if (!row) throw Error('writer_worktree_not_registered')
+  if (row.repository_id !== pin.repositoryId) throw Error('writer_worktree_repository_mismatch')
+  if (row.repository_root !== repoRow.root_path) throw Error('writer_worktree_root_mismatch')
+  const canonical = normalizePath(repoRow.root_path), worktree = normalizePath(pin.worktreePath)
+  assertNoSymlinkComponents(pin.worktreePath)
+  if (worktree === canonical) throw Error('writer_worktree_alias_rejected')
+  const listed = listGitWorktrees(repoRow.root_path).map(normalizePath)
+  if (!listed.includes(worktree)) throw Error('writer_worktree_not_a_worktree')
+  const branch = execFileSync('git', ['-C', pin.worktreePath, 'branch', '--show-current'], { encoding: 'utf8' }).trim()
+  const head = execFileSync('git', ['-C', pin.worktreePath, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+  if (branch !== pin.worktreeBranch) throw Error('writer_worktree_branch_changed')
+  if (head !== pin.worktreeHead) throw Error('writer_worktree_head_changed')
+  if (row.branch !== branch || row.head_commit !== head) throw Error('writer_worktree_registration_stale')
+}
 export function createProjectWriterLeasesStore(db,{clock=()=>Date.now()}={}) {
  const leaseQ=db.prepare('SELECT * FROM project_writer_leases WHERE lease_id=?')
  const stateQ=db.prepare('SELECT * FROM project_writer_lease_state WHERE project_id=?')
@@ -31,7 +57,7 @@ export function createProjectWriterLeasesStore(db,{clock=()=>Date.now()}={}) {
   const allowedRepoIds=new Set(repos.map(r=>r.repositoryId)),seenPaths=new Set()
   for(const f of allow.files){if(!allowedRepoIds.has(f.repositoryId)||typeof f.path!=='string'||f.path.startsWith('/')||f.path.includes('\\')||f.path.split('/').some(x=>!x||x==='.'||x==='..')||!Array.isArray(f.operations)||!f.operations.length||f.operations.some(op=>!['CREATE','MODIFY','DELETE'].includes(op)))throw Error('writer_lease_allowlist_invalid');const key=f.repositoryId+':'+f.path;if(seenPaths.has(key))throw Error('writer_lease_allowlist_duplicate');seenPaths.add(key)}
   if(allow.mutations.some(m=>!['tasks','task_events'].includes(m))||new Set(allow.mutations).size!==allow.mutations.length)throw Error('writer_lease_mutation_allowlist_invalid')
-  for(const r of repos){const x=db.prepare('SELECT id,name,root_path FROM repositories WHERE id=?').get(r.repositoryId);if(!x||x.name!==r.name||x.root_path!==r.rootPath)throw Error('writer_lease_repository_not_registered:'+r.name);if(!r.branch||!/^[0-9a-f]{40,64}$/.test(r.headCommit||''))throw Error('writer_lease_repository_anchor_invalid:'+r.name)}
+  for(const r of repos){const x=db.prepare('SELECT id,name,root_path FROM repositories WHERE id=?').get(r.repositoryId);if(!x||x.name!==r.name||x.root_path!==r.rootPath)throw Error('writer_lease_repository_not_registered:'+r.name);if(!r.branch||!/^[0-9a-f]{40,64}$/.test(r.headCommit||''))throw Error('writer_lease_repository_anchor_invalid:'+r.name);validateWorktreePin({db,pin:r,repoRow:x})}
   const ah=digest(allow),binding={projectId:project,taskId:i.taskId,runId:i.runId,workerId:i.workerId,ownerId:owner,repositories:repos,allowlist:allow,authorizationRef:i.authorizationRef},bh=digest(binding),idem=i.idempotencyKey||randomUUID(),prior=db.prepare('SELECT * FROM project_writer_leases WHERE idempotency_key=?').get(idem)
   if(prior){if(prior.project_id!==project||prior.task_id!==i.taskId||prior.run_id!==i.runId||prior.worker_id!==i.workerId||prior.owner_id!==owner||prior.authorization_ref!==i.authorizationRef||prior.binding_sha256!==bh||prior.allowlist_sha256!==ah)throw Error('writer_lease_idempotency_conflict');return map(prior)}
   const overdue=db.prepare("SELECT * FROM project_writer_leases WHERE project_id=? AND status='active' AND expires_at<=?").all(project,iso(now))

@@ -49,9 +49,10 @@ export function createDatabase(
 
   const repositories = createRepositoriesStore(connection)
   const repositoryScopes = connection.prepare('SELECT id AS repositoryId, name, root_path AS rootPath FROM repositories WHERE id IN (1, 4)').all()
+  const gitWorktrees = createGitWorktreesStore(connection, { repositories })
   const writerLeases = createProjectWriterLeasesStore(connection)
   const taskBootstrap = createTaskBootstrapStore(connection)
-  const writerLeaseGuard = createProjectWriterLeaseGuard({ connection, leaseStore: writerLeases, repositories: repositoryScopes })
+  const writerLeaseGuard = createProjectWriterLeaseGuard({ connection, leaseStore: writerLeases, repositories: repositoryScopes, worktrees: gitWorktrees.listGitWorktrees() })
   const toolRuns = createToolRunsStore(connection)
   const tasks = createTasksStore(connection, { toolRuns, writerLeaseGuard })
   const proposals = createTaskProposalsStore(connection, { tasks })
@@ -72,7 +73,7 @@ export function createDatabase(
     ...createAgentScriptsStore(connection, artifactDir ? { artifactDir } : {}),
     ...createSensorsStore(connection, { tasks }),
     ...repositories,
-    ...createGitWorktreesStore(connection, { repositories }),
+    ...gitWorktrees,
     ...createToolsStore(connection),
     ...createEnvironmentsStore(connection),
     ...createMcpCatalogStore(connection),

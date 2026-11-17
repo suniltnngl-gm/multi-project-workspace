@@ -49,3 +49,44 @@ test('broker performs atomic allowlisted file replacement against pinned Git HEA
  assert.throws(()=>guard.withFencedMutation('lease-1',1,{repositoryId:1,path:'target.txt',operation:'CREATE'},'bad'),/not_allowlisted/)
  db.close();rmSync(d,{recursive:true,force:true})
 })
+
+test('worktree-bound mutation verifies canonical and worktree anchors independently',()=>{
+ const d=mkdtempSync(join(tmpdir(),'guard-wt-')),repo=join(d,'repo');mkdirSync(repo)
+ execFileSync('git',['init','-q',repo]);execFileSync('git',['-C',repo,'config','user.email','lease-test@example.invalid']);execFileSync('git',['-C',repo,'config','user.name','Lease Test']);writeFileSync(join(repo,'f.txt'),'x');execFileSync('git',['-C',repo,'add','f.txt']);execFileSync('git',['-C',repo,'commit','-qm','fixture'])
+ const branch=execFileSync('git',['-C',repo,'branch','--show-current'],{encoding:'utf8'}).trim(),head=execFileSync('git',['-C',repo,'rev-parse','HEAD'],{encoding:'utf8'}).trim(),wt=join(d,'wt')
+ execFileSync('git',['-C',repo,'worktree','add','-q','-b','wt-branch',wt])
+ const wtBranch=execFileSync('git',['-C',wt,'branch','--show-current'],{encoding:'utf8'}).trim(),wtHead=execFileSync('git',['-C',wt,'rev-parse','HEAD'],{encoding:'utf8'}).trim()
+ const db=new Database(join(d,'db.sqlite'))
+ const lease={allowlist:{files:[{repositoryId:1,path:'f.txt',operations:['MODIFY']}],mutations:['tasks','task_events']},repositories:[{repositoryId:1,name:'multi-project-workspace',rootPath:repo,branch,headCommit:head,worktreePath:wt,worktreeBranch:wtBranch,worktreeHead:wtHead},{repositoryId:4,name:'curl-ai-bridge',rootPath:repo,branch,headCommit:head}],projectId:'curl-ai-bridge',ownerId:'owner'}
+ const store={assertCurrentWriterLease:()=>lease},worktrees=[{repositoryId:1,repositoryRoot:repo,worktreePath:wt,branch:wtBranch,headCommit:wtHead}]
+ const guard=createProjectWriterLeaseGuard({connection:db,leaseStore:store,repositories:[{repositoryId:1,name:'multi-project-workspace',rootPath:repo},{repositoryId:4,name:'curl-ai-bridge',rootPath:repo}],worktrees})
+ assert.equal(guard.withFencedMutation('x',1,{repositoryId:1,path:'f.txt',operation:'MODIFY'},'changed').path,'f.txt')
+ assert.equal(readFileSync(join(wt,'f.txt'),'utf8'),'changed');assert.equal(readFileSync(join(repo,'f.txt'),'utf8'),'x')
+ execFileSync('git',['-C',wt,'add','f.txt']);execFileSync('git',['-C',wt,'commit','-qm','wt commit'])
+ assert.throws(()=>guard.assertCurrentWriterLease('x',1,[{repositoryId:1,path:'f.txt',operation:'MODIFY'}]),/writer_worktree_head_changed/)
+ writeFileSync(join(repo,'f.txt'),'canonical2');execFileSync('git',['-C',repo,'add','-A']);execFileSync('git',['-C',repo,'commit','-qm','canonical commit'])
+ assert.throws(()=>guard.assertCurrentWriterLease('x',1,[{repositoryId:1,path:'f.txt',operation:'MODIFY'}]),/writer_repository_anchor_changed/)
+ db.close();rmSync(d,{recursive:true,force:true})
+})
+
+test('worktree registration replacement and symlinked parents fail closed',()=>{
+ const d=mkdtempSync(join(tmpdir(),'guard-wt2-')),repo=join(d,'repo');mkdirSync(repo)
+ execFileSync('git',['init','-q',repo]);execFileSync('git',['-C',repo,'config','user.email','lease-test@example.invalid']);execFileSync('git',['-C',repo,'config','user.name','Lease Test']);writeFileSync(join(repo,'f.txt'),'x');execFileSync('git',['-C',repo,'add','f.txt']);execFileSync('git',['-C',repo,'commit','-qm','fixture'])
+ const branch=execFileSync('git',['-C',repo,'branch','--show-current'],{encoding:'utf8'}).trim(),head=execFileSync('git',['-C',repo,'rev-parse','HEAD'],{encoding:'utf8'}).trim(),wt=join(d,'wt')
+ execFileSync('git',['-C',repo,'worktree','add','-q','-b','wt-branch',wt])
+ const wtBranch=execFileSync('git',['-C',wt,'branch','--show-current'],{encoding:'utf8'}).trim(),wtHead=execFileSync('git',['-C',wt,'rev-parse','HEAD'],{encoding:'utf8'}).trim()
+ const db=new Database(join(d,'db.sqlite'))
+ const lease={allowlist:{files:[],mutations:['tasks','task_events']},repositories:[{repositoryId:1,name:'multi-project-workspace',rootPath:repo,branch,headCommit:head,worktreePath:wt,worktreeBranch:wtBranch,worktreeHead:wtHead},{repositoryId:4,name:'curl-ai-bridge',rootPath:repo,branch,headCommit:head}],projectId:'curl-ai-bridge',ownerId:'owner'}
+ const store={assertCurrentWriterLease:()=>lease}
+ const repos=[{repositoryId:1,name:'multi-project-workspace',rootPath:repo},{repositoryId:4,name:'curl-ai-bridge',rootPath:repo}]
+ const guard=createProjectWriterLeaseGuard({connection:db,leaseStore:store,repositories:repos,worktrees:[{repositoryId:1,repositoryRoot:repo,worktreePath:wt,branch:wtBranch,headCommit:wtHead}]})
+ assert.doesNotThrow(()=>guard.assertCurrentWriterLease('x',1,[]))
+ const replaced=createProjectWriterLeaseGuard({connection:db,leaseStore:store,repositories:repos,worktrees:[{repositoryId:1,repositoryRoot:repo,worktreePath:join(d,'other'),branch:wtBranch,headCommit:wtHead}]})
+ assert.throws(()=>replaced.assertCurrentWriterLease('x',1,[]),/writer_worktree_not_registered/)
+ const link=join(d,'link');symlinkSync(d,link);const linkWt=join(link,'wt')
+ const lease2={...lease,repositories:[{...lease.repositories[0],worktreePath:linkWt},lease.repositories[1]]}
+ const store2={assertCurrentWriterLease:()=>lease2}
+ const symlinked=createProjectWriterLeaseGuard({connection:db,leaseStore:store2,repositories:repos,worktrees:[{repositoryId:1,repositoryRoot:repo,worktreePath:linkWt,branch:wtBranch,headCommit:wtHead}]})
+ assert.throws(()=>symlinked.assertCurrentWriterLease('x',1,[]),/worktree_path_symlink/)
+ db.close();rmSync(d,{recursive:true,force:true})
+})
