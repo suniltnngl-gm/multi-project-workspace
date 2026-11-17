@@ -1,0 +1,1 @@
+{"name":"@workspace/portable-execution-tracking","version":"0.1.0","private":true,"type":"module","description":"Portable, metadata-only execution evidence and reconciliation.","exports":"./src/index.mjs","scripts":{"test":"node --test ../../apps/api/test/portableExecutionTracking.test.js"}}

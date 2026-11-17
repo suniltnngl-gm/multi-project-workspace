@@ -1,0 +1,3 @@
+export const DEFAULT_LOCATION_CONFIG=Object.freeze({PET_OPENCODE_TEMP_ROOTS:[],PET_AGY_TEMP_ROOTS:[],PET_STATE_ROOT:''})
+export function parseRootList(value,name='PET_ROOTS'){if(value===undefined||value===null||value==='')return [];let out;try{out=Array.isArray(value)?value:JSON.parse(value)}catch{throw Error('pet_root_config_invalid:'+name)}if(!Array.isArray(out)||out.some(x=>typeof x!=='string'||!x.trim()))throw Error('pet_root_config_invalid:'+name);return [...new Set(out)]}
+export function createLocationRegistry(env=process.env){return Object.freeze({opencodeRoots:parseRootList(env.PET_OPENCODE_TEMP_ROOTS??'[]','PET_OPENCODE_TEMP_ROOTS'),agyRoots:parseRootList(env.PET_AGY_TEMP_ROOTS??'[]','PET_AGY_TEMP_ROOTS'),stateRoot:env.PET_STATE_ROOT||''})}

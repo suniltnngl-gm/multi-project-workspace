@@ -1,0 +1,682 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:curl-ai-bridge:swarm-execution-ledger:1",
+  "title": "Swarm execution ledger and planning-gate contract",
+  "description": "Strict ledger shape. Runtime lease enforcement is specified by the mandate and is not implied by schema validity.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ledger_id",
+    "project_id",
+    "state",
+    "execution",
+    "scope",
+    "authority",
+    "planning_gate",
+    "dependencies",
+    "risks",
+    "evidence",
+    "proposals",
+    "handoff",
+    "events"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "ledger_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "state": {
+      "enum": [
+        "proposed",
+        "planning",
+        "ready",
+        "leased",
+        "mutating",
+        "verifying",
+        "blocked",
+        "completed",
+        "cancelled"
+      ]
+    },
+    "execution": {
+      "$ref": "#/$defs/execution"
+    },
+    "scope": {
+      "$ref": "#/$defs/scope"
+    },
+    "authority": {
+      "$ref": "#/$defs/authority"
+    },
+    "planning_gate": {
+      "$ref": "#/$defs/planningGate"
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/dependency"
+      },
+      "uniqueItems": true
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/risk"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidence"
+      }
+    },
+    "proposals": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/proposal"
+      }
+    },
+    "handoff": {
+      "$ref": "#/$defs/handoff"
+    },
+    "lease": {
+      "$ref": "#/$defs/lease"
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/event"
+      }
+    }
+  },
+  "$defs": {
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "run_id",
+        "worker_id",
+        "session_lineage",
+        "repository",
+        "branch",
+        "base_head",
+        "context_pack_version"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "worker_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_lineage": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "base_head": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$"
+        },
+        "context_pack_version": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "allowlist",
+        "allowlist_sha256",
+        "protected_exclusions"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "read_only",
+            "proposal_only",
+            "implementation"
+          ]
+        },
+        "allowlist": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/allowlistEntry"
+          }
+        },
+        "allowlist_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "protected_exclusions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/protectedExclusion"
+          }
+        }
+      }
+    },
+    "allowlistEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "operation"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operation": {
+          "enum": [
+            "CREATE",
+            "UPDATE",
+            "DELETE"
+          ]
+        }
+      }
+    },
+    "protectedExclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "reason"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$"
+        }
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authorization_ref",
+        "planning_gate_disposition",
+        "budget_usd",
+        "external_egress"
+      ],
+      "properties": {
+        "authorization_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "planning_gate_disposition": {
+          "enum": [
+            "incomplete",
+            "ready_for_serialized_implementation"
+          ]
+        },
+        "budget_usd": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 0
+        },
+        "external_egress": {
+          "const": false
+        }
+      }
+    },
+    "planningGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "state",
+        "disposition",
+        "reviewed_at",
+        "records"
+      ],
+      "properties": {
+        "version": {
+          "const": "swarm-plan-v1"
+        },
+        "state": {
+          "enum": [
+            "incomplete",
+            "complete"
+          ]
+        },
+        "disposition": {
+          "enum": [
+            "incomplete",
+            "ready_for_serialized_implementation"
+          ]
+        },
+        "reviewed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "records": {
+          "type": "array",
+          "minItems": 7,
+          "maxItems": 7,
+          "items": {
+            "$ref": "#/$defs/gateRecord"
+          }
+        }
+      }
+    },
+    "gateRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "criterion",
+        "status",
+        "reviewed",
+        "evidence_refs"
+      ],
+      "properties": {
+        "criterion": {
+          "enum": [
+            "planning_evidence_architecture",
+            "acceptance_criteria",
+            "dependencies_downstream",
+            "exact_allowlist",
+            "protected_exclusions",
+            "reversibility_risk",
+            "verification_plan"
+          ]
+        },
+        "status": {
+          "enum": [
+            "missing",
+            "draft",
+            "complete"
+          ]
+        },
+        "reviewed": {
+          "type": "boolean"
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        }
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "relation",
+        "state"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "relation": {
+          "enum": [
+            "upstream",
+            "contextual",
+            "downstream"
+          ]
+        },
+        "state": {
+          "enum": [
+            "open",
+            "satisfied",
+            "blocked",
+            "not_applicable"
+          ]
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    },
+    "risk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "risk_id",
+        "description",
+        "severity",
+        "reversibility",
+        "mitigation"
+      ],
+      "properties": {
+        "risk_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "reversibility": {
+          "enum": [
+            "reversible",
+            "partially_reversible",
+            "irreversible",
+            "unknown"
+          ]
+        },
+        "mitigation": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_id",
+        "source",
+        "locator",
+        "observed_at",
+        "digest"
+      ],
+      "properties": {
+        "evidence_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "locator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proposal_id",
+        "idempotency_key",
+        "status",
+        "proposed_by",
+        "summary",
+        "expected_updated_at"
+      ],
+      "properties": {
+        "proposal_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "proposed",
+            "reviewed",
+            "accepted",
+            "rejected",
+            "deferred"
+          ]
+        },
+        "proposed_by": {
+          "type": "string",
+          "minLength": 1
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected_updated_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      }
+    },
+    "lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lease_id",
+        "project_id",
+        "task_id",
+        "run_id",
+        "worker_id",
+        "repository",
+        "branch",
+        "base_head",
+        "allowlist_sha256",
+        "authorization_ref",
+        "fencing_generation",
+        "acquired_at",
+        "heartbeat_at",
+        "expires_at",
+        "status"
+      ],
+      "properties": {
+        "lease_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "project_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "task_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "worker_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "base_head": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$"
+        },
+        "allowlist_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "authorization_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fencing_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "acquired_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "heartbeat_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "cancelled_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "status": {
+          "enum": [
+            "active",
+            "expired",
+            "revoked",
+            "superseded"
+          ]
+        }
+      }
+    },
+    "handoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "completed",
+        "remaining",
+        "blockers",
+        "next_action"
+      ],
+      "properties": {
+        "completed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "remaining": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "next_action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "type",
+        "actor",
+        "occurred_at",
+        "summary"
+      ],
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "enum": [
+            "proposal",
+            "review",
+            "decision",
+            "lease_acquired",
+            "heartbeat",
+            "lease_revoked",
+            "mutation",
+            "verification",
+            "handoff",
+            "recovery"
+          ]
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

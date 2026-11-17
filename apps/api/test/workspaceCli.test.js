@@ -6,9 +6,9 @@
 // Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { delimiter, join, resolve } from 'node:path'
 import test from 'node:test'
 import Database from 'better-sqlite3'
 import { runMigrations } from '../src/db/migrations.js'
@@ -141,4 +141,20 @@ test('a checkout whose old root still exists registers a second repository', () 
   } finally {
     rmSync(base, { recursive: true, force: true })
   }
+})
+
+
+test('ai swarm dispatch requires Bash and routes through mandatory entrypoint',()=>{
+ const base=temporaryDirectory('workspace-swarm-dispatch-')
+ try {
+  const bin=join(base,'bin'),capture=join(base,'args')
+  mkdirSync(bin,{recursive:true})
+  writeFileSync(join(bin,'bash'),'#!/bin/sh\nprintf "%s\\n" "$@" > "$SWARM_DISPATCH_CAPTURE"\n',{mode:0o755})
+  const env={...process.env,PATH:bin+delimiter+process.env.PATH,SWARM_DISPATCH_CAPTURE:capture}
+  const result=spawnSync(process.execPath,[join(ROOT,'scripts','workspace-cli.mjs'),'ai','swarm','status'],{cwd:ROOT,encoding:'utf8',env})
+  assert.equal(result.status,0,result.stderr)
+  const args=readFileSync(capture,'utf8').trim().split(String.fromCharCode(10))
+  assert.equal(args[0],join(ROOT,'scripts','swarm-entry.sh'))
+  assert.equal(args[1],'status')
+ } finally {rmSync(base,{recursive:true,force:true})}
 })

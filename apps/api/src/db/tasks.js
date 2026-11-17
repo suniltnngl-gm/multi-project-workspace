@@ -5,6 +5,7 @@
 // Important Context: User file. Composed into the createDatabase surface.
 // Work State: Completed: Extracted from database.js as task #45; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { toAiRun } from './aiJobs.js'
+import { leaseContextFromEnvironment } from '../projectWriterLease.js'
 
 export const TASK_COLUMNS = {
   project: "TEXT NOT NULL DEFAULT 'workspace'",
@@ -46,7 +47,18 @@ function toTaskEvent(row) {
   }
 }
 
-export function createTasksStore(connection, { toolRuns } = {}) {
+export function createTasksStore(connection, { toolRuns, writerLeaseGuard } = {}) {
+  function assertManagedMutation(project, mutation = 'tasks', taskId) {
+    if (project !== 'curl-ai-bridge') return
+    if (taskId === undefined || taskId === null) throw new Error('writer_lease_task_scope_missing')
+    if (!writerLeaseGuard) throw new Error('writer_lease_guard_unavailable')
+    const context = leaseContextFromEnvironment()
+    for (const capability of [mutation, 'task_events']) {
+      writerLeaseGuard.assertCurrentWriterLease(context.leaseId, context.generation, [], {
+        projectId: 'curl-ai-bridge', ownerId: context.ownerId, taskId, mutation: capability
+      })
+    }
+  }
   // Events stamp the innermost active run; callers without one (legacy
   // scripts, tests) keep run_id NULL.
   const currentRunId = () => toolRuns?.currentToolRunId() ?? null
@@ -129,6 +141,7 @@ export function createTasksStore(connection, { toolRuns } = {}) {
   }
 
   const insertTaskRecord = connection.transaction((fields) => {
+    assertManagedMutation(fields.project, 'tasks')
     const now = new Date().toISOString()
     const result = insertStatement.run(
       fields.title,
@@ -157,6 +170,9 @@ export function createTasksStore(connection, { toolRuns } = {}) {
   })
 
   const deleteTaskRecord = connection.transaction((id) => {
+    const existing = readTask(id)
+    if (!existing) return false
+    assertManagedMutation(existing.project, 'tasks', id)
     // AI runs survive task deletion but are unlinked so their history remains
     // inspectable without pointing at a missing task.
     unlinkTaskJobsStatement.run(id)
@@ -166,6 +182,7 @@ export function createTasksStore(connection, { toolRuns } = {}) {
   const applyTaskUpdate = connection.transaction((id, changes) => {
     const current = readTask(id)
     if (!current) return null
+    assertManagedMutation(current.project, 'tasks', id)
 
     const status = changes.status ?? (changes.completed === undefined
       ? current.status
@@ -188,6 +205,7 @@ export function createTasksStore(connection, { toolRuns } = {}) {
       work_blocked: changes.work_blocked ?? current.work_blocked,
       next_move: changes.next_move ?? current.next_move
     }
+    assertManagedMutation(next.project, 'tasks', id)
     const changedFields = TASK_ACTIVITY_FIELDS.filter(
       (field) => current[field] !== next[field]
     )
@@ -247,6 +265,7 @@ export function createTasksStore(connection, { toolRuns } = {}) {
   const applyTaskWorktreeUpdate = connection.transaction((id, path, action) => {
     const current = readTask(id)
     if (!current) return null
+    assertManagedMutation(current.project, 'tasks', id)
     const updatedAt = new Date().toISOString()
     updateTaskWorktreeStatement.run(path, updatedAt, id)
     insertTaskEventStatement.run(
@@ -266,6 +285,7 @@ export function createTasksStore(connection, { toolRuns } = {}) {
   const applyTaskOriginUpdate = connection.transaction((id, jobId) => {
     const current = readTask(id)
     if (!current) return null
+    assertManagedMutation(current.project, 'tasks', id)
     const updatedAt = new Date().toISOString()
     updateTaskOriginStatement.run(jobId, updatedAt, id)
     insertTaskEventStatement.run(
@@ -285,6 +305,7 @@ export function createTasksStore(connection, { toolRuns } = {}) {
   const applyTaskAgentLink = connection.transaction((id, runId, parentTaskId = null) => {
     const current = readTask(id)
     if (!current) return null
+    assertManagedMutation(current.project, 'tasks', id)
     const updatedAt = new Date().toISOString()
     updateTaskAgentLinkStatement.run(parentTaskId, runId, updatedAt, id)
     insertTaskEventStatement.run(

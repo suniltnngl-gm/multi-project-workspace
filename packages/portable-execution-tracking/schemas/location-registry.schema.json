@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"PET location registry","type":"object","additionalProperties":false,"required":["opencodeRoots","agyRoots","stateRoot"],"properties":{"opencodeRoots":{"type":"array","items":{"type":"string","minLength":1}},"agyRoots":{"type":"array","items":{"type":"string","minLength":1}},"stateRoot":{"type":"string"}}}

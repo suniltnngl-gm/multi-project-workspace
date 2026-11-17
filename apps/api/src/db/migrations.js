@@ -9,6 +9,61 @@ import { basename, resolve } from 'node:path'
 import { TASK_COLUMNS } from './tasks.js'
 
 export function runMigrations(connection, { rootDir, databasePath, defaultDatabasePath } = {}) {
+  // Bootstrap registrations are retired control-plane generations, not writer leases.
+  connection.exec("CREATE TABLE IF NOT EXISTS project_writer_bootstrap_events (event_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id), fencing_generation INTEGER NOT NULL CHECK(fencing_generation >= 1), authorization_ref TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS idx_project_writer_bootstrap_events_project ON project_writer_bootstrap_events(project_id, fencing_generation, created_at); CREATE TRIGGER IF NOT EXISTS trg_project_writer_bootstrap_events_no_update BEFORE UPDATE ON project_writer_bootstrap_events BEGIN SELECT RAISE(ABORT, 'project writer bootstrap events are append-only'); END; CREATE TRIGGER IF NOT EXISTS trg_project_writer_bootstrap_events_no_delete BEFORE DELETE ON project_writer_bootstrap_events BEGIN SELECT RAISE(ABORT, 'project writer bootstrap events are append-only'); END;")
+
+  // Project-wide writer fencing is additive. No existing tables are rebuilt or dropped.
+  connection.exec(`
+    CREATE TABLE IF NOT EXISTS project_writer_lease_state (
+      project_id TEXT PRIMARY KEY,
+      fencing_generation INTEGER NOT NULL CHECK(fencing_generation >= 0),
+      current_lease_id TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS project_writer_leases (
+      lease_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      task_id INTEGER NOT NULL,
+      run_id TEXT NOT NULL,
+      worker_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      repositories_json TEXT NOT NULL,
+      allowlist_json TEXT NOT NULL,
+      allowlist_sha256 TEXT NOT NULL CHECK(length(allowlist_sha256) = 64),
+      binding_sha256 TEXT NOT NULL CHECK(length(binding_sha256) = 64),
+      authorization_ref TEXT NOT NULL,
+      fencing_generation INTEGER NOT NULL CHECK(fencing_generation >= 1),
+      acquired_at TEXT NOT NULL,
+      heartbeat_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('active','expired','revoked','superseded')),
+      idempotency_key TEXT NOT NULL UNIQUE
+    );
+    CREATE INDEX IF NOT EXISTS idx_project_writer_leases_current
+      ON project_writer_leases(project_id,status,expires_at);
+    CREATE TABLE IF NOT EXISTS project_writer_lease_events (
+      event_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      lease_id TEXT NOT NULL,
+      fencing_generation INTEGER NOT NULL,
+      event_type TEXT NOT NULL CHECK(event_type IN ('acquired','renewed','released','expired')),
+      idempotency_key TEXT NOT NULL UNIQUE,
+      occurred_at TEXT NOT NULL,
+      details_json TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE INDEX IF NOT EXISTS idx_project_writer_lease_events_project
+      ON project_writer_lease_events(project_id,occurred_at,event_id);
+    CREATE TRIGGER IF NOT EXISTS trg_project_writer_lease_events_no_update
+      BEFORE UPDATE ON project_writer_lease_events
+      BEGIN SELECT RAISE(ABORT, 'project writer lease events are append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS trg_project_writer_lease_events_no_delete
+      BEFORE DELETE ON project_writer_lease_events
+      BEGIN SELECT RAISE(ABORT, 'project writer lease events are append-only'); END;
+  `)
+  const writerLeaseColumns = new Set(connection.prepare('PRAGMA table_info(project_writer_leases)').all().map((column) => column.name))
+  if (!writerLeaseColumns.has('binding_sha256')) {
+    connection.exec("ALTER TABLE project_writer_leases ADD COLUMN binding_sha256 TEXT NOT NULL DEFAULT ''")
+  }
   connection.exec(`
     CREATE TABLE IF NOT EXISTS repositories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

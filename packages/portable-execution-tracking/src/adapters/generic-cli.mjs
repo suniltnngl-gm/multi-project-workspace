@@ -1,0 +1,2 @@
+const allowed=['provider','cli','model','task_id','execution_id','tool_run_id','agent_run_id','session_id','started_at','finished_at','exit_code','artifact_refs']
+export function normalizeCliMetadata(input={}){const out={source:'generic-cli'};for(const k of allowed)if(input[k]!==undefined)out[k]=input[k];if(!Number.isSafeInteger(out.task_id)||!out.execution_id)throw Error('pet_cli_identity_missing');return out}

@@ -1162,7 +1162,11 @@ async function dispatch(argv) {
       if (subcommand === 'ask') return aiAsk(rest.slice(1))
       if (subcommand === 'model') return aiModel(rest.slice(1))
       if (subcommand === 'quota') return runNodeScript('ai-quota.mjs', rest.slice(1))
-      if (subcommand === 'swarm') return runNodeScript('ai-swarm.mjs', rest.slice(1))
+      if (subcommand === 'swarm') {
+        const bash = which('bash')
+        if (!bash) fail('Bash 3.2+ is required for ai swarm; refusing to bypass scripts/swarm-entry.sh.')
+        return spawnProcess(bash, [join(ROOT_DIR, 'scripts', 'swarm-entry.sh'), ...rest.slice(1)])
+      }
       if (subcommand === 'harvest') return runNodeScript('ai-harvest.mjs', rest.slice(1))
       fail(
         `Unknown ai subcommand: ${subcommand}\n` +

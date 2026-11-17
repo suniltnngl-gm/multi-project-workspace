@@ -289,11 +289,13 @@ async function main() {
 
   if (opts.createTask && parsed.structuredOutput.next_actions.length > 0) {
     const title = `Follow-up (${parsed.structuredOutput.target_repo || 'workspace'}): ${parsed.structuredOutput.next_actions[0]}`
-    db.prepare('INSERT INTO tasks (title, status, notes) VALUES (?, ?, ?)').run(
+    db.createTask({
       title,
-      'todo',
-      `Harvested from conversation ${conversationId}`,
-    )
+      description: `Harvested from conversation ${conversationId}`,
+      status: 'todo',
+      project: parsed.structuredOutput.target_repo || 'workspace',
+      task_type: 'chore'
+    })
   }
 
   if (opts.json) {

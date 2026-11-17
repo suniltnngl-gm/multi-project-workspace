@@ -10,6 +10,9 @@ import { fileURLToPath } from 'node:url'
 import Database from 'better-sqlite3'
 import { runMigrations } from './db/migrations.js'
 import { createTasksStore } from './db/tasks.js'
+import { createProjectWriterLeasesStore } from './db/projectWriterLeases.js'
+import { createTaskBootstrapStore } from './db/taskBootstrap.js'
+import { createProjectWriterLeaseGuard } from './projectWriterLease.js'
 import { createTaskProposalsStore } from './db/taskProposals.js'
 import { createAiJobsStore } from './db/aiJobs.js'
 import { createAiQuotaStore } from './db/aiQuota.js'
@@ -45,13 +48,20 @@ export function createDatabase(
   runMigrations(connection, { rootDir, databasePath: resolvedPath, defaultDatabasePath })
 
   const repositories = createRepositoriesStore(connection)
+  const repositoryScopes = connection.prepare('SELECT id AS repositoryId, name, root_path AS rootPath FROM repositories WHERE id IN (1, 4)').all()
+  const writerLeases = createProjectWriterLeasesStore(connection)
+  const taskBootstrap = createTaskBootstrapStore(connection)
+  const writerLeaseGuard = createProjectWriterLeaseGuard({ connection, leaseStore: writerLeases, repositories: repositoryScopes })
   const toolRuns = createToolRunsStore(connection)
-  const tasks = createTasksStore(connection, { toolRuns })
+  const tasks = createTasksStore(connection, { toolRuns, writerLeaseGuard })
   const proposals = createTaskProposalsStore(connection, { tasks })
   const agentRuns = createAgentRunsStore(connection)
   const agentTaskOps = createAgentTaskOpsStore(connection, { tasks, proposals, agentRuns })
   return {
     ...tasks,
+    writerLeases,
+    registerTaskBootstrap: taskBootstrap.registerTaskBootstrap,
+    writerLeaseGuard,
     ...createAiJobsStore(connection),
     ...createAiQuotaStore(connection),
     ...createUserFilesStore(connection, { toolRuns }),
