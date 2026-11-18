@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-parent-runtime.local/schemas/identity.schema.json",
+  "title": "Entity Identity",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "entity_id",
+    "cli",
+    "provider",
+    "model",
+    "quota_pool",
+    "session_id"
+  ],
+  "properties": {
+    "entity_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "cli": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "quota_pool": {
+      "type": "string",
+      "minLength": 1
+    },
+    "session_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "$comment": "Fixtures for https://multi-parent-runtime.local/schemas/result.schema.json; source specification: MPR-001; coverage contract: SC-14.",
+  "schema": "https://multi-parent-runtime.local/schemas/result.schema.json",
+  "cases": [
+    {
+      "name": "valid-minimal",
+      "valid": true,
+      "instance": {
+        "taskId": "T-1",
+        "siblingId": "opencode",
+        "status": "completed",
+        "scope": [
+          "a"
+        ],
+        "mutations": false,
+        "findings": [],
+        "evidence": [],
+        "confidence": "verified"
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "invalid-missing-required",
+      "valid": false,
+      "instance": {
+        "taskId": "T-1",
+        "siblingId": "opencode",
+        "status": "completed",
+        "scope": [],
+        "mutations": false,
+        "findings": [],
+        "evidence": []
+      },
+      "expect": "required confidence"
+    },
+    {
+      "name": "invalid-type",
+      "valid": false,
+      "instance": {
+        "taskId": "T-1",
+        "siblingId": "opencode",
+        "status": "completed",
+        "scope": [],
+        "mutations": "no",
+        "findings": [],
+        "evidence": [],
+        "confidence": "verified"
+      },
+      "expect": "type mutations"
+    },
+    {
+      "name": "invalid-additional",
+      "valid": false,
+      "instance": {
+        "taskId": "T-1",
+        "siblingId": "opencode",
+        "status": "completed",
+        "scope": [],
+        "mutations": false,
+        "findings": [],
+        "evidence": [],
+        "confidence": "verified",
+        "extra": true
+      },
+      "expect": "additionalProperties"
+    }
+  ]
+}

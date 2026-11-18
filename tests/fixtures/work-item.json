@@ -1,0 +1,58 @@
+{
+  "$comment": "Fixtures for https://multi-parent-runtime.local/schemas/work-item.schema.json; source specification: INTERFACE-001; coverage contract: SC-14.",
+  "schema": "https://multi-parent-runtime.local/schemas/work-item.schema.json",
+  "cases": [
+    {
+      "name": "valid-minimal",
+      "valid": true,
+      "instance": {
+        "workItemId": "WI-1",
+        "status": "PENDING",
+        "origin": "operator",
+        "policyVersion": "v1",
+        "authorizationRef": "auth-1",
+        "createdAt": "2026-11-18T00:00:00Z"
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "invalid-missing-required",
+      "valid": false,
+      "instance": {
+        "workItemId": "WI-1",
+        "status": "PENDING",
+        "origin": "operator",
+        "policyVersion": "v1",
+        "createdAt": "2026-11-18T00:00:00Z"
+      },
+      "expect": "required authorizationRef"
+    },
+    {
+      "name": "invalid-type",
+      "valid": false,
+      "instance": {
+        "workItemId": 1,
+        "status": "PENDING",
+        "origin": "operator",
+        "policyVersion": "v1",
+        "authorizationRef": "auth-1",
+        "createdAt": "2026-11-18T00:00:00Z"
+      },
+      "expect": "type workItemId"
+    },
+    {
+      "name": "invalid-additional",
+      "valid": false,
+      "instance": {
+        "workItemId": "WI-1",
+        "status": "PENDING",
+        "origin": "operator",
+        "policyVersion": "v1",
+        "authorizationRef": "auth-1",
+        "createdAt": "2026-11-18T00:00:00Z",
+        "extra": true
+      },
+      "expect": "additionalProperties"
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-parent-runtime.local/schemas/authorization-reference.schema.json",
+  "title": "Authorization Reference",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ref",
+    "level",
+    "permissionClass",
+    "scope",
+    "source",
+    "provenanceClass"
+  ],
+  "properties": {
+    "ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "level": {
+      "type": "string",
+      "enum": [
+        "A0",
+        "A1",
+        "A2"
+      ]
+    },
+    "permissionClass": {
+      "type": "string",
+      "enum": [
+        "READ",
+        "PROPOSE",
+        "MUTATE"
+      ]
+    },
+    "scope": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "operator",
+        "policy",
+        "system"
+      ]
+    },
+    "provenanceClass": {
+      "type": "string",
+      "enum": [
+        "authenticated",
+        "claimed_external",
+        "operator_direct",
+        "system"
+      ]
+    },
+    "grantedBy": {
+      "type": "string"
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

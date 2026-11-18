@@ -1,0 +1,84 @@
+{
+  "$comment": "Fixtures for https://multi-parent-runtime.local/schemas/issue.schema.json; source specification: ACB-001; coverage contract: SC-14.",
+  "schema": "https://multi-parent-runtime.local/schemas/issue.schema.json",
+  "cases": [
+    {
+      "name": "valid-minimal",
+      "valid": true,
+      "instance": {
+        "issue_id": "ISSUE-1",
+        "title": "t",
+        "status": "open",
+        "priority": "high",
+        "reporter": "hermes",
+        "observed_evidence": [
+          "e"
+        ],
+        "affected_component": "ACB",
+        "discussion": [],
+        "proposed_resolutions": [],
+        "operator_decision": null,
+        "resolution": null,
+        "closed_history": []
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "invalid-missing-required",
+      "valid": false,
+      "instance": {
+        "issue_id": "ISSUE-1",
+        "title": "t",
+        "priority": "high",
+        "reporter": "hermes",
+        "observed_evidence": [],
+        "affected_component": "ACB",
+        "discussion": [],
+        "proposed_resolutions": [],
+        "operator_decision": null,
+        "resolution": null,
+        "closed_history": []
+      },
+      "expect": "required status"
+    },
+    {
+      "name": "invalid-type",
+      "valid": false,
+      "instance": {
+        "issue_id": "ISSUE-1",
+        "title": "t",
+        "status": "open",
+        "priority": "critical",
+        "reporter": "hermes",
+        "observed_evidence": [],
+        "affected_component": "ACB",
+        "discussion": [],
+        "proposed_resolutions": [],
+        "operator_decision": null,
+        "resolution": null,
+        "closed_history": []
+      },
+      "expect": "enum priority"
+    },
+    {
+      "name": "invalid-additional",
+      "valid": false,
+      "instance": {
+        "issue_id": "ISSUE-1",
+        "title": "t",
+        "status": "open",
+        "priority": "high",
+        "reporter": "hermes",
+        "observed_evidence": [],
+        "affected_component": "ACB",
+        "discussion": [],
+        "proposed_resolutions": [],
+        "operator_decision": null,
+        "resolution": null,
+        "closed_history": [],
+        "extra": true
+      },
+      "expect": "additionalProperties"
+    }
+  ]
+}

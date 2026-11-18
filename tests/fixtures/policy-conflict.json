@@ -1,0 +1,78 @@
+{
+  "$comment": "Fixtures for https://multi-parent-runtime.local/schemas/policy-conflict.schema.json; source specification: INTERFACE-RECONCILIATION-002; coverage contract: SC-14.",
+  "schema": "https://multi-parent-runtime.local/schemas/policy-conflict.schema.json",
+  "cases": [
+    {
+      "name": "valid-minimal",
+      "valid": true,
+      "instance": {
+        "conflictId": "PC-1",
+        "type": "POLICY_VERSION_CONFLICT",
+        "workItemId": "WI-1",
+        "pinnedPolicyVersion": "v1",
+        "currentPolicyVersion": "v2",
+        "detectedAt": "2026-11-18T00:00:00Z",
+        "owner": "op",
+        "recorder": "hermes",
+        "enforcement": "MPR_STOP",
+        "status": "BLOCKED",
+        "resolution": "OPERATOR_REVIEW_REQUIRED"
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "invalid-missing-required",
+      "valid": false,
+      "instance": {
+        "conflictId": "PC-1",
+        "type": "POLICY_VERSION_CONFLICT",
+        "workItemId": "WI-1",
+        "pinnedPolicyVersion": "v1",
+        "currentPolicyVersion": "v2",
+        "detectedAt": "2026-11-18T00:00:00Z",
+        "owner": "op",
+        "recorder": "hermes",
+        "status": "BLOCKED",
+        "resolution": "OPERATOR_REVIEW_REQUIRED"
+      },
+      "expect": "required enforcement"
+    },
+    {
+      "name": "invalid-type",
+      "valid": false,
+      "instance": {
+        "conflictId": "PC-1",
+        "type": "POLICY_VERSION_CONFLICT",
+        "workItemId": "WI-1",
+        "pinnedPolicyVersion": "v1",
+        "currentPolicyVersion": "v2",
+        "detectedAt": "2026-11-18T00:00:00Z",
+        "owner": "op",
+        "recorder": "hermes",
+        "enforcement": "STOP",
+        "status": "BLOCKED",
+        "resolution": "OPERATOR_REVIEW_REQUIRED"
+      },
+      "expect": "enum enforcement"
+    },
+    {
+      "name": "invalid-additional",
+      "valid": false,
+      "instance": {
+        "conflictId": "PC-1",
+        "type": "POLICY_VERSION_CONFLICT",
+        "workItemId": "WI-1",
+        "pinnedPolicyVersion": "v1",
+        "currentPolicyVersion": "v2",
+        "detectedAt": "2026-11-18T00:00:00Z",
+        "owner": "op",
+        "recorder": "hermes",
+        "enforcement": "MPR_STOP",
+        "status": "BLOCKED",
+        "resolution": "OPERATOR_REVIEW_REQUIRED",
+        "extra": true
+      },
+      "expect": "additionalProperties"
+    }
+  ]
+}

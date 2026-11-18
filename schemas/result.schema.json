@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-parent-runtime.local/schemas/result.schema.json",
+  "title": "Swarm Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "taskId",
+    "siblingId",
+    "status",
+    "scope",
+    "mutations",
+    "findings",
+    "evidence",
+    "confidence"
+  ],
+  "properties": {
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "siblingId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "failed",
+        "partial",
+        "cancelled"
+      ]
+    },
+    "scope": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "mutations": {
+      "type": "boolean"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "confidence": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "observed",
+        "assumed",
+        "uncertain"
+      ]
+    }
+  }
+}

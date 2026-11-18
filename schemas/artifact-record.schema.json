@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-parent-runtime.local/schemas/artifact-record.schema.json",
+  "title": "Artifact Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifactId",
+    "workItemId",
+    "origin",
+    "storage",
+    "access",
+    "provenance"
+  ],
+  "properties": {
+    "artifactId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workItemId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity",
+        "sourcePath"
+      ],
+      "properties": {
+        "entity": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourcePath": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "location",
+        "sha256"
+      ],
+      "properties": {
+        "location": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "access": {
+      "type": "string",
+      "enum": [
+        "READ",
+        "PROPOSE",
+        "MUTATE"
+      ]
+    },
+    "provenance": {
+      "type": "string",
+      "enum": [
+        "agent_published",
+        "operator_direct",
+        "system"
+      ]
+    },
+    "version": {
+      "type": "string"
+    },
+    "contentType": {
+      "type": "string"
+    },
+    "verification": {
+      "type": "string",
+      "enum": [
+        "VERIFIED",
+        "OBSERVED",
+        "CLAIMED",
+        "UNSUPPORTED",
+        "UNVERIFIABLE"
+      ]
+    },
+    "publishedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-parent-runtime.local/schemas/issue.schema.json",
+  "title": "Issue",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "issue_id",
+    "title",
+    "status",
+    "priority",
+    "reporter",
+    "observed_evidence",
+    "affected_component",
+    "discussion",
+    "proposed_resolutions",
+    "operator_decision",
+    "resolution",
+    "closed_history"
+  ],
+  "properties": {
+    "issue_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "open",
+        "in_progress",
+        "resolved",
+        "closed",
+        "dismissed"
+      ]
+    },
+    "priority": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "urgent"
+      ]
+    },
+    "reporter": {
+      "type": "string",
+      "minLength": 1
+    },
+    "observed_evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "affected_component": {
+      "type": "string"
+    },
+    "discussion": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "proposed_resolutions": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "operator_decision": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "resolution": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "closed_history": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  }
+}

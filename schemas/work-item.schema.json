@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-parent-runtime.local/schemas/work-item.schema.json",
+  "title": "Work Item",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "workItemId",
+    "status",
+    "origin",
+    "policyVersion",
+    "authorizationRef",
+    "createdAt"
+  ],
+  "properties": {
+    "workItemId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "conversationId": {
+      "type": "string"
+    },
+    "messageId": {
+      "type": "string"
+    },
+    "taskId": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "PENDING",
+        "ASSIGNED",
+        "RUNNING",
+        "BLOCKED",
+        "COMPLETED",
+        "CANCELLED"
+      ]
+    },
+    "messageType": {
+      "type": "string",
+      "enum": [
+        "task_request",
+        "task_result",
+        "proposal",
+        "decision",
+        "question",
+        "answer",
+        "notification",
+        "operator_instruction"
+      ]
+    },
+    "origin": {
+      "type": "string",
+      "minLength": 1
+    },
+    "assignedParent": {
+      "type": "string"
+    },
+    "assignedSiblings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "policyVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "authorizationRef": {
+      "type": "string",
+      "minLength": 1
+    },
+    "mutationClass": {
+      "type": "string",
+      "enum": [
+        "READ",
+        "PROPOSE",
+        "REVERSIBLE_MUTATE",
+        "DESTRUCTIVE_MUTATE",
+        "UNCLEAR_REVERSIBILITY",
+        "HOLD"
+      ]
+    },
+    "reversibility": {
+      "type": "string",
+      "enum": [
+        "reversible",
+        "irreversible",
+        "unknown"
+      ]
+    },
+    "scope": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "sessionId": {
+      "type": "string"
+    },
+    "checkpointRef": {
+      "type": "string"
+    },
+    "quotaPool": {
+      "type": "string"
+    },
+    "evidenceRefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "decisionRefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "conflictRefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

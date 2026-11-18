@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-parent-runtime.local/schemas/task.schema.json",
+  "title": "Swarm Task",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "status",
+    "parentId",
+    "siblingId",
+    "scope",
+    "permissionClass"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "running",
+        "completed",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "parentId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "siblingId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scope": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "permissionClass": {
+      "type": "string",
+      "enum": [
+        "READ",
+        "PROPOSE",
+        "MUTATE"
+      ]
+    },
+    "mutations": {
+      "type": "boolean"
+    },
+    "authorizationRef": {
+      "type": "string"
+    }
+  }
+}

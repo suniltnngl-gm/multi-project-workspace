@@ -1,0 +1,69 @@
+{
+  "$comment": "Fixtures for https://multi-parent-runtime.local/schemas/conflict-record.schema.json; source specification: ACB-CIR; coverage contract: SC-14.",
+  "schema": "https://multi-parent-runtime.local/schemas/conflict-record.schema.json",
+  "cases": [
+    {
+      "name": "valid-minimal",
+      "valid": true,
+      "instance": {
+        "conflict_id": "CR-1",
+        "type": "FACT_CONFLICT",
+        "messages": [
+          "m1",
+          "m2"
+        ],
+        "subject": "s",
+        "recorded_state": "a",
+        "incoming_claim": "b",
+        "evidence_status": "CONFLICTING",
+        "resolution": "OPERATOR_REVIEW_REQUIRED"
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "invalid-missing-required",
+      "valid": false,
+      "instance": {
+        "conflict_id": "CR-1",
+        "type": "FACT_CONFLICT",
+        "messages": [],
+        "subject": "s",
+        "recorded_state": "a",
+        "incoming_claim": "b",
+        "resolution": "NO_CONFLICT"
+      },
+      "expect": "required evidence_status"
+    },
+    {
+      "name": "invalid-type",
+      "valid": false,
+      "instance": {
+        "conflict_id": "CR-1",
+        "type": "OTHER",
+        "messages": [],
+        "subject": "s",
+        "recorded_state": "a",
+        "incoming_claim": "b",
+        "evidence_status": "CLAIMED",
+        "resolution": "NO_CONFLICT"
+      },
+      "expect": "enum type"
+    },
+    {
+      "name": "invalid-additional",
+      "valid": false,
+      "instance": {
+        "conflict_id": "CR-1",
+        "type": "FACT_CONFLICT",
+        "messages": [],
+        "subject": "s",
+        "recorded_state": "a",
+        "incoming_claim": "b",
+        "evidence_status": "CLAIMED",
+        "resolution": "NO_CONFLICT",
+        "extra": true
+      },
+      "expect": "additionalProperties"
+    }
+  ]
+}

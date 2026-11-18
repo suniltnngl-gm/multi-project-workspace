@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-parent-runtime.local/schemas/policy-conflict.schema.json",
+  "title": "Policy Conflict",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "conflictId",
+    "type",
+    "workItemId",
+    "pinnedPolicyVersion",
+    "currentPolicyVersion",
+    "detectedAt",
+    "owner",
+    "recorder",
+    "enforcement",
+    "status",
+    "resolution"
+  ],
+  "properties": {
+    "conflictId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "POLICY_VERSION_CONFLICT",
+        "AUTHORIZATION_CONFLICT",
+        "SCOPE_CONFLICT"
+      ]
+    },
+    "workItemId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "pinnedPolicyVersion": {
+      "type": "string"
+    },
+    "currentPolicyVersion": {
+      "type": "string"
+    },
+    "detectedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "owner": {
+      "type": "string"
+    },
+    "recorder": {
+      "type": "string"
+    },
+    "enforcement": {
+      "type": "string",
+      "enum": [
+        "MPR_STOP",
+        "NONE"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "BLOCKED",
+        "RESOLVED",
+        "WAIVED_BY_OPERATOR"
+      ]
+    },
+    "resolution": {
+      "type": "string",
+      "enum": [
+        "OPERATOR_REVIEW_REQUIRED",
+        "POLICY_REPINNED",
+        "NO_CONFLICT"
+      ]
+    }
+  }
+}

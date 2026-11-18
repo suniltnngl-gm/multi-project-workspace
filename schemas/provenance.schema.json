@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-parent-runtime.local/schemas/provenance.schema.json",
+  "title": "Message Provenance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "transport",
+    "source_message_id",
+    "authenticated",
+    "origin_type",
+    "claims"
+  ],
+  "properties": {
+    "transport": {
+      "type": "string",
+      "enum": [
+        "api",
+        "clipboard",
+        "mcp",
+        "acp",
+        "file",
+        "system"
+      ]
+    },
+    "source_message_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "authenticated": {
+      "type": "boolean"
+    },
+    "origin_type": {
+      "type": "string",
+      "enum": [
+        "authenticated",
+        "claimed_external",
+        "operator_direct",
+        "system"
+      ]
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "transport": {
+            "const": "clipboard"
+          }
+        },
+        "required": [
+          "transport"
+        ]
+      },
+      "then": {
+        "properties": {
+          "authenticated": {
+            "const": false
+          }
+        }
+      }
+    }
+  ]
+}

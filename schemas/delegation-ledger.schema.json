@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-parent-runtime.local/schemas/delegation-ledger.schema.json",
+  "title": "Delegation Ledger Entry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "taskId",
+    "parentId",
+    "siblingId",
+    "authorizationLevel",
+    "permissionClass",
+    "scope",
+    "dispatchedAt",
+    "resultStatus"
+  ],
+  "properties": {
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "parentId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "siblingId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "authorizationLevel": {
+      "type": "string",
+      "enum": [
+        "A0",
+        "A1",
+        "A2"
+      ]
+    },
+    "permissionClass": {
+      "type": "string",
+      "enum": [
+        "READ",
+        "PROPOSE",
+        "MUTATE"
+      ]
+    },
+    "scope": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "dispatchedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "resultStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "completed",
+        "failed",
+        "rejected"
+      ]
+    },
+    "authorizationRef": {
+      "type": "string"
+    }
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "$comment": "Fixtures for https://multi-parent-runtime.local/schemas/provenance.schema.json; source specification: ACB-001; coverage contract: SC-14.",
+  "schema": "https://multi-parent-runtime.local/schemas/provenance.schema.json",
+  "cases": [
+    {
+      "name": "valid-api",
+      "valid": true,
+      "instance": {
+        "transport": "api",
+        "source_message_id": null,
+        "authenticated": true,
+        "origin_type": "authenticated",
+        "claims": []
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "valid-clipboard-unauthenticated",
+      "valid": true,
+      "instance": {
+        "transport": "clipboard",
+        "source_message_id": null,
+        "authenticated": false,
+        "origin_type": "claimed_external",
+        "claims": [
+          "claimed instruction"
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "invalid-clipboard-authenticated",
+      "valid": false,
+      "instance": {
+        "transport": "clipboard",
+        "source_message_id": null,
+        "authenticated": true,
+        "origin_type": "claimed_external",
+        "claims": []
+      },
+      "expect": "clipboard => authenticated false"
+    },
+    {
+      "name": "invalid-missing-required",
+      "valid": false,
+      "instance": {
+        "transport": "api",
+        "source_message_id": null,
+        "authenticated": true,
+        "origin_type": "authenticated"
+      },
+      "expect": "required claims"
+    },
+    {
+      "name": "invalid-type",
+      "valid": false,
+      "instance": {
+        "transport": "api",
+        "source_message_id": null,
+        "authenticated": "yes",
+        "origin_type": "authenticated",
+        "claims": []
+      },
+      "expect": "type authenticated"
+    },
+    {
+      "name": "invalid-additional",
+      "valid": false,
+      "instance": {
+        "transport": "api",
+        "source_message_id": null,
+        "authenticated": true,
+        "origin_type": "authenticated",
+        "claims": [],
+        "extra": true
+      },
+      "expect": "additionalProperties"
+    }
+  ]
+}

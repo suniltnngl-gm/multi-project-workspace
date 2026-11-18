@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-parent-runtime.local/schemas/message.schema.json",
+  "title": "ACB Message",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "message_id",
+    "conversation_id",
+    "origin",
+    "destination",
+    "message_type",
+    "content",
+    "provenance",
+    "authorization"
+  ],
+  "properties": {
+    "message_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "conversation_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "origin": {
+      "$ref": "#/$defs/origin"
+    },
+    "destination": {
+      "$ref": "#/$defs/destination"
+    },
+    "message_type": {
+      "type": "string",
+      "enum": [
+        "task_request",
+        "task_result",
+        "question",
+        "answer",
+        "proposal",
+        "decision",
+        "notification",
+        "operator_instruction"
+      ]
+    },
+    "content": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "body"
+      ],
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": [
+            "markdown",
+            "plain",
+            "json"
+          ]
+        },
+        "body": {
+          "type": "string"
+        }
+      }
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "authorization": {
+      "$ref": "#/$defs/authorization"
+    }
+  },
+  "$defs": {
+    "origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity_id",
+        "provider",
+        "origin_type",
+        "verification"
+      ],
+      "properties": {
+        "entity_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider": {
+          "type": "string"
+        },
+        "origin_type": {
+          "type": "string",
+          "enum": [
+            "authenticated",
+            "claimed_external",
+            "operator_direct",
+            "system"
+          ]
+        },
+        "verification": {
+          "type": "string",
+          "enum": [
+            "verified",
+            "unverified"
+          ]
+        }
+      }
+    },
+    "destination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity_id"
+      ],
+      "properties": {
+        "entity_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transport",
+        "source_message_id",
+        "authenticated"
+      ],
+      "properties": {
+        "transport": {
+          "type": "string",
+          "enum": [
+            "api",
+            "clipboard",
+            "mcp",
+            "acp",
+            "file",
+            "system"
+          ]
+        },
+        "source_message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authenticated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "permission_class",
+        "authorization_level"
+      ],
+      "properties": {
+        "permission_class": {
+          "type": "string",
+          "enum": [
+            "READ",
+            "PROPOSE",
+            "MUTATE"
+          ]
+        },
+        "authorization_level": {
+          "type": "string",
+          "enum": [
+            "A0",
+            "A1",
+            "A2"
+          ]
+        }
+      }
+    }
+  }
+}

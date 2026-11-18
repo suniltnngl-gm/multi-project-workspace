@@ -1,0 +1,162 @@
+{
+  "$comment": "Fixtures for https://multi-parent-runtime.local/schemas/message.schema.json; source specification: ACB-001; coverage contract: SC-14.",
+  "schema": "https://multi-parent-runtime.local/schemas/message.schema.json",
+  "cases": [
+    {
+      "name": "valid-minimal",
+      "valid": true,
+      "instance": {
+        "message_id": "MSG-1",
+        "conversation_id": "CONV-1",
+        "origin": {
+          "entity_id": "hermes",
+          "provider": "Hermes",
+          "origin_type": "operator_direct",
+          "verification": "verified"
+        },
+        "destination": {
+          "entity_id": "opencode"
+        },
+        "message_type": "task_request",
+        "content": {
+          "format": "markdown",
+          "body": "hi"
+        },
+        "provenance": {
+          "transport": "api",
+          "source_message_id": null,
+          "authenticated": true
+        },
+        "authorization": {
+          "permission_class": "READ",
+          "authorization_level": "A0"
+        }
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "invalid-missing-required",
+      "valid": false,
+      "instance": {
+        "message_id": "MSG-1",
+        "conversation_id": "CONV-1",
+        "origin": {
+          "entity_id": "hermes",
+          "provider": "Hermes",
+          "origin_type": "operator_direct",
+          "verification": "verified"
+        },
+        "destination": {
+          "entity_id": "opencode"
+        },
+        "message_type": "task_request",
+        "provenance": {
+          "transport": "api",
+          "source_message_id": null,
+          "authenticated": true
+        },
+        "authorization": {
+          "permission_class": "READ",
+          "authorization_level": "A0"
+        }
+      },
+      "expect": "required content"
+    },
+    {
+      "name": "invalid-type",
+      "valid": false,
+      "instance": {
+        "message_id": 1,
+        "conversation_id": "CONV-1",
+        "origin": {
+          "entity_id": "hermes",
+          "provider": "Hermes",
+          "origin_type": "operator_direct",
+          "verification": "verified"
+        },
+        "destination": {
+          "entity_id": "opencode"
+        },
+        "message_type": "task_request",
+        "content": {
+          "format": "markdown",
+          "body": "hi"
+        },
+        "provenance": {
+          "transport": "api",
+          "source_message_id": null,
+          "authenticated": true
+        },
+        "authorization": {
+          "permission_class": "READ",
+          "authorization_level": "A0"
+        }
+      },
+      "expect": "type message_id"
+    },
+    {
+      "name": "invalid-additional",
+      "valid": false,
+      "instance": {
+        "message_id": "MSG-1",
+        "conversation_id": "CONV-1",
+        "origin": {
+          "entity_id": "hermes",
+          "provider": "Hermes",
+          "origin_type": "operator_direct",
+          "verification": "verified"
+        },
+        "destination": {
+          "entity_id": "opencode"
+        },
+        "message_type": "task_request",
+        "content": {
+          "format": "markdown",
+          "body": "hi"
+        },
+        "provenance": {
+          "transport": "api",
+          "source_message_id": null,
+          "authenticated": true
+        },
+        "authorization": {
+          "permission_class": "READ",
+          "authorization_level": "A0"
+        },
+        "extra": true
+      },
+      "expect": "additionalProperties"
+    },
+    {
+      "name": "invalid-nested-origin",
+      "valid": false,
+      "instance": {
+        "message_id": "MSG-1",
+        "conversation_id": "CONV-1",
+        "origin": {
+          "entity_id": "hermes",
+          "provider": "Hermes",
+          "origin_type": "operator_direct"
+        },
+        "destination": {
+          "entity_id": "opencode"
+        },
+        "message_type": "task_request",
+        "content": {
+          "format": "markdown",
+          "body": "hi"
+        },
+        "provenance": {
+          "transport": "api",
+          "source_message_id": null,
+          "authenticated": true
+        },
+        "authorization": {
+          "permission_class": "READ",
+          "authorization_level": "A0"
+        }
+      },
+      "expect": "origin.required verification"
+    }
+  ]
+}

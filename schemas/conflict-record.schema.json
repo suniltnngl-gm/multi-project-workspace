@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-parent-runtime.local/schemas/conflict-record.schema.json",
+  "title": "ACB Conflict Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "conflict_id",
+    "type",
+    "messages",
+    "subject",
+    "recorded_state",
+    "incoming_claim",
+    "evidence_status",
+    "resolution"
+  ],
+  "properties": {
+    "conflict_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "AUTHORITY_CONFLICT",
+        "DECISION_CONFLICT",
+        "FACT_CONFLICT",
+        "PROVENANCE_CONFLICT",
+        "SCOPE_CONFLICT"
+      ]
+    },
+    "messages": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 2,
+      "uniqueItems": true
+    },
+    "subject": {
+      "type": "string",
+      "minLength": 1
+    },
+    "recorded_state": {
+      "type": "string"
+    },
+    "incoming_claim": {
+      "type": "string"
+    },
+    "evidence_status": {
+      "type": "string",
+      "enum": [
+        "VERIFIED",
+        "OBSERVED",
+        "CLAIMED",
+        "CONFLICTING",
+        "UNSUPPORTED",
+        "UNVERIFIABLE",
+        "SUPERSEDED"
+      ]
+    },
+    "resolution": {
+      "type": "string",
+      "enum": [
+        "OPERATOR_REVIEW_REQUIRED",
+        "ADVISORY_RECONCILIATION_PROPOSED",
+        "RESOLVED_BY_OPERATOR",
+        "NO_CONFLICT"
+      ]
+    }
+  }
+}

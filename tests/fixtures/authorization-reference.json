@@ -1,0 +1,60 @@
+{
+  "$comment": "Fixtures for https://multi-parent-runtime.local/schemas/authorization-reference.schema.json; source specification: INTERFACE-001; coverage contract: SC-14.",
+  "schema": "https://multi-parent-runtime.local/schemas/authorization-reference.schema.json",
+  "cases": [
+    {
+      "name": "valid-minimal",
+      "valid": true,
+      "instance": {
+        "ref": "auth-1",
+        "level": "A1",
+        "permissionClass": "READ",
+        "scope": [
+          "a"
+        ],
+        "source": "operator",
+        "provenanceClass": "authenticated"
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "invalid-missing-required",
+      "valid": false,
+      "instance": {
+        "ref": "auth-1",
+        "level": "A1",
+        "permissionClass": "READ",
+        "scope": [],
+        "source": "operator"
+      },
+      "expect": "required provenanceClass"
+    },
+    {
+      "name": "invalid-type",
+      "valid": false,
+      "instance": {
+        "ref": "auth-1",
+        "level": "A3",
+        "permissionClass": "READ",
+        "scope": [],
+        "source": "operator",
+        "provenanceClass": "authenticated"
+      },
+      "expect": "enum level"
+    },
+    {
+      "name": "invalid-additional",
+      "valid": false,
+      "instance": {
+        "ref": "auth-1",
+        "level": "A1",
+        "permissionClass": "READ",
+        "scope": [],
+        "source": "operator",
+        "provenanceClass": "authenticated",
+        "extra": true
+      },
+      "expect": "additionalProperties"
+    }
+  ]
+}
