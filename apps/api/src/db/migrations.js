@@ -945,4 +945,232 @@ export function runMigrations(connection, { rootDir, databasePath, defaultDataba
         AND user_file_events.action = 'created'
     );
   `)
+
+  // Case Registry (v1.0): decision-only governance layer ahead of the Task Board.
+  // Additive only; existing tables are neither rebuilt nor modified.
+  connection.exec(`
+    CREATE TABLE IF NOT EXISTS cases (
+      case_id TEXT PRIMARY KEY CHECK(
+        length(case_id) BETWEEN 8 AND 32
+        AND instr(case_id, '-C-') BETWEEN 3 AND 9
+        AND substr(case_id, 1, 1) GLOB '[A-Z]'
+        AND NOT (substr(case_id, 1, instr(case_id, '-C-') - 1) GLOB '*[^A-Z0-9]*')
+        AND length(substr(case_id, instr(case_id, '-C-') + 3)) >= 3
+        AND NOT (substr(case_id, instr(case_id, '-C-') + 3) GLOB '*[^0-9]*')
+      ),
+      project_id TEXT NOT NULL CHECK(length(trim(project_id)) BETWEEN 1 AND 100),
+      title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 200),
+      problem_statement TEXT NOT NULL CHECK(length(trim(problem_statement)) BETWEEN 1 AND 8000),
+      status TEXT NOT NULL CHECK(status IN (
+        'open','investigating','discussing','decision_ready',
+        'decided','promoted','deferred','rejected','closed'
+      )),
+      recommendation_option_key TEXT,
+      recommendation_rationale TEXT,
+      recommended_by TEXT,
+      recommended_at TEXT,
+      selected_option_key TEXT,
+      decision_rationale TEXT,
+      decided_by TEXT,
+      decided_at TEXT,
+      decision_authorization_ref TEXT,
+      decision_idempotency_key TEXT UNIQUE,
+      version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_cases_project_status
+      ON cases(project_id, status, updated_at);
+
+    CREATE TABLE IF NOT EXISTS case_options (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      case_id TEXT NOT NULL REFERENCES cases(case_id),
+      option_key TEXT NOT NULL CHECK(length(trim(option_key)) BETWEEN 1 AND 32),
+      title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 200),
+      summary TEXT NOT NULL CHECK(length(trim(summary)) BETWEEN 1 AND 4000),
+      consequences_json TEXT NOT NULL DEFAULT '[]',
+      risks_json TEXT NOT NULL DEFAULT '[]',
+      prerequisites_json TEXT NOT NULL DEFAULT '[]',
+      expected_task_count TEXT NOT NULL DEFAULT 'one'
+        CHECK(expected_task_count IN ('none','one','multiple')),
+      governance_mode TEXT NOT NULL DEFAULT 'standard_task_promotion'
+        CHECK(governance_mode IN (
+          'standard_task_promotion',
+          'no_task_required',
+          'requires_separate_governance_mechanism'
+        )),
+      created_at TEXT NOT NULL,
+      deprecated_at TEXT,
+      UNIQUE(case_id, option_key),
+      CHECK(
+        (governance_mode = 'no_task_required' AND expected_task_count = 'none')
+        OR (governance_mode = 'standard_task_promotion' AND expected_task_count IN ('one','multiple'))
+        OR (governance_mode = 'requires_separate_governance_mechanism')
+      )
+    );
+
+    CREATE TABLE IF NOT EXISTS case_evidence (
+      evidence_id TEXT PRIMARY KEY,
+      case_id TEXT NOT NULL REFERENCES cases(case_id),
+      source_type TEXT NOT NULL CHECK(source_type IN (
+        'git_commit','workspace_file','test_run','command_output',
+        'sqlite_query','audit_report','external_reference'
+      )),
+      source_repo TEXT NOT NULL DEFAULT '',
+      source_ref TEXT NOT NULL CHECK(length(trim(source_ref)) BETWEEN 1 AND 500),
+      summary TEXT NOT NULL CHECK(length(trim(summary)) BETWEEN 1 AND 4000),
+      artifact_sha256 TEXT CHECK(
+        artifact_sha256 IS NULL
+        OR (length(artifact_sha256) = 64 AND NOT (artifact_sha256 GLOB '*[^0-9a-f]*'))
+      ),
+      hash_status TEXT NOT NULL CHECK(
+        (hash_status IN ('verified','unverified_claimed') AND artifact_sha256 IS NOT NULL)
+        OR (hash_status IN ('unhashed','not_applicable') AND artifact_sha256 IS NULL)
+      ),
+      authority_level TEXT NOT NULL DEFAULT 'informational' CHECK(authority_level = 'informational'),
+      trust_note TEXT NOT NULL DEFAULT 'Byte identity is distinct from trustworthiness and does not grant execution or requirement authority.',
+      observed_at TEXT NOT NULL,
+      recorded_by TEXT NOT NULL CHECK(length(trim(recorded_by)) BETWEEN 1 AND 100),
+      recorded_at TEXT NOT NULL,
+      metadata_json TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE INDEX IF NOT EXISTS idx_case_evidence_case
+      ON case_evidence(case_id, observed_at, evidence_id);
+
+    CREATE TABLE IF NOT EXISTS case_discussion (
+      entry_id TEXT PRIMARY KEY,
+      case_id TEXT NOT NULL REFERENCES cases(case_id),
+      author_id TEXT NOT NULL CHECK(length(trim(author_id)) BETWEEN 1 AND 100),
+      author_role TEXT NOT NULL CHECK(author_role IN ('operator','assistant','reviewer','auditor','system')),
+      entry_type TEXT NOT NULL CHECK(entry_type IN (
+        'comment','finding','question','objection','recommendation','disposition_note'
+      )),
+      body TEXT NOT NULL CHECK(length(trim(body)) BETWEEN 1 AND 8000),
+      evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_case_discussion_case
+      ON case_discussion(case_id, created_at, entry_id);
+
+    CREATE TABLE IF NOT EXISTS case_promotions (
+      promotion_id TEXT PRIMARY KEY,
+      batch_id TEXT NOT NULL,
+      case_id TEXT NOT NULL REFERENCES cases(case_id),
+      selected_option_key TEXT NOT NULL,
+      task_index INTEGER NOT NULL CHECK(task_index >= 0),
+      task_id INTEGER NOT NULL REFERENCES tasks(id),
+      project_id TEXT NOT NULL,
+      registration_mode TEXT NOT NULL CHECK(registration_mode IN (
+        'current_generation_bootstrap','direct_unmanaged_task'
+      )),
+      fencing_generation INTEGER,
+      bootstrap_event_id TEXT,
+      authorization_ref TEXT NOT NULL CHECK(length(trim(authorization_ref)) >= 1),
+      batch_idempotency_key TEXT NOT NULL CHECK(length(trim(batch_idempotency_key)) BETWEEN 1 AND 128),
+      item_idempotency_key TEXT NOT NULL UNIQUE,
+      request_sha256 TEXT NOT NULL CHECK(
+        length(request_sha256) = 64 AND NOT (request_sha256 GLOB '*[^0-9a-f]*')
+      ),
+      promoted_by TEXT NOT NULL CHECK(length(trim(promoted_by)) >= 1),
+      promoted_at TEXT NOT NULL,
+      UNIQUE(batch_idempotency_key, task_index),
+      UNIQUE(case_id, task_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_case_promotions_case
+      ON case_promotions(case_id, task_index);
+    CREATE INDEX IF NOT EXISTS idx_case_promotions_batch
+      ON case_promotions(batch_idempotency_key, task_index);
+
+    CREATE TABLE IF NOT EXISTS case_events (
+      event_id TEXT PRIMARY KEY,
+      case_id TEXT NOT NULL REFERENCES cases(case_id),
+      event_type TEXT NOT NULL CHECK(event_type IN (
+        'created','option_added','option_deprecated','evidence_added',
+        'discussion_added','recommendation_set','status_changed',
+        'decided','reopened','promotion_recorded','deferred','rejected','closed'
+      )),
+      from_status TEXT,
+      to_status TEXT,
+      actor_id TEXT NOT NULL,
+      actor_role TEXT NOT NULL,
+      authorization_ref TEXT,
+      idempotency_key TEXT UNIQUE,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      occurred_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_case_events_case
+      ON case_events(case_id, occurred_at, event_id);
+
+    CREATE TRIGGER IF NOT EXISTS trg_case_options_no_delete
+      BEFORE DELETE ON case_options
+      BEGIN
+        SELECT RAISE(ABORT, 'case options cannot be deleted');
+      END;
+    CREATE TRIGGER IF NOT EXISTS trg_case_options_freeze_insert
+      BEFORE INSERT ON case_options
+      WHEN (SELECT status FROM cases WHERE case_id = NEW.case_id) IN ('decided','promoted','closed')
+        OR EXISTS(SELECT 1 FROM case_promotions WHERE case_id = NEW.case_id)
+      BEGIN
+        SELECT RAISE(ABORT, 'case options are frozen in current lifecycle state');
+      END;
+    CREATE TRIGGER IF NOT EXISTS trg_case_options_freeze_update
+      BEFORE UPDATE ON case_options
+      WHEN (SELECT status FROM cases WHERE case_id = NEW.case_id) IN ('decided','promoted','closed')
+        OR (SELECT status FROM cases WHERE case_id = OLD.case_id) IN ('decided','promoted','closed')
+        OR EXISTS(SELECT 1 FROM case_promotions WHERE case_id = NEW.case_id OR case_id = OLD.case_id)
+      BEGIN
+        SELECT RAISE(ABORT, 'case options are frozen in current lifecycle state');
+      END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_cases_promoted_decision_immutable
+      BEFORE UPDATE ON cases
+      WHEN EXISTS(SELECT 1 FROM case_promotions WHERE case_id = OLD.case_id)
+        AND (
+          NEW.case_id IS NOT OLD.case_id
+          OR NEW.project_id IS NOT OLD.project_id
+          OR NEW.selected_option_key IS NOT OLD.selected_option_key
+          OR NEW.decision_rationale IS NOT OLD.decision_rationale
+          OR NEW.decided_by IS NOT OLD.decided_by
+          OR NEW.decided_at IS NOT OLD.decided_at
+          OR NEW.decision_authorization_ref IS NOT OLD.decision_authorization_ref
+          OR NEW.decision_idempotency_key IS NOT OLD.decision_idempotency_key
+        )
+      BEGIN
+        SELECT RAISE(ABORT, 'promoted case decision is permanently immutable');
+      END;
+    CREATE TRIGGER IF NOT EXISTS trg_cases_promoted_no_delete
+      BEFORE DELETE ON cases
+      WHEN EXISTS(SELECT 1 FROM case_promotions WHERE case_id = OLD.case_id)
+      BEGIN
+        SELECT RAISE(ABORT, 'promoted cases cannot be deleted');
+      END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_case_evidence_no_update
+      BEFORE UPDATE ON case_evidence
+      BEGIN SELECT RAISE(ABORT, 'case evidence records are append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS trg_case_evidence_no_delete
+      BEFORE DELETE ON case_evidence
+      BEGIN SELECT RAISE(ABORT, 'case evidence records are append-only'); END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_case_discussion_no_update
+      BEFORE UPDATE ON case_discussion
+      BEGIN SELECT RAISE(ABORT, 'case discussion records are append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS trg_case_discussion_no_delete
+      BEFORE DELETE ON case_discussion
+      BEGIN SELECT RAISE(ABORT, 'case discussion records are append-only'); END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_case_promotions_no_update
+      BEFORE UPDATE ON case_promotions
+      BEGIN SELECT RAISE(ABORT, 'case promotion records are append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS trg_case_promotions_no_delete
+      BEFORE DELETE ON case_promotions
+      BEGIN SELECT RAISE(ABORT, 'case promotion records are append-only'); END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_case_events_no_update
+      BEFORE UPDATE ON case_events
+      BEGIN SELECT RAISE(ABORT, 'case events are append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS trg_case_events_no_delete
+      BEFORE DELETE ON case_events
+      BEGIN SELECT RAISE(ABORT, 'case events are append-only'); END;
+  `)
 }

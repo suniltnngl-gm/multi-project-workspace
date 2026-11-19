@@ -11,9 +11,10 @@ import Database from 'better-sqlite3'
 import { runMigrations } from './db/migrations.js'
 import { createTasksStore } from './db/tasks.js'
 import { createProjectWriterLeasesStore } from './db/projectWriterLeases.js'
-import { createTaskBootstrapStore } from './db/taskBootstrap.js'
+import { createTaskBootstrapStore, createCurrentGenerationTaskBootstrapStore } from './db/taskBootstrap.js'
 import { createProjectWriterLeaseGuard } from './projectWriterLease.js'
 import { createTaskProposalsStore } from './db/taskProposals.js'
+import { createCasesStore } from './db/cases.js'
 import { createAiJobsStore } from './db/aiJobs.js'
 import { createAiQuotaStore } from './db/aiQuota.js'
 import { createUserFilesStore } from './db/userFiles.js'
@@ -52,22 +53,29 @@ export function createDatabase(
   const gitWorktrees = createGitWorktreesStore(connection, { repositories })
   const writerLeases = createProjectWriterLeasesStore(connection)
   const taskBootstrap = createTaskBootstrapStore(connection)
+  const currentGenerationTaskBootstrap = createCurrentGenerationTaskBootstrapStore(connection)
   const writerLeaseGuard = createProjectWriterLeaseGuard({ connection, leaseStore: writerLeases, repositories: repositoryScopes, worktrees: gitWorktrees.listGitWorktrees() })
   const toolRuns = createToolRunsStore(connection)
   const tasks = createTasksStore(connection, { toolRuns, writerLeaseGuard })
   const proposals = createTaskProposalsStore(connection, { tasks })
+  const cases = createCasesStore(connection, {
+    tasks,
+    registerTaskAtCurrentGeneration: currentGenerationTaskBootstrap.registerTaskAtCurrentGeneration
+  })
   const agentRuns = createAgentRunsStore(connection)
   const agentTaskOps = createAgentTaskOpsStore(connection, { tasks, proposals, agentRuns })
   return {
     ...tasks,
     writerLeases,
     registerTaskBootstrap: taskBootstrap.registerTaskBootstrap,
+    registerTaskAtCurrentGeneration: currentGenerationTaskBootstrap.registerTaskAtCurrentGeneration,
     writerLeaseGuard,
     ...createAiJobsStore(connection),
     ...createAiQuotaStore(connection),
     ...createUserFilesStore(connection, { toolRuns }),
     ...createFoldersStore(connection),
     ...proposals,
+    ...cases,
     ...agentRuns,
     ...agentTaskOps,
     ...createAgentScriptsStore(connection, artifactDir ? { artifactDir } : {}),

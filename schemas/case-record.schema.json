@@ -1,0 +1,571 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-parent-runtime.local/schemas/case-record.schema.json",
+  "title": "Case Registry Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "authority",
+    "grants_execution_authority",
+    "case_id",
+    "project_id",
+    "title",
+    "problem_statement",
+    "status",
+    "version",
+    "options",
+    "evidence",
+    "discussion",
+    "recommendation",
+    "decision",
+    "promotion",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "authority": {
+      "type": "string",
+      "const": "decision-only"
+    },
+    "grants_execution_authority": {
+      "type": "boolean",
+      "const": false
+    },
+    "case_id": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 32,
+      "pattern": "^[A-Z][A-Z0-9]{1,7}-C-[0-9]{3,}$"
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "problem_statement": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8000
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "open",
+        "investigating",
+        "discussing",
+        "decision_ready",
+        "decided",
+        "promoted",
+        "deferred",
+        "rejected",
+        "closed"
+      ]
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "options": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "option_key",
+          "title",
+          "summary",
+          "consequences",
+          "risks",
+          "prerequisites",
+          "expected_task_count",
+          "governance_mode",
+          "created_at",
+          "deprecated_at"
+        ],
+        "properties": {
+          "option_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "consequences": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "risks": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "prerequisites": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "expected_task_count": {
+            "type": "string",
+            "enum": [
+              "none",
+              "one",
+              "multiple"
+            ]
+          },
+          "governance_mode": {
+            "type": "string",
+            "enum": [
+              "standard_task_promotion",
+              "no_task_required",
+              "requires_separate_governance_mechanism"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "minLength": 1
+          },
+          "deprecated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "evidence_id",
+          "source_type",
+          "source_repo",
+          "source_ref",
+          "summary",
+          "artifact_sha256",
+          "hash_status",
+          "authority_level",
+          "trust_note",
+          "observed_at",
+          "recorded_by",
+          "recorded_at",
+          "metadata"
+        ],
+        "properties": {
+          "evidence_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_type": {
+            "type": "string",
+            "enum": [
+              "git_commit",
+              "workspace_file",
+              "test_run",
+              "command_output",
+              "sqlite_query",
+              "audit_report",
+              "external_reference"
+            ]
+          },
+          "source_repo": {
+            "type": "string"
+          },
+          "source_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "artifact_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "hash_status": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "unverified_claimed",
+              "unhashed",
+              "not_applicable"
+            ]
+          },
+          "authority_level": {
+            "type": "string",
+            "const": "informational"
+          },
+          "trust_note": {
+            "type": "string",
+            "minLength": 1
+          },
+          "observed_at": {
+            "type": "string",
+            "minLength": 1
+          },
+          "recorded_by": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "recorded_at": {
+            "type": "string",
+            "minLength": 1
+          },
+          "metadata": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "discussion": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "entry_id",
+          "author_id",
+          "author_role",
+          "entry_type",
+          "body",
+          "evidence_refs",
+          "created_at"
+        ],
+        "properties": {
+          "entry_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "author_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "author_role": {
+            "type": "string",
+            "enum": [
+              "operator",
+              "assistant",
+              "reviewer",
+              "auditor",
+              "system"
+            ]
+          },
+          "entry_type": {
+            "type": "string",
+            "enum": [
+              "comment",
+              "finding",
+              "question",
+              "objection",
+              "recommendation",
+              "disposition_note"
+            ]
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8000
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "recommendation": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "option_key",
+        "rationale",
+        "recommended_by",
+        "recommended_at"
+      ],
+      "properties": {
+        "option_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "recommended_by": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "recommended_at": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "decision": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "selected_option",
+        "decision_rationale",
+        "decided_by",
+        "decided_at",
+        "decision_authorization_ref",
+        "decision_idempotency_key"
+      ],
+      "properties": {
+        "selected_option": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "decision_rationale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decided_by": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "decided_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decision_authorization_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decision_idempotency_key": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "promotion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority",
+        "grants_execution_authority",
+        "promoted",
+        "batch_id",
+        "authorization_ref",
+        "batch_idempotency_key",
+        "request_sha256",
+        "promoted_by",
+        "promoted_at",
+        "records"
+      ],
+      "properties": {
+        "authority": {
+          "type": "string",
+          "const": "decision-only"
+        },
+        "grants_execution_authority": {
+          "type": "boolean",
+          "const": false
+        },
+        "promoted": {
+          "type": "boolean"
+        },
+        "batch_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authorization_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "batch_idempotency_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "promoted_by": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "promoted_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "records": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "authority",
+              "grants_execution_authority",
+              "promotion_id",
+              "batch_id",
+              "task_index",
+              "task_id",
+              "project_id",
+              "registration_mode",
+              "fencing_generation",
+              "bootstrap_event_id",
+              "authorization_ref",
+              "batch_idempotency_key",
+              "item_idempotency_key",
+              "request_sha256",
+              "promoted_by",
+              "promoted_at"
+            ],
+            "properties": {
+              "authority": {
+                "type": "string",
+                "const": "decision-only"
+              },
+              "grants_execution_authority": {
+                "type": "boolean",
+                "const": false
+              },
+              "promotion_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "batch_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "task_index": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "task_id": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "project_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "registration_mode": {
+                "type": "string",
+                "enum": [
+                  "current_generation_bootstrap",
+                  "direct_unmanaged_task"
+                ]
+              },
+              "fencing_generation": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "bootstrap_event_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "minLength": 1
+              },
+              "authorization_ref": {
+                "type": "string",
+                "minLength": 1
+              },
+              "batch_idempotency_key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "item_idempotency_key": {
+                "type": "string",
+                "minLength": 1
+              },
+              "request_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "promoted_by": {
+                "type": "string",
+                "minLength": 1
+              },
+              "promoted_at": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "updated_at": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}
