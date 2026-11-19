@@ -12,6 +12,7 @@ import { runMigrations } from './db/migrations.js'
 import { createTasksStore } from './db/tasks.js'
 import { createProjectWriterLeasesStore } from './db/projectWriterLeases.js'
 import { createTaskBootstrapStore, createCurrentGenerationTaskBootstrapStore } from './db/taskBootstrap.js'
+import { createTaskReadinessStore } from './db/taskReadiness.js'
 import { createProjectWriterLeaseGuard } from './projectWriterLease.js'
 import { createTaskProposalsStore } from './db/taskProposals.js'
 import { createCasesStore } from './db/cases.js'
@@ -54,6 +55,7 @@ export function createDatabase(
   const writerLeases = createProjectWriterLeasesStore(connection)
   const taskBootstrap = createTaskBootstrapStore(connection)
   const currentGenerationTaskBootstrap = createCurrentGenerationTaskBootstrapStore(connection)
+  const taskReadiness = createTaskReadinessStore(connection)
   const writerLeaseGuard = createProjectWriterLeaseGuard({ connection, leaseStore: writerLeases, repositories: repositoryScopes, worktrees: gitWorktrees.listGitWorktrees() })
   const toolRuns = createToolRunsStore(connection)
   const tasks = createTasksStore(connection, { toolRuns, writerLeaseGuard })
@@ -69,6 +71,7 @@ export function createDatabase(
     writerLeases,
     registerTaskBootstrap: taskBootstrap.registerTaskBootstrap,
     registerTaskAtCurrentGeneration: currentGenerationTaskBootstrap.registerTaskAtCurrentGeneration,
+    recordTaskReadiness: taskReadiness.recordTaskReadiness,
     writerLeaseGuard,
     ...createAiJobsStore(connection),
     ...createAiQuotaStore(connection),
