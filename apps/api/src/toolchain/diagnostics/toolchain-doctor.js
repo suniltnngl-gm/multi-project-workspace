@@ -1,4 +1,45 @@
-export function runToolchainDoctor(inventory) {
+export function checkCliEnvironment(cliEnvironmentInventory) {
+  const checks = []
+  if (!cliEnvironmentInventory) return checks
+  const rec = 'Review permissions on the listed path; this doctor never modifies anything.'
+
+  for (const entry of cliEnvironmentInventory.cliLocations?.clis || []) {
+    for (const [kind, list] of Object.entries(entry.locations || {})) {
+      for (const loc of Array.isArray(list) ? list : []) {
+        if (loc?.status === 'inaccessible') {
+          checks.push({
+            level: 'warn',
+            area: 'cli-location',
+            message: `${entry.cli} ${kind} location is inaccessible: ${loc.path}`,
+            recommendation: rec
+          })
+        }
+      }
+    }
+  }
+
+  for (const c of cliEnvironmentInventory.sessionCorrelations?.correlations || []) {
+    if (c.cliMatched === false) {
+      checks.push({
+        level: 'warn',
+        area: 'cli-session',
+        message: `Session ${c.compositeKey} does not match any discovered CLI (${c.cli}).`,
+        recommendation: 'Verify the CLI name or install/discover the CLI.'
+      })
+    }
+    if ((c.warnings || []).includes('cache_state_unverified')) {
+      checks.push({
+        level: 'warn',
+        area: 'cli-cache',
+        message: `Cache state for session ${c.compositeKey} is unverified.`,
+        recommendation: null
+      })
+    }
+  }
+  return checks
+}
+
+export function runToolchainDoctor(inventory, { cliEnvironmentInventory = null } = {}) {
   const checks = []
 
   const add = (level, area, message, recommendation = null) => {
@@ -72,6 +113,8 @@ export function runToolchainDoctor(inventory) {
   if (!git?.available) {
     add('error', 'utilities', 'git is not available on PATH.', 'Install Git (via apt on Ubuntu or winget on Windows 11).')
   }
+
+  checks.push(...checkCliEnvironment(cliEnvironmentInventory))
 
   const summary = {
     ok: checks.filter((c) => c.level === 'ok').length,
