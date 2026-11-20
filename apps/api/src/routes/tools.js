@@ -7,12 +7,20 @@
 import { Router } from 'express'
 import { execFileSync } from 'node:child_process'
 import { findExecutable, resolvePythonCommand } from '../executables.js'
+import { scanToolchain } from '../toolchain/index.js'
+import { runToolchainDoctor } from '../toolchain/diagnostics/toolchain-doctor.js'
 
 export function createToolsRouter({ database }) {
   const router = Router()
 
   router.get('/api/tools', (_request, response) => {
     response.json(database.listTools())
+  })
+
+  router.get('/api/tools/toolchain', (_request, response) => {
+    const inventory = scanToolchain()
+    const doctor = runToolchainDoctor(inventory)
+    response.json({ inventory, doctor })
   })
 
   router.post('/api/tools/scan', async (_request, response) => {

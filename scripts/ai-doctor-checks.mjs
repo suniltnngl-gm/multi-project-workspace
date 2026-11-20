@@ -14,6 +14,8 @@ import {
   resolveQuotaProfiles
 } from '../apps/api/src/modelBudget.js'
 import { ROOT_DIR } from './env.mjs'
+import { scanToolchain } from '../apps/api/src/toolchain/index.js'
+import { runToolchainDoctor } from '../apps/api/src/toolchain/diagnostics/toolchain-doctor.js'
 
 const DEFAULT_DATABASE_PATH = resolve(ROOT_DIR, 'apps/api/data/workspace.sqlite')
 
@@ -413,4 +415,10 @@ export async function runDoctorChecks({
     await checkModelProbing(models, modelClient, record)
   }
   return { checks }
+}
+
+export function checkToolchainHealth(options = {}) {
+  const inventory = scanToolchain(options)
+  const report = runToolchainDoctor(inventory)
+  return report.checks
 }

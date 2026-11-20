@@ -6,6 +6,28 @@
 // Work State: Completed: Implemented; Active: None; Blocked: None; Next Move: Maintain as needed.
 import { existsSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
+import { loadToolchainEnvConfig } from './toolchain/configuration/env-config-loader.js'
+import { probeOnPath } from './toolchain/discovery/shared.js'
+
+const COMMAND_ENV_KEY = Object.freeze({
+  node: 'NODE_BIN',
+  uv: 'UV_BIN',
+  python: 'PYTHON_BIN',
+  python3: 'PYTHON_BIN',
+  git: 'GIT_BIN',
+  gh: 'GH_BIN',
+  curl: 'CURL_BIN',
+  jq: 'JQ_BIN',
+  rg: 'RG_BIN',
+  sqlite3: 'SQLITE3_BIN',
+  docker: 'DOCKER_BIN',
+  opencode: 'OPENCODE_BIN',
+  codex: 'CODEX_BIN',
+  claude: 'CLAUDE_BIN',
+  agy: 'AGY_BIN',
+  hermes: 'HERMES_BIN',
+  copilot: 'COPILOT_BIN'
+})
 
 export function findExecutable(
   command,
@@ -34,4 +56,56 @@ export function resolvePythonCommand(options = {}) {
     if (findExecutable(candidate, options)) return candidate
   }
   return 'python'
+}
+
+export function resolveToolchainExecutable(
+  command,
+  {
+    cwd = process.cwd(),
+    env = process.env,
+    platform = process.platform,
+    fileExists = existsSync,
+    isBrokenSymlink,
+    readText
+  } = {}
+) {
+  if (!command) {
+    return { path: null, brokenSymlink: false, brokenSymlinkPath: null, source: 'not-found' }
+  }
+  const envKey = COMMAND_ENV_KEY[String(command).toLowerCase()]
+  if (envKey) {
+    const cfg = loadToolchainEnvConfig({ cwd, env, ...(readText ? { readText } : {}) })
+    const configured = cfg.values[envKey]
+    if (configured) {
+      if (fileExists(configured)) {
+        return {
+          path: configured,
+          brokenSymlink: false,
+          brokenSymlinkPath: null,
+          source: cfg.sources[envKey] || 'env-config'
+        }
+      }
+      if (typeof isBrokenSymlink === 'function' && isBrokenSymlink(configured)) {
+        return {
+          path: null,
+          brokenSymlink: true,
+          brokenSymlinkPath: configured,
+          source: 'broken-symlink'
+        }
+      }
+    }
+  }
+  const probed = probeOnPath(command, {
+    env,
+    platform,
+    fileExists,
+    ...(isBrokenSymlink ? { isBrokenSymlink } : {})
+  })
+  if (probed.path) {
+    return { path: probed.path, brokenSymlink: false, brokenSymlinkPath: null, source: 'PATH' }
+  }
+  if (probed.brokenSymlinkPath) {
+    return { path: null, brokenSymlink: true, brokenSymlinkPath: probed.brokenSymlinkPath, source: 'broken-symlink' }
+  }
+  return { path: null, brokenSymlink: false, brokenSymlinkPath: null, source: 'not-found' }
 }
