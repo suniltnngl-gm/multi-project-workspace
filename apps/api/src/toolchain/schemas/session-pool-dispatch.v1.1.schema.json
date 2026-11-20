@@ -1,0 +1,358 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-project-workspace.local/schemas/session-pool-dispatch.v1.1.schema.json",
+  "title": "MPW Swarm Session-Pool Dispatch Plan v1.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "mode",
+    "readOnly",
+    "decidedAt",
+    "action",
+    "selectedSession",
+    "fallbackUsed",
+    "routingKey",
+    "cliArtifactBoundary",
+    "reasons",
+    "dispatchMode",
+    "quotaAssessment",
+    "idempotencyKey",
+    "candidatesEvaluated",
+    "availability",
+    "nextEligibleAt"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "session-pool-dispatch/v1.1"
+    },
+    "mode": {
+      "const": "plan"
+    },
+    "readOnly": {
+      "const": true
+    },
+    "decidedAt": {
+      "type": "string"
+    },
+    "action": {
+      "enum": [
+        "reuse_session",
+        "create_session",
+        "blocked",
+        "deferred",
+        "await_in_flight"
+      ]
+    },
+    "selectedSession": {
+      "$ref": "#/$defs/selectedSession"
+    },
+    "fallbackUsed": {
+      "type": "boolean"
+    },
+    "routingKey": {
+      "type": "string"
+    },
+    "cliArtifactBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cli",
+        "mergeNativeArtifacts"
+      ],
+      "properties": {
+        "cli": {
+          "type": "string"
+        },
+        "mergeNativeArtifacts": {
+          "const": false
+        }
+      }
+    },
+    "reasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "dispatchMode": {
+      "enum": [
+        "fallback",
+        "round-robin",
+        "parallel"
+      ]
+    },
+    "quotaAssessment": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/quotaAssessment"
+      }
+    },
+    "idempotencyKey": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "candidatesEvaluated": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/candidateEvaluated"
+      }
+    },
+    "availability": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/availability"
+      }
+    },
+    "nextEligibleAt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "rotation": {
+      "$ref": "#/$defs/rotation"
+    }
+  },
+  "$defs": {
+    "selectedSession": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "compositeKey",
+        "sessionId",
+        "cli",
+        "role",
+        "repository",
+        "gateway",
+        "provider",
+        "model",
+        "quotaPool",
+        "cacheState",
+        "health",
+        "lease"
+      ],
+      "properties": {
+        "compositeKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sessionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cli": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "repository": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gateway": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cacheState": {
+          "type": "string"
+        },
+        "quotaPool": {
+          "type": "string"
+        },
+        "health": {
+          "enum": [
+            "healthy",
+            "degraded",
+            "unknown"
+          ]
+        },
+        "lease": {
+          "$ref": "#/$defs/lease"
+        }
+      }
+    },
+    "quotaAssessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "quotaPool",
+        "health",
+        "observedAt",
+        "stale",
+        "resetAt",
+        "cooldownUntil"
+      ],
+      "properties": {
+        "quotaPool": {
+          "type": "string"
+        },
+        "health": {
+          "enum": [
+            "healthy",
+            "low",
+            "scarce",
+            "exhausted",
+            "unknown"
+          ]
+        },
+        "observedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "resetAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "lease": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "compositeKey",
+        "ttlMs",
+        "holder"
+      ],
+      "properties": {
+        "compositeKey": {
+          "type": "string"
+        },
+        "ttlMs": {
+          "type": "number"
+        },
+        "holder": {
+          "type": "string"
+        }
+      }
+    },
+    "candidateEvaluated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "quotaPool",
+        "independent",
+        "verdict",
+        "reason"
+      ],
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "quotaPool": {
+          "type": "string"
+        },
+        "independent": {
+          "type": "boolean"
+        },
+        "verdict": {
+          "enum": [
+            "selected",
+            "skipped",
+            "not_reached"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "availability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "target",
+        "state",
+        "cooldownUntil"
+      ],
+      "properties": {
+        "scope": {
+          "enum": [
+            "model",
+            "provider",
+            "gateway",
+            "quotaPool"
+          ]
+        },
+        "target": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "available",
+            "cooling_down"
+          ]
+        },
+        "cooldownUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "rotation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strategy",
+        "poolOrder"
+      ],
+      "properties": {
+        "strategy": {
+          "const": "pool-lru"
+        },
+        "poolOrder": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
