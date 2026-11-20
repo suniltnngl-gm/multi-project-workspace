@@ -13,9 +13,15 @@ for (let i = 0; i < argv.length; i++) {
 const list = (v) => (v ? String(v).split(',').filter(Boolean) : [])
 
 let sessions = []
+let registryObservations = []
 if (opts.registry) {
   const parsed = JSON.parse(readFileSync(opts.registry, 'utf8'))
   sessions = Array.isArray(parsed) ? parsed : parsed.sessions || []
+  if (!Array.isArray(parsed)) registryObservations = parsed.quotaObservations || []
+}
+if (opts['quota-observations']) {
+  const obs = JSON.parse(readFileSync(opts['quota-observations'], 'utf8'))
+  registryObservations = Array.isArray(obs) ? obs : obs.quotaObservations || []
 }
 
 const plan = resolveDispatchTarget({
@@ -27,8 +33,11 @@ const plan = resolveDispatchTarget({
     cli: opts.cli,
     model: opts.model,
     gateway: opts.gateway,
-    provider: opts.provider
+    provider: opts.provider,
+    quotaPool: opts['quota-pool'],
+    dispatchMode: opts['dispatch-mode']
   },
+  quotaObservations: registryObservations,
   unavailableModels: list(opts['unavailable-model']),
   fallbackCandidates: list(opts['fallback-model']).map((model) => ({ model }))
 })
@@ -40,7 +49,7 @@ if (opts.json) {
   process.stdout.write([
     `Session Pool Plan (${plan.schemaVersion}, read-only)`,
     `action=${plan.action} fallbackUsed=${plan.fallbackUsed} routingKey=${plan.routingKey}`,
-    s ? `session=${s.compositeKey ?? '(new)'} model=${s.model} cache=${s.cacheState}` : 'session=none',
+    s ? `session=${s.compositeKey ?? '(new)'} model=${s.model} pool=${s.quotaPool} cache=${s.cacheState}` : 'session=none',
     `reasons: ${plan.reasons.join(', ')}`
   ].join('\n') + '\n')
 }

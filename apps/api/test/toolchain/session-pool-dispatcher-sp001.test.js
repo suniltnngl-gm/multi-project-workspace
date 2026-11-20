@@ -96,3 +96,126 @@ test('swarm-session-plan.mjs --json smoke test', () => {
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// ---- SP-002: quota-pool-aware, session-affine scheduling ----
+const T0 = '2026-11-20T14:30:00Z'
+const obs = (quotaPool, extra = {}) => ({ quotaPool, observedAt: T0, ...extra })
+const ses = (sessionId, extra = {}) => ({ ...base, role: 'worker', sessionId, cacheState: 'warm_observed', ...extra })
+
+test('SP-002 backward compat: omitted quotaPool defaults to provider, then cli, then unknown', () => {
+  const plan = resolveDispatchTarget({ sessions: [ses('a')], request, now })
+  assert.equal(plan.selectedSession.quotaPool, 'google')
+  assert.equal(plan.dispatchMode, 'fallback')
+  assert.deepEqual(plan.quotaAssessment.map((q) => q.health), ['unknown'])
+  assertInventorySchema(plan, schema, 'compat plan')
+  const noProvider = resolveDispatchTarget({
+    sessions: [], request: { role: 'worker', cli: 'agy', model: 'm' }, now
+  })
+  assert.equal(noProvider.selectedSession.quotaPool, 'agy')
+  assert.equal(noProvider.cliArtifactBoundary.mergeNativeArtifacts, false)
+})
+
+test('SP-002 quotaPool is part of the affinity/routing key', () => {
+  const sessions = [ses('a', { quotaPool: 'pool-a' }), ses('b', { quotaPool: 'pool-b' })]
+  const plan = resolveDispatchTarget({ sessions, request: { ...request, quotaPool: 'pool-b' }, now })
+  assert.equal(plan.selectedSession.sessionId, 'b')
+  assert.ok(plan.routingKey.endsWith('|pool-b'))
+  const none = resolveDispatchTarget({ sessions, request: { ...request, quotaPool: 'pool-z' }, now })
+  assert.equal(none.action, 'create_session')
+})
+
+test('SP-002 scarce/conserve pool is avoided when a healthier independent pool has an eligible session', () => {
+  const sessions = [ses('scarce', { quotaPool: 'acct-a' }), ses('ok', { quotaPool: 'acct-b', cacheState: 'unknown' })]
+  for (const o of [obs('acct-a', { policy: 'conserve' }), obs('acct-a', { weeklyRemainingPct: 5 })]) {
+    const plan = resolveDispatchTarget({ sessions, request, quotaObservations: [o, obs('acct-b', { weeklyRemainingPct: 80 })], now })
+    assert.equal(plan.selectedSession.sessionId, 'ok')
+    assert.equal(plan.selectedSession.quotaPool, 'acct-b')
+    assertInventorySchema(plan, schema, 'conserve plan')
+  }
+  const only = resolveDispatchTarget({ sessions: [sessions[0]], request, quotaObservations: [obs('acct-a', { policy: 'conserve' })], now })
+  assert.equal(only.action, 'reuse_session')
+  assert.ok(only.reasons.some((r) => r.startsWith('scarce_pool_reused_no_healthier_alternative')))
+})
+
+test('SP-002 healthy warm session wins; quotaObservations are timestamped, latest wins, stale ignored', () => {
+  const sessions = [ses('cold', { quotaPool: 'p1', cacheState: 'unknown' }), ses('warm', { quotaPool: 'p2' })]
+  const healthy = resolveDispatchTarget({
+    sessions, request, now,
+    quotaObservations: [obs('p1', { weeklyRemainingPct: 90 }), obs('p2', { weeklyRemainingPct: 90 })]
+  })
+  assert.equal(healthy.selectedSession.sessionId, 'warm')
+  assert.equal(healthy.quotaAssessment.find((q) => q.quotaPool === 'p2').observedAt, '2026-11-20T14:30:00.000Z')
+
+  // later observation supersedes an earlier scarce one
+  const recovered = resolveDispatchTarget({
+    sessions, request, now,
+    quotaObservations: [
+      obs('p2', { weeklyRemainingPct: 2 }),
+      { quotaPool: 'p2', observedAt: '2026-11-20T14:50:00Z', weeklyRemainingPct: 70 }
+    ]
+  })
+  assert.equal(recovered.selectedSession.sessionId, 'warm')
+
+  // stale scarce observation is not treated as permanent config
+  const stale = resolveDispatchTarget({
+    sessions, request, now,
+    quotaObservations: [{ quotaPool: 'p2', observedAt: '2026-11-19T00:00:00Z', policy: 'conserve' }]
+  })
+  assert.equal(stale.selectedSession.sessionId, 'warm')
+  assert.equal(stale.quotaAssessment.find((q) => q.quotaPool === 'p2').stale, true)
+})
+
+test('SP-002 shared quota pool: fallback prefers an independent pool over a same-pool model switch', () => {
+  const sessions = [
+    ses('claude', { model: 'claude', provider: 'anthropic', quotaPool: 'agy-claude-gpt' }),
+    ses('gpt', { model: 'gpt', provider: 'openai', quotaPool: 'agy-claude-gpt' }),
+    ses('gem', { model: 'gemini', provider: 'google', quotaPool: 'agy-gemini' })
+  ]
+  const plan = resolveDispatchTarget({
+    sessions,
+    request: { ...request, model: 'claude', provider: 'anthropic', quotaPool: 'agy-claude-gpt' },
+    unavailableModels: ['claude'],
+    fallbackCandidates: [
+      { model: 'gpt', provider: 'openai', quotaPool: 'agy-claude-gpt' },
+      { model: 'gemini', provider: 'google', quotaPool: 'agy-gemini' }
+    ],
+    quotaObservations: [obs('agy-claude-gpt', { policy: 'conserve' })],
+    now
+  })
+  assert.equal(plan.action, 'reuse_session')
+  assert.equal(plan.fallbackUsed, true)
+  assert.equal(plan.selectedSession.sessionId, 'gem')
+  assert.equal(plan.selectedSession.quotaPool, 'agy-gemini')
+  assert.ok(plan.reasons.includes('fallback_independent_quota_pool:agy-gemini'))
+  assertInventorySchema(plan, schema, 'shared-pool plan')
+
+  // only a same-pool fallback exists: still allowed, flagged as shared
+  const shared = resolveDispatchTarget({
+    sessions, request: { ...request, model: 'claude', provider: 'anthropic', quotaPool: 'agy-claude-gpt' },
+    unavailableModels: ['claude'],
+    fallbackCandidates: [{ model: 'gpt', provider: 'openai', quotaPool: 'agy-claude-gpt' }],
+    now
+  })
+  assert.equal(shared.selectedSession.sessionId, 'gpt')
+  assert.ok(shared.reasons.includes('fallback_shares_quota_pool:agy-claude-gpt'))
+})
+
+test('SP-002 multi-role sessions and dispatch modes; role isolation still holds', () => {
+  const multi = ses('multi', { role: undefined, roles: ['reviewer', 'worker'] })
+  assert.equal(resolveDispatchTarget({ sessions: [multi], request, now }).selectedSession.sessionId, 'multi')
+  assert.equal(resolveDispatchTarget({ sessions: [multi], request: { ...request, role: 'reviewer' }, now }).action, 'reuse_session')
+  assert.equal(resolveDispatchTarget({ sessions: [multi], request: { ...request, role: 'publisher' }, now }).action, 'create_session')
+
+  const rr = [ses('old', { lastUsedAt: '2026-11-20T10:00:00Z' }), ses('new', { lastUsedAt: '2026-11-20T14:00:00Z' })]
+  const rrPlan = resolveDispatchTarget({ sessions: rr, request: { ...request, dispatchMode: 'round-robin' }, now })
+  assert.equal(rrPlan.selectedSession.sessionId, 'old')
+
+  const par = [ses('busy', { status: 'active' }), ses('free', { status: 'idle' })]
+  assert.equal(resolveDispatchTarget({ sessions: par, request: { ...request, dispatchMode: 'parallel' }, now }).selectedSession.sessionId, 'free')
+
+  const fbOnly = ses('fb', { dispatchModes: ['fallback'] })
+  assert.equal(resolveDispatchTarget({ sessions: [fbOnly], request: { ...request, dispatchMode: 'parallel' }, now }).action, 'create_session')
+  const bad = resolveDispatchTarget({ sessions: [], request: { ...request, dispatchMode: 'weird' }, now })
+  assert.equal(bad.action, 'blocked')
+  assertInventorySchema(bad, schema, 'bad-mode plan')
+})

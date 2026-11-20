@@ -14,7 +14,9 @@
     "fallbackUsed",
     "routingKey",
     "cliArtifactBoundary",
-    "reasons"
+    "reasons",
+    "dispatchMode",
+    "quotaAssessment"
   ],
   "properties": {
     "schemaVersion": {
@@ -66,6 +68,19 @@
       "items": {
         "type": "string"
       }
+    },
+    "dispatchMode": {
+      "enum": [
+        "fallback",
+        "round-robin",
+        "parallel"
+      ]
+    },
+    "quotaAssessment": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/quotaAssessment"
+      }
     }
   },
   "$defs": {
@@ -84,6 +99,7 @@
         "gateway",
         "provider",
         "model",
+        "quotaPool",
         "cacheState"
       ],
       "properties": {
@@ -131,6 +147,41 @@
         },
         "cacheState": {
           "type": "string"
+        },
+        "quotaPool": {
+          "type": "string"
+        }
+      }
+    },
+    "quotaAssessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "quotaPool",
+        "health",
+        "observedAt",
+        "stale"
+      ],
+      "properties": {
+        "quotaPool": {
+          "type": "string"
+        },
+        "health": {
+          "enum": [
+            "healthy",
+            "low",
+            "scarce",
+            "unknown"
+          ]
+        },
+        "observedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stale": {
+          "type": "boolean"
         }
       }
     }
