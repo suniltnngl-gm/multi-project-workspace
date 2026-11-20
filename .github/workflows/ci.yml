@@ -31,7 +31,7 @@ jobs:
       - name: Install dependencies
         run: |
           npm ci
-          uv sync --project apps/python
+          uv sync --frozen --project apps/python
 
       - name: Lint
         run: npm run lint
