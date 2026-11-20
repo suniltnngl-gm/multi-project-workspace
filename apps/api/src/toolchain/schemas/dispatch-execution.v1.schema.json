@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Dispatch Execution Record",
+  "type": "object",
+  "required": [
+    "idempotencyKey",
+    "decidedAt",
+    "action",
+    "outcome",
+    "cliArtifactBoundary"
+  ],
+  "properties": {
+    "idempotencyKey": { "type": "string" },
+    "decidedAt": { "type": "string" },
+    "action": { "enum": ["reuse_session", "create_session"] },
+    "outcome": { "enum": ["succeeded", "failed", "timed_out", "blocked", "deferred", "await_in_flight"] },
+    "exitCode": { "type": ["integer", "null"] },
+    "signal": { "type": ["string", "null"] },
+    "durationMs": { "type": ["integer", "null"] },
+    "cliArtifactBoundary": {
+      "type": "object",
+      "required": ["mergeNativeArtifacts"],
+      "properties": {
+        "mergeNativeArtifacts": { "const": false }
+      },
+      "additionalProperties": false
+    },
+    "reason": { "type": ["string", "null"] },
+    "nextEligibleAt": { "type": ["string", "null"] }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Lease Record",
+  "type": "object",
+  "required": [
+    "v",
+    "kind",
+    "key",
+    "token",
+    "acquiredAt",
+    "expiresAt"
+  ],
+  "properties": {
+    "v": { "const": 1 },
+    "kind": { "enum": ["lease", "run", "slot"] },
+    "key": { "type": "string" },
+    "holder": { "type": ["string", "null"] },
+    "token": { "type": "string" },
+    "pid": { "type": ["integer", "null"] },
+    "hostname": { "type": ["string", "null"] },
+    "acquiredAt": { "type": "string" },
+    "expiresAt": { "type": "string" },
+    "status": { "enum": ["running", "succeeded", "failed"] },
+    "compositeKey": { "type": ["string", "null"] },
+    "leaseExpiresAt": { "type": ["string", "null"] },
+    "finishedAt": { "type": ["string", "null"] }
+  },
+  "additionalProperties": true
+}
