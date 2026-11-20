@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-project-workspace.local/schemas/cli-location-manifest.v1.schema.json",
+  "title": "MPW Multi-CLI Location Manifest v1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "mode", "readOnly", "observedAt", "platform", "clis"],
+  "properties": {
+    "schemaVersion": { "const": "cli-location-manifest/v1.0" },
+    "mode": { "const": "scan" },
+    "readOnly": { "const": true },
+    "observedAt": { "type": "string" },
+    "platform": { "type": "string" },
+    "clis": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/cliEntry" }
+    }
+  },
+  "$defs": {
+    "locationEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind", "exists", "readable", "writable", "source", "confidence", "scope", "status"],
+      "properties": {
+        "path": { "type": "string" },
+        "kind": { "enum": ["config", "skills", "agents", "plugins", "mcp", "sessions", "artifacts", "temp", "cache", "sandbox"] },
+        "exists": { "type": "boolean" },
+        "readable": { "type": "boolean" },
+        "writable": { "type": "boolean" },
+        "source": { "type": "string" },
+        "confidence": { "enum": ["verified", "inferred", "unknown"] },
+        "scope": { "enum": ["user", "workspace", "system"] },
+        "status": { "enum": ["verified", "not_found", "inaccessible", "unknown"] }
+      }
+    },
+    "cliEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cli", "version", "platform", "locations", "discovery"],
+      "properties": {
+        "cli": { "type": "string" },
+        "version": { "type": ["string", "null"] },
+        "platform": { "type": "string" },
+        "locations": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["config", "skills", "agents", "plugins", "mcp", "sessions", "artifacts", "temp", "cache", "sandbox"],
+          "properties": {
+            "config": { "type": "array", "items": { "$ref": "#/$defs/locationEntry" } },
+            "skills": { "type": "array", "items": { "$ref": "#/$defs/locationEntry" } },
+            "agents": { "type": "array", "items": { "$ref": "#/$defs/locationEntry" } },
+            "plugins": { "type": "array", "items": { "$ref": "#/$defs/locationEntry" } },
+            "mcp": { "type": "array", "items": { "$ref": "#/$defs/locationEntry" } },
+            "sessions": { "type": "array", "items": { "$ref": "#/$defs/locationEntry" } },
+            "artifacts": { "type": "array", "items": { "$ref": "#/$defs/locationEntry" } },
+            "temp": { "type": "array", "items": { "$ref": "#/$defs/locationEntry" } },
+            "cache": { "type": "array", "items": { "$ref": "#/$defs/locationEntry" } },
+            "sandbox": { "type": "array", "items": { "$ref": "#/$defs/locationEntry" } }
+          }
+        },
+        "discovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["method", "verified", "observedAt"],
+          "properties": {
+            "method": { "type": "string" },
+            "verified": { "type": "boolean" },
+            "observedAt": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}
