@@ -526,7 +526,11 @@ test('doctor warns when a synced AGY 5h or weekly window has expired and passes 
     if (process.platform !== 'win32') await chmod(agyCommand, 0o755)
 
     const dbPath = join(dir, 'doctor.sqlite')
-    const agyEnv = { PATH: binDir }
+    const agyEnv = {
+      PATH: binDir,
+      AGY_AI_GEMINI_MAX_REQUESTS_PER_5H: '100',
+      AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK: '500'
+    }
     const models = createModelRegistry({ env: agyEnv })
     const profiles = resolveQuotaProfiles({ env: agyEnv, profiles: modelQuotaProfiles(models) })
     let clockMs = Date.parse('2026-11-14T12:00:00Z')

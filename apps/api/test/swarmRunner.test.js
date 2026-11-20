@@ -1387,7 +1387,11 @@ test('planSwarm and createSwarm surface syncAudit drift warnings when an AGY win
     await writeFile(agyCommand, process.platform === 'win32' ? '@echo off\r\nexit /b 0\r\n' : '#!/bin/sh\nexit 0\n')
     if (process.platform !== 'win32') await chmod(agyCommand, 0o755)
 
-    const agyEnv = { PATH: binDir }
+    const agyEnv = {
+      PATH: binDir,
+      AGY_AI_GEMINI_MAX_REQUESTS_PER_5H: '100',
+      AGY_AI_GEMINI_MAX_REQUESTS_PER_WEEK: '500'
+    }
     const models = createModelRegistry({ env: agyEnv })
     const profiles = resolveQuotaProfiles({ env: agyEnv, profiles: modelQuotaProfiles(models) })
     let clockMs = Date.parse('2026-11-14T12:00:00Z')
