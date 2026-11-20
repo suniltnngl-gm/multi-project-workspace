@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { after, before, test } from 'node:test'
@@ -1381,7 +1381,13 @@ test('planSwarm and createSwarm surface syncAudit drift warnings when an AGY win
   const tempDir = await mkdtemp(join(tmpdir(), 'swarm-sync-audit-'))
   const db = createDatabase(join(tempDir, 'workspace.sqlite'))
   try {
-    const agyEnv = { AGY_AI_URL: 'http://127.0.0.1:19999' }
+    const binDir = join(tempDir, 'bin')
+    await mkdir(binDir)
+    const agyCommand = join(binDir, process.platform === 'win32' ? 'agy.cmd' : 'agy')
+    await writeFile(agyCommand, process.platform === 'win32' ? '@echo off\r\nexit /b 0\r\n' : '#!/bin/sh\nexit 0\n')
+    if (process.platform !== 'win32') await chmod(agyCommand, 0o755)
+
+    const agyEnv = { PATH: binDir }
     const models = createModelRegistry({ env: agyEnv })
     const profiles = resolveQuotaProfiles({ env: agyEnv, profiles: modelQuotaProfiles(models) })
     let clockMs = Date.parse('2026-11-14T12:00:00Z')

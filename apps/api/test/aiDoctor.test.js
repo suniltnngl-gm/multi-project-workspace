@@ -519,8 +519,14 @@ test('doctor flags repo-internal or loose-permission GEMINI_API_PAID_CONFIG_HOME
 test('doctor warns when a synced AGY 5h or weekly window has expired and passes when current', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'doctor-sync-audit-'))
   try {
+    const binDir = join(dir, 'bin')
+    await mkdir(binDir)
+    const agyCommand = join(binDir, process.platform === 'win32' ? 'agy.cmd' : 'agy')
+    await writeFile(agyCommand, process.platform === 'win32' ? '@echo off\r\nexit /b 0\r\n' : '#!/bin/sh\nexit 0\n')
+    if (process.platform !== 'win32') await chmod(agyCommand, 0o755)
+
     const dbPath = join(dir, 'doctor.sqlite')
-    const agyEnv = { AGY_AI_URL: 'http://127.0.0.1:19999' }
+    const agyEnv = { PATH: binDir }
     const models = createModelRegistry({ env: agyEnv })
     const profiles = resolveQuotaProfiles({ env: agyEnv, profiles: modelQuotaProfiles(models) })
     let clockMs = Date.parse('2026-11-14T12:00:00Z')
