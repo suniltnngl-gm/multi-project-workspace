@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-project-workspace.local/schemas/toolchain-inventory.v1.schema.json",
+  "title": "MPW Cross-Platform Toolchain Inventory v1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "mode",
+    "readOnly",
+    "scannedAt",
+    "os",
+    "shells",
+    "node",
+    "python",
+    "packageManagers",
+    "utilities",
+    "aiClis"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "toolchain-inventory/v1.0" },
+    "mode": { "const": "scan" },
+    "readOnly": { "const": true },
+    "scannedAt": { "type": "string" },
+    "os": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "arch", "release", "family", "distro", "isWindows", "isLinux", "isWsl", "wslDistro"],
+      "properties": {
+        "platform": { "type": "string" },
+        "arch": { "type": "string" },
+        "release": { "type": "string" },
+        "family": { "enum": ["windows", "linux", "macos", "other"] },
+        "distro": { "type": ["string", "null"] },
+        "isWindows": { "type": "boolean" },
+        "isLinux": { "type": "boolean" },
+        "isWsl": { "type": "boolean" },
+        "wslDistro": { "type": ["string", "null"] }
+      }
+    },
+    "shells": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["currentShell", "detected"],
+      "properties": {
+        "currentShell": { "type": "string" },
+        "detected": { "type": "array", "items": { "$ref": "#/$defs/toolRecord" } }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["active", "managers", "npm", "companions"],
+      "properties": {
+        "active": { "$ref": "#/$defs/toolRecord" },
+        "managers": {
+          "type": "object",
+          "required": ["fnm", "nvm", "volta", "mise", "asdf"],
+          "properties": {
+            "fnm": {
+              "type": "object",
+              "required": ["detected", "path", "fnmDir", "multishellPath", "multishellActive"],
+              "properties": {
+                "detected": { "type": "boolean" },
+                "path": { "type": ["string", "null"] },
+                "fnmDir": { "type": ["string", "null"] },
+                "multishellPath": { "type": ["string", "null"] },
+                "multishellActive": { "type": "boolean" }
+              }
+            },
+            "nvm": {
+              "type": "object",
+              "required": ["detected", "nvmDir", "nvmBin"],
+              "properties": {
+                "detected": { "type": "boolean" },
+                "nvmDir": { "type": ["string", "null"] },
+                "nvmBin": { "type": ["string", "null"] }
+              }
+            },
+            "volta": { "type": "object", "required": ["detected", "path"] },
+            "mise": { "type": "object", "required": ["detected", "path"] },
+            "asdf": { "type": "object", "required": ["detected", "path"] }
+          }
+        },
+        "npm": { "$ref": "#/$defs/toolRecord" },
+        "companions": { "type": "array", "items": { "$ref": "#/$defs/toolRecord" } }
+      }
+    },
+    "python": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["active", "uv", "uvManagedPython", "windowsPyLauncher", "projectVenv", "activeVirtualEnv", "pip", "pipx"],
+      "properties": {
+        "active": { "$ref": "#/$defs/toolRecord" },
+        "uv": { "$ref": "#/$defs/toolRecord" },
+        "uvManagedPython": { "$ref": "#/$defs/toolRecord" },
+        "windowsPyLauncher": { "$ref": "#/$defs/toolRecord" },
+        "projectVenv": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["detected", "root", "interpreter", "activationScripts"],
+          "properties": {
+            "detected": { "type": "boolean" },
+            "root": { "type": ["string", "null"] },
+            "interpreter": { "type": ["string", "null"] },
+            "activationScripts": {
+              "type": "object",
+              "required": ["bash", "powershell", "cmd"],
+              "properties": {
+                "bash": { "type": ["string", "null"] },
+                "powershell": { "type": ["string", "null"] },
+                "cmd": { "type": ["string", "null"] }
+              }
+            }
+          }
+        },
+        "activeVirtualEnv": { "type": ["string", "null"] },
+        "pip": { "$ref": "#/$defs/toolRecord" },
+        "pipx": { "$ref": "#/$defs/toolRecord" }
+      }
+    },
+    "packageManagers": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/toolRecord" }
+    },
+    "utilities": { "type": "array", "items": { "$ref": "#/$defs/toolRecord" } },
+    "aiClis": { "type": "array", "items": { "$ref": "#/$defs/toolRecord" } }
+  },
+  "$defs": {
+    "toolRecord": {
+      "type": "object",
+      "required": [
+        "name",
+        "available",
+        "path",
+        "version",
+        "installMethod",
+        "installRoot",
+        "discoverySource",
+        "active",
+        "managedBy",
+        "availableInCurrentShell",
+        "usableByChildProcess",
+        "brokenSymlink",
+        "brokenSymlinkPath"
+      ],
+      "properties": {
+        "name": { "type": "string" },
+        "available": { "type": "boolean" },
+        "path": { "type": ["string", "null"] },
+        "version": { "type": ["string", "null"] },
+        "installMethod": { "type": "string" },
+        "installRoot": { "type": ["string", "null"] },
+        "discoverySource": { "type": "string" },
+        "active": { "type": "boolean" },
+        "managedBy": { "type": ["string", "null"] },
+        "availableInCurrentShell": { "type": "boolean" },
+        "usableByChildProcess": { "type": "boolean" },
+        "brokenSymlink": { "type": "boolean" },
+        "brokenSymlinkPath": { "type": ["string", "null"] }
+      }
+    }
+  }
+}
