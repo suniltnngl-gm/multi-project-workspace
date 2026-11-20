@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-project-workspace.local/schemas/session-pool-dispatch.v1.schema.json",
+  "title": "MPW Swarm Session-Pool Dispatch Plan v1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "mode",
+    "readOnly",
+    "decidedAt",
+    "action",
+    "selectedSession",
+    "fallbackUsed",
+    "routingKey",
+    "cliArtifactBoundary",
+    "reasons"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "session-pool-dispatch/v1.0"
+    },
+    "mode": {
+      "const": "plan"
+    },
+    "readOnly": {
+      "const": true
+    },
+    "decidedAt": {
+      "type": "string"
+    },
+    "action": {
+      "enum": [
+        "reuse_session",
+        "create_session",
+        "blocked"
+      ]
+    },
+    "selectedSession": {
+      "$ref": "#/$defs/selectedSession"
+    },
+    "fallbackUsed": {
+      "type": "boolean"
+    },
+    "routingKey": {
+      "type": "string"
+    },
+    "cliArtifactBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cli",
+        "mergeNativeArtifacts"
+      ],
+      "properties": {
+        "cli": {
+          "type": "string"
+        },
+        "mergeNativeArtifacts": {
+          "const": false
+        }
+      }
+    },
+    "reasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "selectedSession": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "compositeKey",
+        "sessionId",
+        "cli",
+        "role",
+        "repository",
+        "gateway",
+        "provider",
+        "model",
+        "cacheState"
+      ],
+      "properties": {
+        "compositeKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sessionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cli": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "repository": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gateway": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cacheState": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
