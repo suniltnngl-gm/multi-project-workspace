@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-project-workspace.local/schemas/session-correlation.v1.schema.json",
+  "title": "MPW Multi-CLI Session & Artifact Correlation v1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "mode", "readOnly", "correlatedAt", "correlations"],
+  "properties": {
+    "schemaVersion": { "const": "session-correlation/v1.0" },
+    "mode": { "const": "scan" },
+    "readOnly": { "const": true },
+    "correlatedAt": { "type": "string" },
+    "correlations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/correlationEntry" }
+    }
+  },
+  "$defs": {
+    "correlationEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "compositeKey",
+        "name",
+        "cli",
+        "sessionId",
+        "role",
+        "repository",
+        "workItem",
+        "gateway",
+        "provider",
+        "model",
+        "status",
+        "cliMatched",
+        "observed",
+        "inferred",
+        "warnings"
+      ],
+      "properties": {
+        "compositeKey": { "type": "string" },
+        "name": { "type": "string" },
+        "cli": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "role": { "type": "string" },
+        "repository": { "type": ["string", "null"] },
+        "workItem": { "type": ["string", "null"] },
+        "gateway": { "type": ["string", "null"] },
+        "provider": { "type": ["string", "null"] },
+        "model": { "type": ["string", "null"] },
+        "status": { "type": "string" },
+        "cliMatched": { "type": "boolean" },
+        "observed": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cacheState", "verifiedArtifactDirs", "verifiedSessionDirs", "verifiedTempDirs", "verifiedSandboxDirs"],
+          "properties": {
+            "cacheState": { "enum": ["warm_observed", "cold_observed", "unknown", "invalidated_suspected"] },
+            "verifiedArtifactDirs": { "type": "array", "items": { "type": "string" } },
+            "verifiedSessionDirs": { "type": "array", "items": { "type": "string" } },
+            "verifiedTempDirs": { "type": "array", "items": { "type": "string" } },
+            "verifiedSandboxDirs": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "inferred": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["candidateArtifactDirs", "candidateSessionDirs", "inaccessiblePaths"],
+          "properties": {
+            "candidateArtifactDirs": { "type": "array", "items": { "type": "string" } },
+            "candidateSessionDirs": { "type": "array", "items": { "type": "string" } },
+            "inaccessiblePaths": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}
