@@ -187,3 +187,45 @@ test('P5.3 OpenCode, Hermes, and Copilot adapters resolve Linux and Windows path
   assert.equal(winManifest.clis.find((c) => c.cli === 'hermes').locations.config[0].status, 'verified')
   assert.equal(winManifest.clis.find((c) => c.cli === 'copilot').locations.config[1].status, 'verified')
 })
+
+test('Cline and Vibe adapters resolve Linux and Windows locations and pass schema', () => {
+  const linuxExisting = new Set(['/home/dev/.cline', '/home/dev/.cline/skills', '/work/.vibe'])
+  const linux = discoverCliLocations({
+    platform: 'linux',
+    cwd: '/work',
+    env: { HOME: '/home/dev' },
+    fileExists: (p) => linuxExisting.has(p),
+    canRead: () => true,
+    canWrite: () => false,
+    now: () => Date.parse('2026-11-20T16:00:00Z')
+  })
+  assertInventorySchema(linux, manifestSchema, 'Linux Cline/Vibe manifest')
+  const cline = linux.clis.find((c) => c.cli === 'cline')
+  assert.equal(cline.locations.config[0].path, '/home/dev/.cline')
+  assert.equal(cline.locations.config[0].status, 'verified')
+  assert.equal(cline.locations.skills[1].path, '/work/.clinerules')
+  assert.equal(cline.locations.skills[1].scope, 'workspace')
+  assert.equal(cline.locations.sessions[0].status, 'not_found')
+  const vibe = linux.clis.find((c) => c.cli === 'vibe')
+  assert.equal(vibe.locations.config[1].path, '/work/.vibe')
+  assert.equal(vibe.locations.config[1].status, 'verified')
+  assert.equal(vibe.locations.sessions[0].path, '/home/dev/.vibe/sessions')
+
+  const win = discoverCliLocations({
+    platform: 'win32',
+    cwd: 'C:\\Proj',
+    env: { USERPROFILE: 'C:\\Users\\dev', CLINE_DIR: 'D:\\cline', VIBE_HOME: 'D:\\vibe' },
+    fileExists: (p) => p === 'D:\\cline' || p === 'D:\\vibe\\skills',
+    canRead: () => true,
+    canWrite: () => true,
+    now: () => Date.parse('2026-11-20T16:00:00Z')
+  })
+  assertInventorySchema(win, manifestSchema, 'Windows Cline/Vibe manifest')
+  const wCline = win.clis.find((c) => c.cli === 'cline')
+  assert.equal(wCline.locations.config[0].status, 'verified')
+  assert.equal(wCline.locations.sessions[0].path, 'D:\\cline\\sessions')
+  assert.equal(wCline.locations.skills[1].path, 'C:\\Proj\\.clinerules')
+  const wVibe = win.clis.find((c) => c.cli === 'vibe')
+  assert.equal(wVibe.locations.skills[0].status, 'verified')
+  assert.equal(wVibe.locations.config[1].path, 'C:\\Proj\\.vibe')
+})

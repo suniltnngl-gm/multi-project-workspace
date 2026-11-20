@@ -12,7 +12,7 @@ const loadSchema = (name) => JSON.parse(readFileSync(resolve(repoRoot, 'apps/api
 const manifestSchema = loadSchema('cli-location-manifest.schema.json')
 const correlationSchema = loadSchema('session-correlation.schema.json')
 const now = () => Date.parse('2026-11-20T15:00:00Z')
-const CLIS = ['agy', 'claude', 'codex', 'opencode', 'hermes', 'copilot']
+const CLIS = ['agy', 'claude', 'codex', 'opencode', 'hermes', 'copilot', 'cline', 'vibe']
 
 const SESSIONS = [
   ...CLIS.map((cli) => ({ cli, sessionId: `${cli}-1`, cacheState: 'warm_observed' })),
