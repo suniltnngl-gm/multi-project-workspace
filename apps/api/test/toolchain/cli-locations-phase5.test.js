@@ -140,3 +140,50 @@ test('inspectLocation handles unknown, EACCES, ELOOP, and real temp-dir verified
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('P5.3 OpenCode, Hermes, and Copilot adapters resolve Linux and Windows paths and pass schema', () => {
+  const linuxExisting = new Set([
+    '/home/dev/.config/opencode',
+    '/home/dev/.config/opencode/opencode.json',
+    '/home/dev/.hermes/config.yaml',
+    '/home/dev/.hermes/hermes-agent',
+    '/home/dev/.copilot',
+    '/workspace/proj/.github/copilot-instructions.md'
+  ])
+  const linuxManifest = discoverCliLocations({
+    platform: 'linux',
+    cwd: '/workspace/proj',
+    env: { HOME: '/home/dev' },
+    fileExists: (p) => linuxExisting.has(p),
+    canRead: (p) => linuxExisting.has(p),
+    canWrite: () => false,
+    now: () => Date.parse('2026-11-20T14:10:00Z')
+  })
+  assertInventorySchema(linuxManifest, manifestSchema, 'Linux P5.3 manifest')
+  assert.equal(linuxManifest.clis.find((c) => c.cli === 'opencode').locations.mcp[0].status, 'verified')
+  assert.equal(linuxManifest.clis.find((c) => c.cli === 'hermes').locations.config[0].status, 'verified')
+  assert.equal(linuxManifest.clis.find((c) => c.cli === 'copilot').locations.skills[1].status, 'verified')
+
+  const winExisting = new Set([
+    'C:\\Users\\dev\\AppData\\Roaming\\opencode',
+    'C:\\Users\\dev\\.hermes\\config.yaml',
+    'C:\\Users\\dev\\AppData\\Roaming\\GitHub CLI'
+  ])
+  const winManifest = discoverCliLocations({
+    platform: 'win32',
+    cwd: 'C:\\Proj',
+    env: {
+      USERPROFILE: 'C:\\Users\\dev',
+      APPDATA: 'C:\\Users\\dev\\AppData\\Roaming',
+      LOCALAPPDATA: 'C:\\Users\\dev\\AppData\\Local'
+    },
+    fileExists: (p) => winExisting.has(p),
+    canRead: (p) => winExisting.has(p),
+    canWrite: () => true,
+    now: () => Date.parse('2026-11-20T14:10:00Z')
+  })
+  assertInventorySchema(winManifest, manifestSchema, 'Windows P5.3 manifest')
+  assert.equal(winManifest.clis.find((c) => c.cli === 'opencode').locations.config[0].status, 'verified')
+  assert.equal(winManifest.clis.find((c) => c.cli === 'hermes').locations.config[0].status, 'verified')
+  assert.equal(winManifest.clis.find((c) => c.cli === 'copilot').locations.config[1].status, 'verified')
+})
