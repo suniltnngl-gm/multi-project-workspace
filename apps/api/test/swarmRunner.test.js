@@ -1381,8 +1381,9 @@ test('planSwarm and createSwarm surface syncAudit drift warnings when an AGY win
   const tempDir = await mkdtemp(join(tmpdir(), 'swarm-sync-audit-'))
   const db = createDatabase(join(tempDir, 'workspace.sqlite'))
   try {
-    const models = createModelRegistry({ env: {} })
-    const profiles = resolveQuotaProfiles({ env: {}, profiles: modelQuotaProfiles(models) })
+    const agyEnv = { AGY_AI_URL: 'http://127.0.0.1:19999' }
+    const models = createModelRegistry({ env: agyEnv })
+    const profiles = resolveQuotaProfiles({ env: agyEnv, profiles: modelQuotaProfiles(models) })
     let clockMs = Date.parse('2026-11-14T12:00:00Z')
     const budget = createModelBudget({
       repository: db,

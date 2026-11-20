@@ -520,8 +520,9 @@ test('doctor warns when a synced AGY 5h or weekly window has expired and passes 
   const dir = await mkdtemp(join(tmpdir(), 'doctor-sync-audit-'))
   try {
     const dbPath = join(dir, 'doctor.sqlite')
-    const models = createModelRegistry({ env: {} })
-    const profiles = resolveQuotaProfiles({ env: {}, profiles: modelQuotaProfiles(models) })
+    const agyEnv = { AGY_AI_URL: 'http://127.0.0.1:19999' }
+    const models = createModelRegistry({ env: agyEnv })
+    const profiles = resolveQuotaProfiles({ env: agyEnv, profiles: modelQuotaProfiles(models) })
     let clockMs = Date.parse('2026-11-14T12:00:00Z')
     const db = createDatabase(dbPath)
     try {
@@ -538,7 +539,7 @@ test('doctor warns when a synced AGY 5h or weekly window has expired and passes 
     }
 
     const freshChecks = checkAgySyncCalibration(models, {
-      env: {},
+      env: agyEnv,
       databasePath: dbPath,
       now: () => clockMs + 5 * 60_000
     })
@@ -547,7 +548,7 @@ test('doctor warns when a synced AGY 5h or weekly window has expired and passes 
     assert.match(freshChecks[0].message, /AGY quota calibration is current/)
 
     const expiredChecks = checkAgySyncCalibration(models, {
-      env: {},
+      env: agyEnv,
       databasePath: dbPath,
       now: () => clockMs + 20 * 60_000
     })

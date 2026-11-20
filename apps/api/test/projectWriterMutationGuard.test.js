@@ -10,7 +10,8 @@ test('rejects traversal, symlink escape and Task 142 reserved paths',()=>{const 
 import { createDatabase } from '../src/database.js'
 import { execFileSync } from 'node:child_process'
 test('managed task and event writes fail closed without lease and pass with current fenced generation',()=>{
- const d=mkdtempSync(join(tmpdir(),'task-fence-')),dbPath=join(d,'workspace.sqlite'),repoRoot=process.cwd(),bridgeRoot='/home/sunilkr/Code/curl-ai-bridge'
+ const d=mkdtempSync(join(tmpdir(),'task-fence-')),dbPath=join(d,'workspace.sqlite'),repoRoot=process.cwd(),bridgeRoot=join(d,'bridge-repo')
+ mkdirSync(bridgeRoot);execFileSync('git',['init','-q',bridgeRoot]);execFileSync('git',['-C',bridgeRoot,'config','user.email','lease-test@example.invalid']);execFileSync('git',['-C',bridgeRoot,'config','user.name','Lease Test']);writeFileSync(join(bridgeRoot,'README.md'),'fixture\n');execFileSync('git',['-C',bridgeRoot,'add','README.md']);execFileSync('git',['-C',bridgeRoot,'commit','-qm','fixture'])
  const seed=new Database(dbPath);seed.exec('CREATE TABLE repositories(id INTEGER PRIMARY KEY,name TEXT UNIQUE,root_path TEXT UNIQUE,created_at TEXT,updated_at TEXT)');seed.prepare('INSERT INTO repositories VALUES(?,?,?,?,?)').run(1,'multi-project-workspace',repoRoot,new Date().toISOString(),new Date().toISOString());seed.prepare('INSERT INTO repositories VALUES(?,?,?,?,?)').run(4,'curl-ai-bridge',bridgeRoot,new Date().toISOString(),new Date().toISOString());seed.close()
  const db=createDatabase(dbPath,{rootDir:repoRoot})
  try {
