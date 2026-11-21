@@ -45,6 +45,11 @@ const GATES = [
   { key: 'build', role: 'builder', fallbackRole: 'builder+worker-fallback' }
 ]
 
+const SESSION_POLICIES = new Set(['per-gate', 'pinned'])
+const MAX_CONSECUTIVE_REJECTIONS = 2
+// Upstream failures that invalidate the pinned session rather than merely rejecting a checkpoint.
+const ROTATION_ERROR_PATTERN = /\b(429|503)\b|rate.?limit|exhaust|resource_exhausted|overloaded/i
+
 // ---- Guardrail 3a: registry-derived sessions + fallback candidates -------------------
 function loadRegistry(registryPath) {
   const parsed = readJson(registryPath)
@@ -86,7 +91,7 @@ function resolveQuotaPool({ quotaPoolArg, role, cli, model, sessions }) {
 // An unparseable, missing or ambiguous verdict is REJECT. Never default to ACCEPT.
 // The verdict must be the only token on its line: a trailing word such as
 // "VERDICT: ACCEPT REJECT" is ambiguous and rejects.
-function parseVerdict(text) {
+function parseVerdictText(text) {
   if (typeof text !== 'string' || !text.trim()) return { verdict: 'REJECT', reason: 'empty_review_output' }
   const matches = [...text.matchAll(/^\s*VERDICT\s*:\s*(ACCEPT|REJECT|DEFER)\s*$/gim)]
   if (matches.length !== 1) {
@@ -97,7 +102,12 @@ function parseVerdict(text) {
   return { verdict, reason: null }
 }
 
-async function runGate({ gate, ctx }) {
+// Fail-closed wrapper around a review-output file.
+function parseVerdict(text) {
+  return parseVerdictText(text)
+}
+
+async function runGate({ gate, ctx, sessionPolicy, pinned }) {
   const { pool, source } = resolveQuotaPool({
     quotaPoolArg: opts['quota-pool'],
     role: gate.role,
@@ -109,23 +119,35 @@ async function runGate({ gate, ctx }) {
     return { action: 'blocked', reasons: [`quota_pool_unresolved:${gate.cli}/${gate.model}`], poolSource: source }
   }
 
+  // SP-006: in pinned mode, restrict the candidate pool to the pinned session so the
+  // dispatcher cannot silently re-select a different one. The pin is by session identity,
+  // not by role: the same worker owns plan, build and publish. Falls back to the full pool
+  // only when the caller passes no pin (rotation already decided by the caller).
+  const candidates = sessionPolicy === 'pinned' && pinned?.sessionId
+    ? ctx.registry.sessions.filter((s) => s.sessionId === pinned.sessionId)
+    : ctx.registry.sessions
+
   const plan = resolveDispatchTarget({
     schemaVersion: 'v1.1',
-    sessions: ctx.registry.sessions,
+    sessions: candidates,
     fallbackCandidates: ctx.registry.fallbackCandidates,
     quotaObservations: ctx.observations.quotaObservations,
     providerObservations: [...ctx.registry.providerObservations, ...ctx.observations.providerObservations],
     leases: ctx.observations.leases,
     inFlight: ctx.observations.inFlight,
+    poolUsage: ctx.observations.poolUsage,
     unavailableModels: [],
     request: {
-      role: gate.role,
+      // Pinned mode: the pinned session's own role/model/cli govern, so the same worker
+      // can carry plan, build and publish. per-gate mode: the caller's role/model apply.
+      role: sessionPolicy === 'pinned' && pinned ? (pinned.role ?? gate.role) : gate.role,
       repository: opts.repository,
       workItem: opts['work-item'],
-      cli: gate.cli,
-      model: gate.model,
+      cli: sessionPolicy === 'pinned' && pinned ? (pinned.cli ?? gate.cli) : gate.cli,
+      model: sessionPolicy === 'pinned' && pinned ? (pinned.model ?? gate.model) : gate.model,
       quotaPool: pool,
-      dispatchMode: 'fallback',
+      // pinned -> round-robin across independent pools; per-gate -> SP-005 fallback behaviour
+      dispatchMode: sessionPolicy === 'pinned' ? 'round-robin' : 'fallback',
       forceRetry: opts['force-retry'] === true
     }
   })
@@ -160,7 +182,8 @@ async function runGate({ gate, ctx }) {
     now: ctx.now
   })
 
-  return { ...executed, plan, poolSource: source, pool }
+  const verdict = parseVerdictText(gate.verdictText)
+  return { ...executed, plan, poolSource: source, pool, verdict: verdict.verdict, verdictReason: verdict.reason }
 }
 
 async function main() {
@@ -178,6 +201,22 @@ async function main() {
   const gate = { evaluateResourceGate: (params) => evaluateResourceGate({ ...params, config: resolveGateConfig({ env: process.env }) }) }
 
   const registry = loadRegistry(opts.registry)
+  // SP-006 decision 4: derive poolUsage from stateDir runs + registry, no new state file.
+  // Shape required by resolveV11: [{ quotaPool, lastUsedAt }].
+  const poolUsage = Object.entries(
+    (snapshot.inFlight || []).reduce((acc, f) => {
+      const ck = f?.compositeKey
+      if (!ck) return acc
+      const sid = ck.includes(':') ? ck.slice(ck.indexOf(':') + 1) : null
+      const match = registry.sessions.find((s) => s.sessionId && ck.includes(s.sessionId))
+      const qp = match?.quotaPool
+      if (!qp) return acc
+      const at = f?.startedAt ?? null
+      if (!acc[qp] || (at && acc[qp] < at)) acc[qp] = at
+      return acc
+    }, {})
+  ).map(([quotaPool, lastUsedAt]) => ({ quotaPool, lastUsedAt }))
+
   const ctx = {
     registry,
     observations: {
@@ -185,7 +224,8 @@ async function main() {
       inFlight: snapshot.inFlight || [],
       // Registry quota observations must reach the dispatcher's v1.1 quota assessment.
       quotaObservations: registry.quotaObservations || [],
-      providerObservations
+      providerObservations,
+      poolUsage
     },
     store,
     gate,
@@ -193,7 +233,17 @@ async function main() {
     now
   }
 
+  const sessionPolicy = SESSION_POLICIES.has(opts['session-policy']) ? opts['session-policy'] : 'per-gate'
+  if (opts['session-policy'] && !SESSION_POLICIES.has(opts['session-policy'])) {
+    fail(`invalid --session-policy '${opts['session-policy']}' (expected per-gate or pinned)`)
+  }
+
   const results = []
+  // SP-006 pinning state. `pinned` is set once a gate produces a resumable session and is
+  // held for subsequent gates; it is dropped on upstream failure or after 2 rejections.
+  let pinned = null
+  let consecutiveRejections = 0
+
   for (const gateDef of GATES) {
     const cli = opts[`${gateDef.key}-cli`]
     const model = opts[`${gateDef.key}-model`]
@@ -202,13 +252,52 @@ async function main() {
       results.push({ gate: gateDef.key, action: 'blocked', reasons: [`missing_gate_input:${gateDef.key}`] })
       continue
     }
-    const outcome = await runGate({
-      gate: { ...gateDef, cli, model, prompt },
-      ctx
+
+    let outcome = await runGate({
+      gate: { ...gateDef, cli, model, prompt, verdictText: opts[`${gateDef.key}-verdict`] },
+      ctx, sessionPolicy, pinned
     })
     const gateName = gateDef.key
-    const record = { ...outcome, gate: gateName, gateName, cli, model }
+    let record = { ...outcome, gate: gateName, gateName, cli, model }
     if (!record.action) record.action = outcome.outcome ?? 'unknown'
+
+    // Pin on the first gate that yields a resumable session.
+    if (sessionPolicy === 'pinned' && !pinned && outcome.plan?.selectedSession?.sessionId) {
+      const sel = outcome.plan.selectedSession
+      pinned = { sessionId: sel.sessionId, compositeKey: sel.compositeKey, role: sel.role, cli: sel.cli, model: sel.model }
+    }
+
+    // Replan/rebuild loop: same pinned worker, bounded by MAX_CONSECUTIVE_REJECTIONS.
+    // A missing verdict is fail-closed REJECT but is not a worker rejection: it must not
+    // consume the rejection budget or trigger rotation.
+    let attempts = 0
+    while (sessionPolicy === 'pinned' && outcome.verdict === 'REJECT' && attempts < MAX_CONSECUTIVE_REJECTIONS) {
+      const errText = JSON.stringify(outcome)
+      if (ROTATION_ERROR_PATTERN.test(errText)) break
+      if (outcome.verdictReason === 'empty_review_output' || outcome.verdictReason === 'no_review_output_supplied') break
+      attempts += 1
+      consecutiveRejections += 1
+      outcome = await runGate({
+        gate: { ...gateDef, cli, model, prompt, verdictText: opts[`${gateDef.key}-verdict`] },
+        ctx, sessionPolicy, pinned
+      })
+      record = { ...outcome, gate: gateName, gateName, cli, model }
+      if (!record.action) record.action = outcome.outcome ?? 'unknown'
+    }
+
+    // Rotate: drop the pin so the next gate selects from the full independent pool.
+    if (sessionPolicy === 'pinned' && outcome.verdict === 'REJECT') {
+      const errText = JSON.stringify(outcome)
+      if (ROTATION_ERROR_PATTERN.test(errText) || consecutiveRejections >= MAX_CONSECUTIVE_REJECTIONS) {
+        pinned = null
+        record.rotated = true
+        record.rotationReason = ROTATION_ERROR_PATTERN.test(errText) ? 'upstream_failure' : `max_rejections:${MAX_CONSECUTIVE_REJECTIONS}`
+      }
+    }
+    if (outcome.verdict !== 'REJECT') consecutiveRejections = 0
+
+    record.attempts = attempts
+    record.pinnedSessionId = pinned?.sessionId ?? null
     results.push(record)
 
     if (outcome.action === 'blocked' || outcome.action === 'deferred') break
@@ -230,7 +319,15 @@ async function main() {
   const summary = {
     schemaVersion: 'swarm-run/v1',
     mode: opts.execute ? 'execute' : 'dry-run',
-    publish: { stopped: publishBlocked, authorized: opts['allow-publish'] === true },
+    sessionPolicy,
+    pinnedSessionId: pinned?.sessionId ?? null,
+    publish: {
+      stopped: publishBlocked,
+      authorized: opts['allow-publish'] === true,
+      // Decision 3: stop-only by default. With --allow-publish the same pinned worker
+      // performs the publish; the wrapper never publishes without it.
+      executorSessionId: opts['allow-publish'] ? (pinned?.sessionId ?? null) : null
+    },
     review,
     gates: results,
     stateDir
