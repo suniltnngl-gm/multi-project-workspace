@@ -49,8 +49,9 @@ const GATES = [
 function loadRegistry(registryPath) {
   const parsed = readJson(registryPath)
   const sessions = Array.isArray(parsed) ? parsed : parsed.sessions || []
+  const resumable = sessions.filter((s) => s && s.sessionId)
   const fallbackCandidates = sessions
-    .filter((s) => String(s.role || '').includes('fallback') && s.model)
+    .filter((s) => String(s.role || '').includes('fallback') && s.model && s.sessionId)
     .map((s) => ({
       model: s.model,
       quotaPool: s.cli,
@@ -59,7 +60,7 @@ function loadRegistry(registryPath) {
       sessionId: s.sessionId ?? s.session_id ?? null
     }))
   return {
-    sessions,
+    sessions: resumable,
     fallbackCandidates,
     quotaObservations: Array.isArray(parsed) ? [] : parsed.quotaObservations || [],
     providerObservations: Array.isArray(parsed) ? [] : parsed.providerObservations || []

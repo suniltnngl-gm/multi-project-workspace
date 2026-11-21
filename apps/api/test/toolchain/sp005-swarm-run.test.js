@@ -14,9 +14,9 @@ const LIVE_REGISTRY = '/home/sunilkr/.local/state/curl-ai-bridge/sessions/agy-se
 function makeRegistry(dir) {
   const registryPath = join(dir, 'registry.json')
   const sessions = [
-    { name: 'plan', role: 'planner', cli: 'agy', model: 'claude-opus-5-5-medium', quotaPool: 'agy-gemini', repository: 'multi-project-workspace', status: 'idle' },
-    { name: 'build', role: 'builder', cli: 'agy', model: 'claude-sonnet-5-5-medium', quotaPool: 'agy-claude-gpt', repository: 'multi-project-workspace', status: 'idle' },
-    { name: 'build-fb', role: 'builder+worker-fallback', cli: 'opencode', model: 'console-nvidia/google/gemma-4-31b-it', quotaPool: 'opencode-console-nvidia', repository: 'multi-project-workspace', status: 'idle' }
+    { name: 'plan', role: 'planner', cli: 'agy', model: 'claude-opus-5-5-medium', quotaPool: 'agy-gemini', repository: 'multi-project-workspace', status: 'idle', sessionId: 'ses_fixture_planner' },
+    { name: 'build', role: 'builder', cli: 'agy', model: 'claude-sonnet-5-5-medium', quotaPool: 'agy-claude-gpt', repository: 'multi-project-workspace', status: 'idle', sessionId: 'ses_fixture_builder' },
+    { name: 'build-fb', role: 'builder+worker-fallback', cli: 'opencode', model: 'console-nvidia/google/gemma-4-31b-it', quotaPool: 'opencode-console-nvidia', repository: 'multi-project-workspace', status: 'idle', sessionId: 'ses_fixture_fallback' }
   ]
   writeFileSync(registryPath, JSON.stringify({ schemaVersion: 'agy-session-registry/v1.8', sessions, quotaObservations: [] }))
   return registryPath
@@ -199,6 +199,39 @@ test('guardrail 3: registry quota observations reach the dispatcher', () => {
     const sawQuota = JSON.stringify(out).includes('agy-claude-gpt')
     assert.ok(sawQuota, 'registry quota observation should be visible in the plan output')
     rmSync(registryDir, { recursive: true, force: true })
+  } finally { rmSync(state, { recursive: true, force: true }) }
+})
+
+test('sessions without a sessionId are never planned for reuse', () => {
+  const state = tmpState()
+  try {
+    // Registry whose sessions carry no sessionId: the wrapper must not offer them
+    // to the planner, which would otherwise emit an unresumable reuse_session.
+    const registryPath = join(state, 'registry-noid.json')
+    const sessions = [
+      { role: 'planner', cli: 'agy', model: 'claude-opus-5-5-medium', quotaPool: 'agy-gemini', repository: 'multi-project-workspace', status: 'idle' },
+      { role: 'builder', cli: 'agy', model: 'claude-sonnet-5-5-medium', quotaPool: 'agy-claude-gpt', repository: 'multi-project-workspace', status: 'idle' }
+    ]
+    writeFileSync(registryPath, JSON.stringify({ sessions, quotaObservations: [] }))
+    const review = writeReview(state, 'VERDICT: ACCEPT\n')
+    const res = run([
+      '--registry', registryPath,
+      '--repository', 'multi-project-workspace',
+      '--work-item', 'SP-005',
+      '--state-dir', state,
+      '--plan-cli', 'agy',
+      '--plan-model', 'claude-opus-5-5-medium',
+      '--plan-prompt', 'p',
+      '--build-cli', 'agy',
+      '--build-model', 'claude-sonnet-5-5-medium',
+      '--build-prompt', 'b',
+      '--review-output', review,
+      '--json'
+    ])
+    const out = JSON.parse(res.stdout)
+    for (const g of out.gates) {
+      assert.notEqual(g.action, 'reuse_session', `gate ${g.gate} must not plan reuse_session without a sessionId`)
+    }
   } finally { rmSync(state, { recursive: true, force: true }) }
 })
 
