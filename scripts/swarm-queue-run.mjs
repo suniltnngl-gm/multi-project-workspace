@@ -70,6 +70,7 @@ function runJob({ job, task, ctx }) {
       '--state-dir', opts['state-dir'] || queueDir,
       '--json'
     ]
+    if (opts.registry) args.push('--registry', resolve(opts.registry))
     if (job.type === 'plan') {
       args.push('--plan-cli', ctx.cli, '--plan-model', ctx.model, '--plan-prompt', ctx.prompt || `plan ${task.taskId}`)
     } else if (job.type === 'build') {
