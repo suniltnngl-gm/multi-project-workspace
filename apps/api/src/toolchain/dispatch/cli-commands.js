@@ -104,7 +104,7 @@ const CLI_ENV = {
   agy: [],
   opencode: ['OPENCODE_CONFIG', 'OPENCODE_CONFIG_DIR'],
   cline: ['CLINE_DIR'],
-  vibe: ['VIBE_HOME', 'VIBE_CWD'],
+  vibe: ['VIBE_HOME', 'VIBE_CWD', 'DBUS_SESSION_BUS_ADDRESS'],
   hermes: ['HERMES_HOME']
 }
 
