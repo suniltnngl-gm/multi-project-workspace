@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multi-parent-runtime.local/schemas/swarm-job-queue.schema.json",
+  "title": "Swarm Job Queue Task",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["taskId", "state", "jobs", "queue"],
+  "properties": {
+    "taskId": { "type": "string", "minLength": 1 },
+    "state": {
+      "type": "string",
+      "enum": ["queued", "planning", "building", "review_plan", "review_build", "ready_to_publish", "publishing", "done", "parked"]
+    },
+    "pinned": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["sessionId", "compositeKey"],
+      "properties": {
+        "sessionId": { "type": "string", "minLength": 1 },
+        "compositeKey": { "type": "string", "minLength": 1 },
+        "role": { "type": ["string", "null"] },
+        "cli": { "type": ["string", "null"] },
+        "model": { "type": ["string", "null"] }
+      }
+    },
+    "jobs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "type", "status"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "type": { "type": "string", "enum": ["plan", "build", "publish", "review"] },
+          "status": { "type": "string", "enum": ["pending", "running", "done", "failed", "skipped"] },
+          "attempts": { "type": "integer", "minimum": 0 },
+          "timeoutMs": { "type": "integer", "minimum": 1000 },
+          "result": {},
+          "verdict": { "type": ["string", "null"] },
+          "reason": { "type": ["string", "null"] },
+          "reviewedAt": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "queue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "updatedAt", "revision"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "revision": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
