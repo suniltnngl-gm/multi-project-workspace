@@ -60,13 +60,13 @@ const winOpts = (env = {}) => ({
   now
 })
 
-test('Ubuntu 24.04 matrix: 6 adapters + correlation + doctor + schemas', () => {
+test('Ubuntu 24.04 matrix: 8 adapters + correlation + doctor + schemas', () => {
   const inv = buildCliEnvironmentInventory({ ...linuxOpts(), sessions: SESSIONS })
   const report = verifyMatrix(inv, 'linux')
   assert.ok(report.checks.some((c) => c.area === 'cli-location'))
 })
 
-test('Windows 11 matrix: 6 adapters + env overrides + correlation + doctor + schemas', () => {
+test('Windows 11 matrix: 8 adapters + env overrides + correlation + doctor + schemas', () => {
   const inv = buildCliEnvironmentInventory({
     ...winOpts({ CODEX_HOME: 'C:\\custom\\codex' }),
     sessions: SESSIONS
