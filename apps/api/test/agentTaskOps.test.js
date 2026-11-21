@@ -85,7 +85,7 @@ test('the parent can create and update scoped tasks with activity events', () =>
       op_id: 'conflict-child',
       op: 'update_task',
       task_id: child.id,
-      expected_updated_at: child.updated_at,
+      expected_updated_at: '2000-01-01 00:00:00',
       fields: { work_active: 'Stale write.' }
     }]
   })
