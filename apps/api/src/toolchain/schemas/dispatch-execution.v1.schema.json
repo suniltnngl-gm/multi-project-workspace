@@ -10,9 +10,9 @@
     "cliArtifactBoundary"
   ],
   "properties": {
-    "idempotencyKey": { "type": "string" },
+    "idempotencyKey": { "type": ["string", "null"] },
     "decidedAt": { "type": "string" },
-    "action": { "enum": ["reuse_session", "create_session"] },
+    "action": { "enum": ["reuse_session", "create_session", "blocked", "deferred", "await_in_flight"] },
     "outcome": { "enum": ["succeeded", "failed", "timed_out", "blocked", "deferred", "await_in_flight"] },
     "exitCode": { "type": ["integer", "null"] },
     "signal": { "type": ["string", "null"] },

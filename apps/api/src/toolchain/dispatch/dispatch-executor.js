@@ -21,28 +21,30 @@ export async function runDispatch({
   killGraceMs = 5000,
   renewEveryMs = 5 * 60 * 1000,
 }) {
+  const record = (outcome, extra = {}) => ({ idempotencyKey: plan?.idempotencyKey ?? null, decidedAt: plan?.decidedAt ?? new Date(now()).toISOString(), action: ['reuse_session', 'create_session', 'blocked', 'deferred', 'await_in_flight'].includes(plan?.action) ? plan.action : 'blocked', outcome, cliArtifactBoundary: { mergeNativeArtifacts: false }, reason: null, nextEligibleAt: null, exitCode: null, signal: null, durationMs: null, ...extra })
   // 1. Precondition Checks
-  if (plan.schemaVersion !== 'v1.1') {
-    return { outcome: 'blocked', reason: `executor_contract_violation:schema_version_${plan.schemaVersion}` }
+  if (!plan || plan.schemaVersion !== 'v1.1') {
+    return record('blocked', { reason: `executor_contract_violation:schema_version_${plan?.schemaVersion}` })
   }
   if (plan.cliArtifactBoundary?.mergeNativeArtifacts !== false) {
-    return { outcome: 'blocked', reason: 'executor_contract_violation:mergeNativeArtifacts_must_be_false' }
+    return record('blocked', { reason: 'executor_contract_violation:mergeNativeArtifacts_must_be_false' })
   }
   if (['blocked', 'deferred', 'await_in_flight'].includes(plan.outcome)) {
     return plan
   }
   if (!['reuse_session', 'create_session'].includes(plan.action)) {
-    return { outcome: 'blocked', reason: `executor_contract_violation:invalid_action_${plan.action}` }
+    return record('blocked', { reason: `executor_contract_violation:invalid_action_${plan.action}` })
   }
+  if (!['dry-run', 'execute'].includes(mode)) return record('blocked', { reason: `executor_contract_violation:invalid_mode_${mode}` })
   if (mode === 'execute' && !plan.idempotencyKey) {
-    throw new Error('idempotencyKey is required for execute mode')
+    return record('blocked', { reason: 'idempotencyKey is required for execute mode' })
   }
 
   // 2. Stale check (snapshot)
   const snap = store.snapshot()
   const currentLease = snap.leases.find(l => l.compositeKey === plan.compositeKey)
   if (currentLease && currentLease.holder !== plan.idempotencyKey) {
-    return { outcome: 'deferred', reason: `lease_conflict:${plan.compositeKey}` }
+    return record('deferred', { reason: `lease_conflict:${plan.compositeKey}` })
   }
 
   // 3. Resource Gate
@@ -53,7 +55,7 @@ export async function runDispatch({
     nowMs: now()
   })
   if (gateResult.verdict === 'deferred') {
-    return { outcome: 'deferred', reason: gateResult.primaryReason, nextEligibleAt: gateResult.nextEligibleAt, gate: gateResult }
+    return record('deferred', { reason: gateResult.primaryReason, nextEligibleAt: gateResult.nextEligibleAt })
   }
 
   // 4. Dry Run
@@ -67,9 +69,10 @@ export async function runDispatch({
       prompt: plan.prompt,
       cwd: plan.cwd
     })
-    if (!cmd.ok) return { outcome: 'blocked', reason: cmd.reason }
+    if (!cmd.ok) return record('blocked', { reason: cmd.reason })
 
     return {
+      mode: 'dry-run',
       wouldSpawn: {
         bin: cmd.bin,
         argv: redactArgv(cmd.argv, plan.prompt),
@@ -91,24 +94,24 @@ export async function runDispatch({
     const runRes = store.acquireRun({
       idempotencyKey: plan.idempotencyKey,
       compositeKey: plan.compositeKey,
-      ttlMs: 15 * 60 * 1000 // Default
+      ttlMs: plan.runTtlMs ?? 15 * 60 * 1000
     })
-    if (!runRes.ok) return { outcome: runRes.outcome, reason: runRes.reason, nextEligibleAt: runRes.nextEligibleAt }
+    if (!runRes.ok) return record(runRes.outcome, { reason: runRes.reason, nextEligibleAt: runRes.nextEligibleAt })
     runHandle = runRes.handle
 
     const slotRes = store.acquireSlot({ max: gateResult.limits.maxConcurrentProcesses })
     if (!slotRes.ok) {
       store.release(runHandle)
-      return { outcome: 'deferred', reason: slotRes.reason, nextEligibleAt: slotRes.nextEligibleAt }
+      return record('deferred', { reason: slotRes.reason, nextEligibleAt: slotRes.nextEligibleAt })
     }
     slotHandle = slotRes.handle
 
     if (plan.compositeKey) {
-      const leaseRes = store.acquireLease({ compositeKey: plan.compositeKey, holder: plan.idempotencyKey })
+      const leaseRes = store.acquireLease({ compositeKey: plan.compositeKey, holder: plan.idempotencyKey, ttlMs: plan.leaseTtlMs })
       if (!leaseRes.ok) {
         store.release(runHandle)
         store.release(slotHandle)
-        return { outcome: 'deferred', reason: leaseRes.reason, nextEligibleAt: leaseRes.expiresAt }
+        return record('deferred', { reason: leaseRes.reason, nextEligibleAt: leaseRes.expiresAt })
       }
       leaseHandle = leaseRes.handle
     }
@@ -200,17 +203,11 @@ export async function runDispatch({
     const finalOutcome = classified.outcome === 'timed_out' ? 'timed_out' : (classified.outcome === 'failed' ? 'failed' : 'succeeded')
     store.finalizeRun(runHandle, finalOutcome)
 
-    return {
-      outcome: finalOutcome,
-      exitCode: result.exitCode,
-      signal: result.signal,
-      durationMs: now() - startTime,
-      cliArtifactBoundary: { mergeNativeArtifacts: false }
-    }
+    return record(finalOutcome, { exitCode: result.exitCode, signal: result.signal, durationMs: now() - startTime })
 
   } catch (err) {
     if (runHandle) store.finalizeRun(runHandle, 'failed')
-    return { outcome: 'failed', reason: err.message, cliArtifactBoundary: { mergeNativeArtifacts: false } }
+    return record('failed', { reason: err.message })
   } finally {
     if (timer) clearInterval(timer)
     if (leaseHandle) {

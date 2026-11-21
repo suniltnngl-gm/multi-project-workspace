@@ -84,6 +84,10 @@ describe('sp004-executor', () => {
     })
 
     assert.strictEqual(res.outcome, 'succeeded')
+    assert.equal(res.idempotencyKey, 'exec-run-id')
+    assert.equal(res.action, 'reuse_session')
+    assert.equal(res.cliArtifactBoundary.mergeNativeArtifacts, false)
+    assert.equal(typeof res.decidedAt, 'string')
     
     const snap = store.snapshot()
     assert.strictEqual(snap.leases.length, 0)
