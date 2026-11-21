@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve, dirname } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
-const REPO = '/home/sunilkr/Code/multi-project-workspace'
+// Resolve the repository root from this test file's location, not a hardcoded
+// host path: CI checks out to a different absolute path.
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..')
 const SCRIPT = join(REPO, 'scripts', 'swarm-run.mjs')
 // The live registry path is host-specific and absent on CI runners. Tests build a
 // deterministic fixture registry instead of depending on operator-local state.
