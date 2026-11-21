@@ -7,7 +7,20 @@ import test from 'node:test'
 
 const REPO = '/home/sunilkr/Code/multi-project-workspace'
 const SCRIPT = join(REPO, 'scripts', 'swarm-run.mjs')
-const REGISTRY = '/home/sunilkr/.local/state/curl-ai-bridge/sessions/agy-sessions.json'
+// The live registry path is host-specific and absent on CI runners. Tests build a
+// deterministic fixture registry instead of depending on operator-local state.
+const LIVE_REGISTRY = '/home/sunilkr/.local/state/curl-ai-bridge/sessions/agy-sessions.json'
+
+function makeRegistry(dir) {
+  const registryPath = join(dir, 'registry.json')
+  const sessions = [
+    { name: 'plan', role: 'planner', cli: 'agy', model: 'claude-opus-5-5-medium', quotaPool: 'agy-gemini', repository: 'multi-project-workspace', status: 'idle' },
+    { name: 'build', role: 'builder', cli: 'agy', model: 'claude-sonnet-5-5-medium', quotaPool: 'agy-claude-gpt', repository: 'multi-project-workspace', status: 'idle' },
+    { name: 'build-fb', role: 'builder+worker-fallback', cli: 'opencode', model: 'console-nvidia/google/gemma-4-31b-it', quotaPool: 'opencode-console-nvidia', repository: 'multi-project-workspace', status: 'idle' }
+  ]
+  writeFileSync(registryPath, JSON.stringify({ schemaVersion: 'agy-session-registry/v1.8', sessions, quotaObservations: [] }))
+  return registryPath
+}
 
 function run(args, { cwd = REPO } = {}) {
   return spawnSync(process.execPath, [SCRIPT, ...args], { cwd, encoding: 'utf8' })
@@ -24,8 +37,9 @@ function writeReview(dir, text) {
 }
 
 function baseArgs(stateDir, extra = {}) {
+  const registry = makeRegistry(stateDir)
   return [
-    '--registry', REGISTRY,
+    '--registry', registry,
     '--repository', 'multi-project-workspace',
     '--work-item', 'SP-005',
     '--state-dir', stateDir,
@@ -153,8 +167,7 @@ test('guardrail 3: registry quota observations reach the dispatcher', () => {
     // A registry whose quotaObservations mark the resolved pool exhausted.
     const registryDir = mkdtempSync(join(tmpdir(), 'sp005-reg-'))
     const registryPath = join(registryDir, 'registry.json')
-    const base = readFileSync(REGISTRY, 'utf8')
-    const parsed = JSON.parse(base)
+    const parsed = JSON.parse(readFileSync(makeRegistry(registryDir), 'utf8'))
     parsed.quotaObservations = [{
       pool: 'agy-claude-gpt',
       health: 'exhausted',
