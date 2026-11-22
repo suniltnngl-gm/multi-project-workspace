@@ -75,3 +75,23 @@ test('swarm-overnight.mjs --dry-run runs bounded ticks and writes atomic overnig
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('swarm-overnight.mjs supports --auto-discover and --lesson-sync in --dry-run mode', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'overnight-discover-'))
+  try {
+    const stateDir = join(dir, 'state')
+    const queueDir = join(dir, 'queue')
+    const caseDir = join(dir, 'cases')
+    const out = execFileSync(
+      process.execPath,
+      [CLI_PATH, '--state-dir', stateDir, '--queue-dir', queueDir, '--case-dir', caseDir, '--auto-discover', '--lesson-sync', '--max-ticks', '1', '--dry-run', '--json'],
+      { encoding: 'utf8' }
+    )
+    const parsed = JSON.parse(out)
+    assert.strictEqual(parsed.ok, true)
+    assert.strictEqual(parsed.autoDiscover, true)
+    assert.strictEqual(parsed.lessonSyncRan, true)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
