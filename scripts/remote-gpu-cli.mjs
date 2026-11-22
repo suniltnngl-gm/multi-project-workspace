@@ -17,8 +17,10 @@ const DEFAULT_SESSIONS_DIR = process.env.REMOTE_GPU_SESSIONS_DIR || join(homedir
 const MAX_HISTORY_TURNS = 4
 
 export const REMOTE_GPU_MODELS = Object.freeze({
-  colab: { lane: 'colab', quotaPool: 'colab-gpu', transport: 'cli', modelId: 'colab-gpu-model' },
-  kaggle: { lane: 'kaggle', quotaPool: 'kaggle-gpu', transport: 'kaggle-cli', modelId: 'kaggle-gpu-model' }
+  colab: { lane: 'colab', quotaPool: 'colab-gpu', transport: 'cli', modelId: 'colab-gpu-runtime' },
+  kaggle: { lane: 'kaggle', quotaPool: 'kaggle-gpu', transport: 'kaggle-cli', modelId: 'Qwen/Qwen2.5-Coder-3B-Instruct' },
+  'kaggle-tpu': { lane: 'kaggle-tpu', quotaPool: 'kaggle-tpu', transport: 'kaggle-cli', modelId: 'kaggle-tpu-jax-placeholder', placeholder: true },
+  'kaggle-ai-models': { lane: 'kaggle-ai-models', quotaPool: 'kaggle-ai-models', transport: 'kaggle-api', modelId: 'kaggle-ai-models-placeholder', placeholder: true }
 })
 
 export function loadRemoteGpuConfig(configPath = DEFAULT_CONFIG_PATH) {
@@ -61,6 +63,14 @@ export function selectRemoteGpuLane({
   if (preferred === 'kaggle') {
     if (kaggleEligible) return { ok: true, lane: 'kaggle', quotaPool: 'kaggle-gpu', fallbackUsed: false, reason: 'kaggle_gpu_explicit' }
     return { ok: false, lane: null, quotaPool: 'kaggle-gpu', fallbackUsed: false, reason: !kaggleHasGpu ? 'kaggle_cpu_only_refused' : 'kaggle_unavailable' }
+  }
+
+  if (preferred === 'kaggle-tpu') {
+    return { ok: true, lane: 'kaggle-tpu', quotaPool: 'kaggle-tpu', fallbackUsed: false, reason: 'kaggle_tpu_explicit' }
+  }
+
+  if (preferred === 'kaggle-ai-models') {
+    return { ok: true, lane: 'kaggle-ai-models', quotaPool: 'kaggle-ai-models', fallbackUsed: false, reason: 'kaggle_ai_models_explicit' }
   }
 
   // auto: Colab Direct primary -> Kaggle GPU fallback
@@ -114,8 +124,11 @@ export function buildRemoteGpuCommand({
     }
     return { bin: 'colab', argv: notebook ? ['run', notebook] : ['status'] }
   }
-  if (lane === 'kaggle') {
+  if (lane === 'kaggle' || lane === 'kaggle-tpu') {
     return { bin: 'kaggle', argv: kernel ? ['kernels', 'push', '-p', kernel] : ['kernels', 'list', '--mine'] }
+  }
+  if (lane === 'kaggle-ai-models') {
+    return { bin: 'kaggle', argv: ['models', 'list'] }
   }
   return null
 }

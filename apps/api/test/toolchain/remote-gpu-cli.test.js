@@ -57,4 +57,7 @@ test('buildRemoteGpuCommand supports Colab ssh and papermill transports', () => 
     buildRemoteGpuCommand({ lane: 'colab', colabTransport: 'papermill', notebook: 'run.ipynb' }),
     { bin: 'papermill', argv: ['run.ipynb', 'run.out.ipynb'] }
   )
+  assert.strictEqual(selectRemoteGpuLane({ preferred: 'kaggle-tpu' }).quotaPool, 'kaggle-tpu')
+  assert.strictEqual(selectRemoteGpuLane({ preferred: 'kaggle-ai-models' }).quotaPool, 'kaggle-ai-models')
+  assert.deepStrictEqual(buildRemoteGpuCommand({ lane: 'kaggle-ai-models' }), { bin: 'kaggle', argv: ['models', 'list'] })
 })
