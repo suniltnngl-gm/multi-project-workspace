@@ -196,7 +196,8 @@ if (isMain) {
   const res = spawnSync('llama-cli', cmdArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60000 })
   const durationMs = Date.now() - t0
   const ok = res.status === 0
-  const replyText = stripLlamaBanner(res.stdout)
+  const combined = (res.stdout && res.stdout.includes('\n> ')) ? res.stdout : `${res.stdout || ''}\n${res.stderr || ''}`
+  const replyText = stripLlamaBanner(combined)
   if (ok && opts.session) {
     appendSessionTurn(opts.session, { model: opts.model, prompt: rawPrompt.trim(), reply: replyText })
   }
