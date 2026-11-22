@@ -3,7 +3,7 @@
  * helper for swarm state & repo operations.
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 
 const UNRECOVERABLE_PATTERNS = [
@@ -74,4 +74,38 @@ export function restoreRecoveryBackup(backupPath, targetPath) {
   writeFileSync(tmp, data)
   renameSync(tmp, targetPath)
   return { ok: true, restored: targetPath, sha256: actual, bytes: data.length }
+}
+
+/**
+ * Per-file protected write: creates a checksummed single-file checkpoint of the
+ * current file contents immediately before atomically writing `nextContent`.
+ */
+export function protectedWriteFile(targetPath, nextContent, { backupDir = null } = {}) {
+  const backup = existsSync(targetPath) ? createRecoveryBackup(targetPath, { backupDir }) : null
+  mkdirSync(dirname(targetPath), { recursive: true })
+  const tmp = `${targetPath}.edit-${randomUUID()}`
+  writeFileSync(tmp, nextContent)
+  renameSync(tmp, targetPath)
+  return { ok: true, targetPath, backupPath: backup?.backupPath ?? null, previousSha256: backup?.sha256 ?? null }
+}
+
+/**
+ * Undo ONLY the last edit to `targetPath`, leaving earlier edits and all other
+ * files in the working set intact. Consumes the restored checkpoint so repeated
+ * calls walk backward one edit at a time (LIFO).
+ */
+export function undoLastEdit(targetPath, { backupDir = null } = {}) {
+  const dir = backupDir || join(dirname(targetPath), '.backups')
+  if (!existsSync(dir)) throw new Error(`no_backup_history:${targetPath}`)
+  const prefix = `${basename(targetPath)}.`
+  const candidates = readdirSync(dir)
+    .filter((f) => f.startsWith(prefix) && f.endsWith('.bak'))
+    .sort()
+  if (!candidates.length) throw new Error(`no_backup_history:${targetPath}`)
+
+  const latest = join(dir, candidates[candidates.length - 1])
+  const res = restoreRecoveryBackup(latest, targetPath)
+  rmSync(latest, { force: true })
+  rmSync(`${latest}.meta.json`, { force: true })
+  return { ...res, consumedBackup: latest }
 }
