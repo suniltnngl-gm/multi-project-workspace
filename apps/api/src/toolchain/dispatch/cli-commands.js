@@ -69,9 +69,12 @@ export function buildCliCommand({ cli, model, provider = null, sessionId = null,
       // `--model` applies to new sessions only; a resumed session keeps its pinned model.
       argv = ['--workdir', cwd, '--output', 'json', ...(resume ? ['--resume', sessionId] : ['--model', model]), '-p', prompt]
       break
-    case 'hermes':
-      argv = ['-z', prompt, '-m', model, ...(provider ? ['--provider', provider] : []), '--in', cwd, ...(resume ? ['--resume', sessionId] : [])]
+    case 'hermes': {
+      const effectiveSession = sessionId || process.env.SWARM_HERMES_SESSION_OVERRIDE || null
+      const shouldResume = Boolean(resume || (!sessionId && process.env.SWARM_HERMES_SESSION_OVERRIDE))
+      argv = ['-z', prompt, '-m', model, ...(provider ? ['--provider', provider] : []), '--in', cwd, ...(shouldResume && effectiveSession ? ['--resume', effectiveSession] : [])]
       break
+    }
     case 'kilo':
       argv = ['run', '--format', 'json', '--model', model, ...(resume ? ['--session', sessionId] : []), prompt]
       break
