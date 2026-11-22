@@ -44,5 +44,17 @@ test('remote-gpu-cli.mjs --dry-run --json enforces Colab -> Kaggle fallback with
   assert.strictEqual(parsed.mode, 'dry-run')
   assert.strictEqual(parsed.selection.lane, 'kaggle')
   assert.strictEqual(parsed.selection.fallbackUsed, true)
+  assert.strictEqual(parsed.model.quotaPool, 'kaggle-gpu')
   assert.strictEqual(parsed.cliArtifactBoundary.mergeNativeArtifacts, false)
+})
+
+test('buildRemoteGpuCommand supports Colab ssh and papermill transports', () => {
+  assert.deepStrictEqual(
+    buildRemoteGpuCommand({ lane: 'colab', colabTransport: 'ssh', sshTarget: 'root@0.tcp.ngrok.io', remoteCommand: 'nvidia-smi' }),
+    { bin: 'ssh', argv: ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', 'root@0.tcp.ngrok.io', 'nvidia-smi'] }
+  )
+  assert.deepStrictEqual(
+    buildRemoteGpuCommand({ lane: 'colab', colabTransport: 'papermill', notebook: 'run.ipynb' }),
+    { bin: 'papermill', argv: ['run.ipynb', 'run.out.ipynb'] }
+  )
 })

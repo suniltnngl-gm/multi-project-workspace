@@ -12,8 +12,24 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
+const DEFAULT_CONFIG_PATH = process.env.REMOTE_GPU_CONFIG || join(homedir(), '.config/remote-gpu-cli/config.json')
 const DEFAULT_SESSIONS_DIR = process.env.REMOTE_GPU_SESSIONS_DIR || join(homedir(), '.local/state/remote-gpu-cli/sessions')
 const MAX_HISTORY_TURNS = 4
+
+export const REMOTE_GPU_MODELS = Object.freeze({
+  colab: { lane: 'colab', quotaPool: 'colab-gpu', transport: 'cli', modelId: 'colab-gpu-model' },
+  kaggle: { lane: 'kaggle', quotaPool: 'kaggle-gpu', transport: 'kaggle-cli', modelId: 'kaggle-gpu-model' }
+})
+
+export function loadRemoteGpuConfig(configPath = DEFAULT_CONFIG_PATH) {
+  if (!configPath || !existsSync(configPath)) return {}
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, 'utf8'))
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
 
 export function sanitizeSessionId(id) {
   const clean = String(id || '').replace(/[^a-zA-Z0-9._-]/g, '_')
@@ -79,8 +95,23 @@ export function appendSessionTurn(sessionId, turn, sessionsDir = DEFAULT_SESSION
   return file
 }
 
-export function buildRemoteGpuCommand({ lane, notebook = null, kernel = null }) {
+export function buildRemoteGpuCommand({
+  lane,
+  notebook = null,
+  kernel = null,
+  colabTransport = 'cli',
+  sshTarget = null,
+  remoteCommand = null,
+  outputNotebook = null
+}) {
   if (lane === 'colab') {
+    if (colabTransport === 'ssh' && sshTarget) {
+      return { bin: 'ssh', argv: ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', sshTarget, remoteCommand || 'nvidia-smi'] }
+    }
+    if (colabTransport === 'papermill' && notebook) {
+      const outNb = outputNotebook || (notebook.endsWith('.ipynb') ? notebook.replace(/\.ipynb$/i, '.out.ipynb') : `${notebook}.out.ipynb`)
+      return { bin: 'papermill', argv: [notebook, outNb] }
+    }
     return { bin: 'colab', argv: notebook ? ['run', notebook] : ['status'] }
   }
   if (lane === 'kaggle') {
@@ -93,12 +124,24 @@ const argv = process.argv.slice(2)
 const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)
 
 if (isMain) {
+  let configPath = DEFAULT_CONFIG_PATH
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--config' && argv[i + 1]) configPath = argv[i + 1]
+  }
+  const cfg = loadRemoteGpuConfig(configPath)
+  const modelsCfg = {
+    colab: { ...REMOTE_GPU_MODELS.colab, ...(cfg.models?.colab || {}) },
+    kaggle: { ...REMOTE_GPU_MODELS.kaggle, ...(cfg.models?.kaggle || {}) }
+  }
   const opts = {
-    lane: 'auto',
-    colabState: 'gpu',
-    kaggleState: 'gpu',
-    notebook: null,
-    kernel: null,
+    lane: cfg.defaultLane || cfg.defaultModel || 'auto',
+    colabState: cfg.colabState || 'gpu',
+    kaggleState: cfg.kaggleState || 'gpu',
+    colabTransport: modelsCfg.colab.transport || 'cli',
+    sshTarget: modelsCfg.colab.sshTarget || null,
+    remoteCommand: modelsCfg.colab.remoteCommand || null,
+    notebook: modelsCfg.colab.notebook || null,
+    kernel: modelsCfg.kaggle.kernel || null,
     skill: null,
     session: null,
     promptFile: null,
@@ -111,15 +154,19 @@ if (isMain) {
     if (a === '--json') opts.json = true
     else if (a === '--execute') opts.execute = true
     else if (a === '--dry-run') opts.execute = false
-    else if (a === '--lane') opts.lane = argv[++i]
+    else if (a === '--lane' || a === '--model' || a === '-m') opts.lane = argv[++i]
     else if (a === '--colab-state') opts.colabState = argv[++i]
     else if (a === '--kaggle-state') opts.kaggleState = argv[++i]
+    else if (a === '--colab-transport') opts.colabTransport = argv[++i]
+    else if (a === '--ssh-target') opts.sshTarget = argv[++i]
+    else if (a === '--remote-cmd') opts.remoteCommand = argv[++i]
     else if (a === '--notebook') opts.notebook = argv[++i]
     else if (a === '--kernel') opts.kernel = argv[++i]
     else if (a === '--skill') opts.skill = argv[++i]
     else if (a === '--session') opts.session = argv[++i]
     else if (a === '--prompt' || a === '-p') opts.prompt = argv[++i]
     else if (a === '--prompt-file') opts.promptFile = argv[++i]
+    else if (a === '--config') i++
   }
 
   const fail = (reason, code = 1) => {
@@ -152,13 +199,22 @@ if (isMain) {
 
   if (!selection.ok) fail(selection.reason, 2)
 
-  const cmd = buildRemoteGpuCommand({ lane: selection.lane, notebook: opts.notebook, kernel: opts.kernel })
+  const activeModel = modelsCfg[selection.lane] || REMOTE_GPU_MODELS[selection.lane]
+  const cmd = buildRemoteGpuCommand({
+    lane: selection.lane,
+    notebook: opts.notebook,
+    kernel: opts.kernel,
+    colabTransport: opts.colabTransport,
+    sshTarget: opts.sshTarget,
+    remoteCommand: opts.remoteCommand
+  })
   const history = opts.session ? loadSessionHistory(opts.session) : []
 
   if (!opts.execute) {
     const payload = {
       ok: true,
       mode: 'dry-run',
+      model: activeModel,
       selection,
       session: sanitizeSessionId(opts.session),
       historyTurnsLoaded: history.length,
