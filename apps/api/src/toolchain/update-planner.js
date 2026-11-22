@@ -11,7 +11,8 @@ export const TOOLCHAIN_UPDATE_CLI_PATH = fileURLToPath(
 const AI_CLI_SPECS = [
   { name: 'agy', stepId: 'agy-update', bin: 'agy', args: ['update'] },
   { name: 'copilot', stepId: 'copilot-update', bin: 'copilot', args: ['update'] },
-  { name: 'opencode', stepId: 'opencode-upgrade', bin: 'opencode', args: ['upgrade'] }
+  { name: 'opencode', stepId: 'opencode-upgrade', bin: 'opencode', args: ['upgrade'] },
+  { name: 'kilo', stepId: 'kilo-upgrade', bin: 'kilo', args: ['upgrade'] }
 ]
 
 function findInventoryAiCli(inventory, name) {
