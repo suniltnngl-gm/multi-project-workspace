@@ -1,9 +1,10 @@
 import { readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, existsSync, rmSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { rankTasks } from './task-prioritizer.js'
 
 /**
- * SP-007 bounded-job queue store.
+ * SP-007 / SP-009 bounded-job queue store with priority ranking and bounded replan.
  *
  * Atomicity: every write goes to a sibling temp file and is renameSync'd over the
  * target, so a reader never observes a partial task record.
@@ -11,10 +12,11 @@ import { randomUUID } from 'node:crypto'
  * race. Lost updates are rejected, never silently applied.
  */
 
-export const JOB_TYPES = Object.freeze(['plan', 'build', 'publish', 'review'])
+export const JOB_TYPES = Object.freeze(['plan', 'replan', 'build', 'publish', 'review'])
 
 export const DEFAULT_JOB_TIMEOUT_MS = Object.freeze({
   plan: 180_000,
+  replan: 180_000,
   build: 300_000,
   review: 120_000,
   publish: 180_000
@@ -22,7 +24,7 @@ export const DEFAULT_JOB_TIMEOUT_MS = Object.freeze({
 
 const TERMINAL_STATES = new Set(['done', 'parked', 'ready_to_publish'])
 const VALID_STATES = new Set([
-  'queued', 'planning', 'building', 'review_plan', 'review_build',
+  'queued', 'planning', 'replanning', 'building', 'review_plan', 'review_build',
   'ready_to_publish', 'publishing', 'done', 'parked'
 ])
 
@@ -75,11 +77,28 @@ export function writeTask(dir, task, { expectedRevision = null } = {}) {
 }
 
 /** Create a task from a minimal descriptor. */
-export function createTask(dir, { taskId, jobs = [], state = 'queued', pinned = null }) {
+export function createTask(dir, {
+  taskId,
+  jobs = [],
+  state = 'queued',
+  pinned = null,
+  priority = 'P2',
+  blocker = false,
+  unblocksCount = 0,
+  costTier = 'daily',
+  maxReplans = 2,
+  replanCount = 0
+}) {
   if (!VALID_STATES.has(state)) throw new Error(`queue_state_invalid:${state}`)
   const task = {
     taskId,
     state,
+    priority,
+    blocker: Boolean(blocker),
+    unblocksCount: Number(unblocksCount) || 0,
+    costTier,
+    maxReplans: Number(maxReplans) ?? 2,
+    replanCount: Number(replanCount) || 0,
     pinned: pinned && pinned.sessionId ? pinned : null,
     jobs: jobs.map((j, i) => ({
       id: j.id ?? `j${i + 1}`,
@@ -126,15 +145,41 @@ export function completeJob(task, jobId, { status, result = {}, reason = null, s
   return { ...task, jobs, ...(state ? { state } : {}) }
 }
 
-/** Deterministic round-robin: order candidate tasks by their pinned pool's last use. */
+/**
+ * Bounded replan transition (SP-009): on REJECT or recoverable failure, enqueue a
+ * `replan` job up to `maxReplans`; once exhausted, fail-closed to `parked`.
+ */
+export function transitionToReplan(task, { reason = null } = {}) {
+  const maxReplans = Number.isFinite(task.maxReplans) ? task.maxReplans : 2
+  const current = Number(task.replanCount || 0)
+  if (current >= maxReplans) {
+    return { ...task, state: 'parked', parkReason: reason ? `max_replans_exceeded:${reason}` : 'max_replans_exceeded' }
+  }
+  const nextCount = current + 1
+  const replanJob = {
+    id: `replan-${nextCount}`,
+    type: 'replan',
+    status: 'pending',
+    attempts: 0,
+    timeoutMs: DEFAULT_JOB_TIMEOUT_MS.replan,
+    result: {},
+    verdict: null,
+    reason,
+    reviewedAt: null
+  }
+  return {
+    ...task,
+    state: 'replanning',
+    replanCount: nextCount,
+    jobs: [...task.jobs, replanJob]
+  }
+}
+
+/** Priority-first, pool-LRU deterministic selection (SP-009). */
 export function selectNextTask(tasks, { lastUsedByPool = {} } = {}) {
   const actionable = tasks.filter((t) => !TERMINAL_STATES.has(t.state) && nextPendingJob(t))
   if (!actionable.length) return null
-  const score = (t) => {
-    const pool = t.pinned?.compositeKey?.split(':')[0] ?? t.taskId
-    return lastUsedByPool[pool] ?? 0
-  }
-  return actionable.slice().sort((a, b) => score(a) - score(b) || a.taskId.localeCompare(b.taskId))[0]
+  return rankTasks(actionable, { lastUsedByPool })[0]
 }
 
 export function queueStats(dir) {
