@@ -13,14 +13,16 @@ test('discoverCandidates ranks seed tasks and syncDiscoveredToQueue deduplicates
       repoDir: dir,
       seedTasks: [
         { taskId: 'task-low', priority: 'P3', costTier: 'remote' },
-        { taskId: 'task-high', priority: 'P0', blocker: true, costTier: 'local' }
+        { taskId: 'task-high', priority: 'P0', blocker: true, costTier: 'local' },
+        { taskId: 'case-multi', priority: 'P1', options: ['opt-a', 'opt-b'] }
       ]
     })
     assert.strictEqual(candidates[0].taskId, 'task-high')
-    assert.strictEqual(candidates[1].taskId, 'task-low')
+    assert.strictEqual(candidates.find((c) => c.taskId === 'case-multi').kind, 'case')
 
     const first = syncDiscoveredToQueue(dir, candidates, { apply: true })
     assert.strictEqual(first.createdCount, 2)
+    assert.strictEqual(first.caseCount, 1)
     assert.strictEqual(first.skippedCount, 0)
 
     const second = syncDiscoveredToQueue(dir, candidates, { apply: true })

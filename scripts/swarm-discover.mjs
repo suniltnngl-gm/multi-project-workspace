@@ -13,6 +13,7 @@ import { resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { createTask, readQueue, queueStats } from '../apps/api/src/toolchain/dispatch/job-queue.js'
 import { rankTasks, scoreTask } from '../apps/api/src/toolchain/dispatch/task-prioritizer.js'
+import { createWorkItem } from '../apps/api/src/toolchain/dispatch/case-task-lifecycle.js'
 
 function safeGit(repoDir, args) {
   try {
@@ -59,14 +60,24 @@ export function discoverCandidates({ repoDir = process.cwd(), seedTasks = [], ma
 
   for (const s of seedTasks) {
     if (!s?.taskId) continue
-    candidates.push({
-      taskId: String(s.taskId),
-      source: s.source || 'seed',
+    const workItem = createWorkItem({
+      id: String(s.taskId),
+      title: s.summary || s.taskId,
+      options: s.options || [],
       priority: s.priority || 'P2',
+      costTier: s.costTier || 'daily'
+    })
+    candidates.push({
+      taskId: workItem.id,
+      kind: workItem.kind,
+      state: workItem.state,
+      options: workItem.options,
+      source: s.source || 'seed',
+      priority: workItem.priority,
       blocker: Boolean(s.blocker),
       unblocksCount: Number(s.unblocksCount || 0),
-      costTier: s.costTier || 'daily',
-      summary: s.summary || s.taskId,
+      costTier: workItem.costTier,
+      summary: workItem.title,
       jobs: Array.isArray(s.jobs) && s.jobs.length ? s.jobs : [{ type: 'plan' }, { type: 'build' }, { type: 'review' }]
     })
   }
@@ -78,9 +89,14 @@ export function syncDiscoveredToQueue(queueDir, candidates, { apply = false } = 
   const existing = readQueue(queueDir)
   const existingIds = new Set(existing.map((t) => t.taskId))
   const created = []
+  const cases = []
   const skipped = []
 
   for (const c of candidates) {
+    if (c.kind === 'case') {
+      cases.push(c.taskId)
+      continue
+    }
     if (existingIds.has(c.taskId)) {
       skipped.push(c.taskId)
       continue
@@ -102,6 +118,8 @@ export function syncDiscoveredToQueue(queueDir, candidates, { apply = false } = 
     apply,
     createdCount: created.length,
     created,
+    caseCount: cases.length,
+    cases,
     skippedCount: skipped.length,
     skipped,
     stats: existsSync(queueDir) ? queueStats(queueDir) : null
