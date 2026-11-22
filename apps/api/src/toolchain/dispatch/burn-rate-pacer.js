@@ -192,3 +192,34 @@ export function rankPoolsByPacing(pools, nowMs = Date.now(), opts = {}) {
     })
     .map(({ _remaining, _index, ...rest }) => rest)
 }
+
+/**
+ * Operator 5-hour rolling round-robin call caps:
+ * - github-copilot: 1 call / 5h (protect monthly credits)
+ * - agy-gemini / agy-argon / agy-claude-gpt: 4 calls / 5h each
+ * - all other pools (local, daily CLIs, 8 opencode gateways, remote): uncapped (null)
+ */
+export const DEFAULT_FIVE_HOUR_CAPS = Object.freeze({
+  'github-copilot': 1,
+  'agy-gemini': 4,
+  'agy-argon': 4,
+  'agy-claude-gpt': 4
+})
+
+export function evaluateFiveHourCap({ quotaPool, callsInWindow = 0, caps = DEFAULT_FIVE_HOUR_CAPS } = {}) {
+  const pool = String(quotaPool || 'unknown')
+  const cap = Object.prototype.hasOwnProperty.call(caps, pool) ? caps[pool] : null
+  const used = Math.max(0, Number(callsInWindow || 0))
+  if (cap === null) {
+    return { quotaPool: pool, cap: null, callsInWindow: used, admitted: true, remainingInWindow: null, reason: 'uncapped_in_5h_window' }
+  }
+  const admitted = used < cap
+  return {
+    quotaPool: pool,
+    cap,
+    callsInWindow: used,
+    admitted,
+    remainingInWindow: Math.max(0, cap - used),
+    reason: admitted ? 'within_5h_window_cap' : 'five_hour_window_cap_reached'
+  }
+}

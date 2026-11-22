@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   evaluatePoolPacing,
   rankPoolsByPacing,
+  evaluateFiveHourCap,
   WINDOW_DURATION_MS
 } from '../../src/toolchain/dispatch/burn-rate-pacer.js'
 
@@ -87,4 +88,20 @@ test('rankPoolsByPacing orders boost -> normal/rate_limit_only -> throttled -> e
       ['agy-claude-gpt', 'exhausted']
     ]
   )
+})
+
+test('evaluateFiveHourCap enforces copilot=1/5h, agy=4/5h per pool, and uncapped for opencode/daily/local', () => {
+  assert.strictEqual(evaluateFiveHourCap({ quotaPool: 'github-copilot', callsInWindow: 0 }).admitted, true)
+  assert.strictEqual(evaluateFiveHourCap({ quotaPool: 'github-copilot', callsInWindow: 1 }).admitted, false)
+
+  for (const agyPool of ['agy-gemini', 'agy-argon', 'agy-claude-gpt']) {
+    assert.strictEqual(evaluateFiveHourCap({ quotaPool: agyPool, callsInWindow: 3 }).admitted, true)
+    assert.strictEqual(evaluateFiveHourCap({ quotaPool: agyPool, callsInWindow: 4 }).admitted, false)
+  }
+
+  for (const openPool of ['opencode-tidepool-free', 'opencode-console-google', 'local-llama-cpp', 'cline-free']) {
+    const res = evaluateFiveHourCap({ quotaPool: openPool, callsInWindow: 25 })
+    assert.strictEqual(res.admitted, true)
+    assert.strictEqual(res.cap, null)
+  }
 })
