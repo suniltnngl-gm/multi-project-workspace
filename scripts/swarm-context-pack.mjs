@@ -83,6 +83,19 @@ const argv = process.argv.slice(2)
 const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)
 
 if (isMain) {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    process.stdout.write(`Usage: node scripts/swarm-context-pack.mjs [options]
+      --repo <dir>          Repository root (default: cwd)
+  -q, --query <pattern>     Run bounded git grep -n
+      --files <a,b,c>       Comma-separated file paths to include
+      --diff                Include git diff --stat
+      --max-chars <n>       Max character budget (default: 8000)
+  -o, --out <path>          Write packed context to file
+      --json                Output JSON metadata + text
+  -h, --help                Show this help
+`)
+    process.exit(0)
+  }
   const opts = {
     repoDir: process.cwd(),
     query: null,

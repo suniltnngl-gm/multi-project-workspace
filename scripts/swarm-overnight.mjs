@@ -25,6 +25,21 @@ import {
 } from '../apps/api/src/toolchain/dispatch/overnight-supervisor.js'
 
 const argv = process.argv.slice(2)
+if (argv.includes('--help') || argv.includes('-h')) {
+  process.stdout.write(`Usage: node scripts/swarm-overnight.mjs [options]
+      --state-dir <dir>        Overnight state dir (ledger, STOP_SWARM, report)
+      --queue-dir <dir>        Active task queue directory
+      --max-ticks <n>          Max bounded ticks (default: 10)
+      --max-minutes <n>        Max wall-clock minutes (default: 480)
+      --max-failures <n>       Consecutive failure circuit breaker (default: 3)
+      --tick-interval-sec <n>  Delay between ticks (default: 0)
+      --dry-run                Simulate ticks only (default)
+      --execute                Run live bounded queue ticks
+      --json                   Output JSON summary
+  -h, --help                   Show this help
+`)
+  process.exit(0)
+}
 const opts = {
   stateDir: join(homedir(), '.local/state/curl-ai-bridge/overnight'),
   queueDir: join(homedir(), '.local/state/curl-ai-bridge/queue/active'),

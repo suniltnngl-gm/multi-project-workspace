@@ -158,6 +158,26 @@ const argv = process.argv.slice(2)
 const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)
 
 if (isMain) {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    process.stdout.write(`Usage: node scripts/remote-gpu-cli.mjs [options]
+  -m, --model, --lane <auto|colab|kaggle|kaggle-tpu|kaggle-ai-models>
+      --colab-transport <cli|ssh|papermill>  Colab transport (default: cli)
+      --ssh-target <user@host>               SSH target for --colab-transport ssh
+      --notebook <path>                      Notebook path for Colab/papermill
+      --kernel <dir>                         Kaggle kernel directory
+      --colab-state <gpu|cpu_only|free_tier_blocked|unavailable>
+      --kaggle-state <gpu|cpu_only|unavailable>
+      --skill <file.md>                      Inject micro-skill markdown
+      --session <id>                         Rolling 4-turn JSONL session memory
+  -p, --prompt <text> / --prompt-file <path> Prompt input
+      --config <path>                        Custom config.json path
+      --dry-run                              Plan only (default)
+      --execute                              Execute live command
+      --json                                 Output JSON
+  -h, --help                                 Show this help
+`)
+    process.exit(0)
+  }
   let configPath = DEFAULT_CONFIG_PATH
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--config' && argv[i + 1]) configPath = argv[i + 1]

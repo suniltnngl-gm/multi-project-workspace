@@ -148,6 +148,20 @@ const argv = process.argv.slice(2)
 const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)
 
 if (isMain) {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    process.stdout.write(`Usage: node scripts/swarm-discover.mjs [options]
+      --mode <discover|rediscover>  Discovery mode (default: discover)
+      --repo <dir>                  Repository root (default: cwd)
+      --queue-dir <dir>             Task queue directory
+      --case-dir <dir>              Case registry directory for multi-option cases
+      --seed-json <file>            Optional JSON file of seed tasks/cases
+      --dry-run                     Preview only (default)
+      --apply                       Persist tasks and cases
+      --json                        Output JSON
+  -h, --help                        Show this help
+`)
+    process.exit(0)
+  }
   const opts = {
     mode: 'discover',
     repoDir: process.cwd(),

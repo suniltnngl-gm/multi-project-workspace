@@ -91,6 +91,22 @@ const argv = process.argv.slice(2)
 const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)
 
 if (isMain) {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    process.stdout.write(`Usage: node scripts/local-llama-cli.mjs [options]
+  -m, --model <0.5b|1.5b>   Local GGUF model alias (default: 0.5b)
+  -p, --prompt <text>       Prompt text
+      --prompt-file <path>  Read prompt from file
+      --skill <file.md>     Inject micro-skill markdown
+      --session <id>        Rolling 4-turn JSONL session memory
+  -n, --max-tokens <n>      Max generation tokens (default: 128)
+  -t, --threads <n>         CPU threads (default: 4)
+      --dry-run             Plan only, no spawn (default)
+      --execute             Run llama-cli --single-turn after resource gate
+      --json                Output JSON
+  -h, --help                Show this help
+`)
+    process.exit(0)
+  }
   const cfg = loadLocalLlamaConfig()
   const opts = {
     model: cfg.defaultModel || '0.5b',

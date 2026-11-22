@@ -103,6 +103,18 @@ const argv = process.argv.slice(2)
 const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)
 
 if (isMain) {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    process.stdout.write(`Usage: node scripts/swarm-lesson-sync.mjs [options]
+      --lessons <path>      Lesson register JSON path
+      --cases-dir <dir>     Case registry directory
+      --queue-dir <dir>     Active task queue directory
+      --dry-run             Preview only (default)
+      --apply               Persist new lessons with protected single-file backup
+      --json                Output JSON
+  -h, --help                Show this help
+`)
+    process.exit(0)
+  }
   const opts = {
     lessonsPath: DEFAULT_LESSONS_PATH,
     casesDir: DEFAULT_CASES_DIR,
