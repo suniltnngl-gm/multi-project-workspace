@@ -21,15 +21,23 @@ function safeGit(repoDir, args) {
   }
 }
 
+export const POOL_MAX_CHARS = Object.freeze({
+  'console-groq': 6000,
+  'opencode-console-groq': 6000
+})
+
 export function buildContextPack({
   repoDir = process.cwd(),
   query = null,
   files = [],
   includeDiff = false,
   sinceSha = null,
+  pool = null,
   maxChars = 8000,
   maxGrepLines = 25
 } = {}) {
+  const poolCap = pool && POOL_MAX_CHARS[pool] ? POOL_MAX_CHARS[pool] : maxChars
+  const effectiveMaxChars = Math.min(maxChars, poolCap)
   const root = resolve(repoDir)
   const sections = []
 
@@ -71,8 +79,8 @@ export function buildContextPack({
 
   let text = sections.map((s) => `### ${s.name}\n${s.content}`).join('\n\n')
   let truncated = false
-  if (text.length > maxChars) {
-    text = `${text.slice(0, Math.max(0, maxChars - 24))}\n...[truncated ${text.length - maxChars} chars]`
+  if (text.length > effectiveMaxChars) {
+    text = `${text.slice(0, Math.max(0, effectiveMaxChars - 24))}\n...[truncated ${text.length - effectiveMaxChars} chars]`
     truncated = true
   }
 
@@ -120,6 +128,7 @@ if (isMain) {
     if (a === '--json') opts.json = true
     else if (a === '--diff') opts.includeDiff = true
     else if (a === '--since-sha') opts.sinceSha = argv[++i]
+    else if (a === '--pool') opts.pool = argv[++i]
     else if (a === '--repo') opts.repoDir = argv[++i]
     else if (a === '--query' || a === '-q') opts.query = argv[++i]
     else if (a === '--files') opts.files = String(argv[++i] || '').split(',').map((s) => s.trim()).filter(Boolean)

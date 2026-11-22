@@ -146,10 +146,19 @@ export function completeJob(task, jobId, { status, result = {}, reason = null, s
 }
 
 /**
- * Bounded replan transition (SP-009): on REJECT or recoverable failure, enqueue a
- * `replan` job up to `maxReplans`; once exhausted, fail-closed to `parked`.
+ * Bounded replan transition (SP-009): on worker REJECT, enqueue a `replan` job
+ * up to `maxReplans`; once exhausted, fail-closed to `parked`.
+ * Fail-closed wrapper/policy rejections (`source: 'fail_closed'`) are tracked
+ * separately (`failClosedCount`) and do NOT consume the worker `replanCount` budget.
  */
-export function transitionToReplan(task, { reason = null } = {}) {
+export function transitionToReplan(task, { reason = null, source = 'worker_reject' } = {}) {
+  if (source === 'fail_closed') {
+    return {
+      ...task,
+      failClosedCount: Number(task.failClosedCount || 0) + 1,
+      lastFailClosedReason: reason
+    }
+  }
   const maxReplans = Number.isFinite(task.maxReplans) ? task.maxReplans : 2
   const current = Number(task.replanCount || 0)
   if (current >= maxReplans) {

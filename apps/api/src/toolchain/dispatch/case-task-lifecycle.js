@@ -58,6 +58,7 @@ export function promoteCaseToTask(item, optionId, { reason = null } = {}) {
     ...item,
     kind: 'task',
     state: 'queued',
+    parentCaseId: item.parentCaseId || item.id,
     selectedOption: chosen,
     history: [...(item.history || []), { event: 'promoted_to_task', optionId: chosen.id, reason, at: nowIso() }]
   }
