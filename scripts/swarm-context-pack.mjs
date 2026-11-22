@@ -26,11 +26,20 @@ export function buildContextPack({
   query = null,
   files = [],
   includeDiff = false,
+  sinceSha = null,
   maxChars = 8000,
   maxGrepLines = 25
 } = {}) {
   const root = resolve(repoDir)
   const sections = []
+
+  if (sinceSha && String(sinceSha).trim()) {
+    const ref = String(sinceSha).trim()
+    const logOut = safeGit(root, ['log', '--oneline', `${ref}..HEAD`])
+    if (logOut) sections.push({ name: `git_delta_log:${ref}..HEAD`, content: logOut.split(/\r?\n/).slice(0, 30).join('\n') })
+    const statOut = safeGit(root, ['diff', '--stat', `${ref}..HEAD`])
+    if (statOut) sections.push({ name: `git_delta_stat:${ref}..HEAD`, content: statOut })
+  }
 
   const status = safeGit(root, ['status', '--short'])
   if (status) {
@@ -101,6 +110,7 @@ if (isMain) {
     query: null,
     files: [],
     includeDiff: false,
+    sinceSha: null,
     maxChars: 8000,
     out: null,
     json: false
@@ -109,6 +119,7 @@ if (isMain) {
     const a = argv[i]
     if (a === '--json') opts.json = true
     else if (a === '--diff') opts.includeDiff = true
+    else if (a === '--since-sha') opts.sinceSha = argv[++i]
     else if (a === '--repo') opts.repoDir = argv[++i]
     else if (a === '--query' || a === '-q') opts.query = argv[++i]
     else if (a === '--files') opts.files = String(argv[++i] || '').split(',').map((s) => s.trim()).filter(Boolean)
