@@ -12,7 +12,7 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 
 const SCRIPT = join(REPO, 'scripts', 'swarm-run.mjs')
 // The live registry path is host-specific and absent on CI runners. Tests build a
 // deterministic fixture registry instead of depending on operator-local state.
-const LIVE_REGISTRY = '/home/sunilkr/.local/state/curl-ai-bridge/sessions/agy-sessions.json'
+const LIVE_REGISTRY = '/home/sunilkr/.local/state/curl-ai-bridge/sessions/swarm-sessions.json'
 
 function makeRegistry(dir) {
   const registryPath = join(dir, 'registry.json')

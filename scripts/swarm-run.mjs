@@ -187,7 +187,7 @@ async function runGate({ gate, ctx, sessionPolicy, pinned }) {
 }
 
 async function main() {
-  if (!opts.registry) fail('missing --registry <agy-sessions.json>')
+  if (!opts.registry) fail('missing --registry <swarm-sessions.json>')
   if (!opts.repository) fail('missing --repository <name>')
   if (!opts['work-item']) fail('missing --work-item <id>')
 
