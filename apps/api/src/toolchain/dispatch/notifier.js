@@ -88,3 +88,58 @@ export function saveRemoteState(stateDir = DEFAULT_STATE_DIR, state = {}) {
   renameSync(tmp, target)
   return target
 }
+
+export function consumerCursorPath(stateDir = DEFAULT_STATE_DIR) {
+  return join(stateDir, 'notifications', 'consumer-cursor.json')
+}
+
+export function readUnreadEvents(stateDir = DEFAULT_STATE_DIR) {
+  const p = eventsLogPath(stateDir)
+  if (!existsSync(p)) return []
+  const cursorFile = consumerCursorPath(stateDir)
+  const lastId = existsSync(cursorFile) ? JSON.parse(readFileSync(cursorFile, 'utf8')).lastEventId : null
+  const all = readFileSync(p, 'utf8')
+    .trim()
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((l) => { try { return JSON.parse(l) } catch { return null } })
+    .filter(Boolean)
+  if (!lastId) return all
+  const idx = all.findIndex((e) => e.id === lastId)
+  return idx >= 0 ? all.slice(idx + 1) : all
+}
+
+export function advanceEventCursor(stateDir = DEFAULT_STATE_DIR, lastEventId) {
+  if (!lastEventId) return null
+  const dir = join(stateDir, 'notifications')
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const target = consumerCursorPath(stateDir)
+  const tmp = `${target}.tmp-${randomUUID()}`
+  writeFileSync(tmp, `${JSON.stringify({ lastEventId, updatedAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 })
+  renameSync(tmp, target)
+  return target
+}
+
+/**
+ * Safety-first, allowlist-only event -> automation router.
+ * Never auto-executes non-recoverable actions; critical/unknown events fail closed to operator escalation.
+ */
+export function routeNotificationAction(event) {
+  const src = String(event?.source || '')
+  const body = String(event?.body || '')
+  const sev = String(event?.severity || 'info')
+
+  if (sev === 'critical' || /STOP_SWARM|circuit_breaker/i.test(body)) {
+    return { eventId: event?.id, action: 'escalate_operator', autoExecute: false, safe: false, reason: 'critical_or_guardrail_event' }
+  }
+  if (src === 'kaggle' && /COMPLETE/i.test(body)) {
+    return { eventId: event?.id, action: 'pull_kaggle_output', autoExecute: true, safe: true, priority: 'P1', reason: 'kaggle_kernel_complete' }
+  }
+  if (src === 'github' && /failure/i.test(body)) {
+    return { eventId: event?.id, action: 'enqueue_ci_fix_task', autoExecute: true, safe: true, priority: 'P0', reason: 'github_ci_failure' }
+  }
+  if (src === 'colab' && /Hardware:|active/i.test(body)) {
+    return { eventId: event?.id, action: 'arm_colab_idle_countdown', autoExecute: true, safe: true, priority: 'P2', reason: 'colab_active_session' }
+  }
+  return { eventId: event?.id, action: 'noop', autoExecute: false, safe: true, reason: 'no_matching_allowlisted_rule' }
+}
