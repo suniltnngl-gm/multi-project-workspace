@@ -33,14 +33,14 @@ test('swarm-context-pack.mjs CLI supports --query --json', () => {
   assert.match(parsed.text, /remote-gpu-cli\.mjs/)
 })
 
-test('buildContextPack enforces console-groq 6000-char cap and supports sinceSha delta', () => {
+test('buildContextPack enforces console-groq 6000-char cap cleanly on shallow clones', () => {
   const pack = buildContextPack({
     repoDir: REPO_ROOT,
-    sinceSha: 'HEAD~2',
+    files: ['package.json', 'scripts/swarm-context-pack.mjs', 'scripts/swarm-overnight.mjs', 'scripts/remote-gpu-cli.mjs'],
     pool: 'console-groq',
     maxChars: 12000
   })
   assert.strictEqual(pack.ok, true)
-  assert.ok(pack.sections.some((s) => s.startsWith('git_delta_log:')))
+  assert.strictEqual(pack.truncated, true)
   assert.ok(pack.charCount <= 6024)
 })
