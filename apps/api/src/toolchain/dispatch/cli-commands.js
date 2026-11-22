@@ -31,6 +31,16 @@ export const CLI_COMMAND_SPECS = Object.freeze({
     bin: 'hermes',
     helpArgs: ['--help'],
     requiredFlags: ['--oneshot', '--resume', '--provider', '--in']
+  },
+  kilo: {
+    bin: 'kilo',
+    helpArgs: ['run', '--help'],
+    requiredFlags: ['--session', '--model', '--format']
+  },
+  copilot: {
+    bin: 'copilot',
+    helpArgs: ['--help'],
+    requiredFlags: ['-p', '--resume']
   }
 })
 
@@ -53,7 +63,7 @@ export function buildCliCommand({ cli, model, provider = null, sessionId = null,
       argv = ['--standalone', 'run', '--model', `${provider}/${model}`, ...(resume ? ['--session', sessionId] : []), prompt]
       break
     case 'cline':
-      argv = ['--cwd', cwd, '--json', '--model', model, ...(provider ? ['--provider', provider] : []), ...(resume ? ['--id', sessionId] : []), prompt]
+      argv = ['--cwd', cwd, '--json', '--yolo', '--model', model, ...(provider ? ['--provider', provider] : []), ...(resume ? ['--id', sessionId] : []), prompt]
       break
     case 'vibe':
       // `--model` applies to new sessions only; a resumed session keeps its pinned model.
@@ -61,6 +71,12 @@ export function buildCliCommand({ cli, model, provider = null, sessionId = null,
       break
     case 'hermes':
       argv = ['-z', prompt, '-m', model, ...(provider ? ['--provider', provider] : []), '--in', cwd, ...(resume ? ['--resume', sessionId] : [])]
+      break
+    case 'kilo':
+      argv = ['run', '--format', 'json', '--model', model, ...(resume ? ['--session', sessionId] : []), prompt]
+      break
+    case 'copilot':
+      argv = [...(resume ? [`--resume=${sessionId}`] : []), '-p', prompt]
       break
     default:
       return fail(`cli_flags_unverified:${cli}`)
@@ -105,7 +121,9 @@ const CLI_ENV = {
   opencode: ['OPENCODE_CONFIG', 'OPENCODE_CONFIG_DIR'],
   cline: ['CLINE_DIR'],
   vibe: ['VIBE_HOME', 'VIBE_CWD', 'DBUS_SESSION_BUS_ADDRESS'],
-  hermes: ['HERMES_HOME']
+  hermes: ['HERMES_HOME'],
+  kilo: ['KILO_HOME'],
+  copilot: ['COPILOT_HOME']
 }
 
 /**
