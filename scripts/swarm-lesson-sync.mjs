@@ -61,9 +61,11 @@ export function syncLessonRegister({
 } = {}) {
   const reg = existsSync(lessonsPath)
     ? JSON.parse(readFileSync(lessonsPath, 'utf8'))
-    : { schemaVersion: 'g10.6-v1', advisoryOnly: true, lessons: [] }
-  const lessons = Array.isArray(reg.lessons) ? reg.lessons : []
-  const existingIds = new Set(lessons.map((l) => l.id))
+    : { schemaVersion: 'g10.6-v1', advisoryOnly: true, lessons: {} }
+  const isArray = Array.isArray(reg.lessons)
+  const existingMap = !isArray && reg.lessons && typeof reg.lessons === 'object' ? reg.lessons : {}
+  const existingList = isArray ? reg.lessons : Object.values(existingMap)
+  const existingIds = new Set(isArray ? existingList.map((l) => l.id) : Object.keys(existingMap))
 
   const derived = extractLessonsFromState({
     cases: existsSync(casesDir) ? readCases(casesDir) : [],
@@ -71,10 +73,13 @@ export function syncLessonRegister({
   })
 
   const added = derived.filter((l) => !existingIds.has(l.id))
+  const nextLessons = isArray
+    ? [...existingList, ...added]
+    : { ...existingMap, ...Object.fromEntries(added.map((l) => [l.id, l])) }
   const nextReg = {
     ...reg,
     updatedAt: new Date().toISOString(),
-    lessons: [...lessons, ...added]
+    lessons: nextLessons
   }
 
   let writeInfo = null
@@ -86,10 +91,10 @@ export function syncLessonRegister({
     ok: true,
     apply,
     lessonsPath,
-    existingCount: lessons.length,
+    existingCount: existingIds.size,
     addedCount: added.length,
     addedIds: added.map((l) => l.id),
-    totalCount: nextReg.lessons.length,
+    totalCount: existingIds.size + added.length,
     backupPath: writeInfo?.backupPath ?? null
   }
 }
