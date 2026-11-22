@@ -30,6 +30,9 @@ function safeResolve(repoDir, relPath) {
 }
 
 export function parseToolCall(text) {
+  if (text && typeof text === 'object' && typeof text.tool === 'string' && text.args && typeof text.args === 'object') {
+    return { tool: text.tool, args: text.args }
+  }
   const raw = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
   if (!raw.startsWith('{') || !raw.endsWith('}')) return null
   try {
@@ -84,8 +87,9 @@ export async function runDirectToolLoop({
   ]
   const trace = []
   for (let turn = 1; turn <= maxTurns; turn++) {
-    const reply = String(await callModel(messages) || '')
-    const call = parseToolCall(reply)
+    const rawReply = await callModel(messages)
+    const call = parseToolCall(rawReply)
+    const reply = typeof rawReply === 'string' ? rawReply : JSON.stringify(rawReply ?? '')
     if (!call) {
       return { ok: true, turns: turn, finalAnswer: reply, trace }
     }
