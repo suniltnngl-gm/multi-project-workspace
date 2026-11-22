@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { selectRemoteGpuLane, buildRemoteGpuCommand } from '../../../../scripts/remote-gpu-cli.mjs'
+import { selectRemoteGpuLane, buildRemoteGpuCommand, evaluateRemoteGpuTrigger } from '../../../../scripts/remote-gpu-cli.mjs'
 
 const CLI_PATH = fileURLToPath(new URL('../../../../scripts/remote-gpu-cli.mjs', import.meta.url))
 
@@ -60,4 +60,18 @@ test('buildRemoteGpuCommand supports Colab ssh and papermill transports', () => 
   assert.strictEqual(selectRemoteGpuLane({ preferred: 'kaggle-tpu' }).quotaPool, 'kaggle-tpu')
   assert.strictEqual(selectRemoteGpuLane({ preferred: 'kaggle-ai-models' }).quotaPool, 'kaggle-ai-models')
   assert.deepStrictEqual(buildRemoteGpuCommand({ lane: 'kaggle-ai-models' }), { bin: 'kaggle', argv: ['models', 'list'] })
+})
+
+test('evaluateRemoteGpuTrigger blocks small single-prompt cold starts and admits batched or large prompts', () => {
+  const small = evaluateRemoteGpuTrigger({ queuedTasks: 1, promptTokens: 200 })
+  assert.strictEqual(small.trigger, false)
+  assert.match(small.reason, /below_cost_trigger_threshold/)
+
+  const batched = evaluateRemoteGpuTrigger({ queuedTasks: 3, promptTokens: 200 })
+  assert.strictEqual(batched.trigger, true)
+  assert.strictEqual(batched.reason, 'batch_threshold_met')
+
+  const large = evaluateRemoteGpuTrigger({ queuedTasks: 1, promptTokens: 2000 })
+  assert.strictEqual(large.trigger, true)
+  assert.strictEqual(large.reason, 'large_prompt_threshold_met')
 })

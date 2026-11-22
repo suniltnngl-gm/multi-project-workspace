@@ -38,6 +38,27 @@ export function sanitizeSessionId(id) {
   return clean || null
 }
 
+export function evaluateRemoteGpuTrigger({
+  queuedTasks = 1,
+  minBatchTasks = 3,
+  promptTokens = 0,
+  minPromptTokens = 1500,
+  force = false
+} = {}) {
+  if (force) return { trigger: true, reason: 'explicit_force', recommendTier: 'T4-remote-gpu' }
+  if (Number(queuedTasks) >= Number(minBatchTasks)) {
+    return { trigger: true, reason: 'batch_threshold_met', recommendTier: 'T4-remote-gpu' }
+  }
+  if (Number(promptTokens) >= Number(minPromptTokens)) {
+    return { trigger: true, reason: 'large_prompt_threshold_met', recommendTier: 'T4-remote-gpu' }
+  }
+  return {
+    trigger: false,
+    reason: `below_cost_trigger_threshold:tasks=${queuedTasks}/${minBatchTasks},tokens=${promptTokens}/${minPromptTokens}`,
+    recommendTier: 'T0-local_or_T1-daily'
+  }
+}
+
 export function selectRemoteGpuLane({
   preferred = 'auto',
   colabAvailable = true,
