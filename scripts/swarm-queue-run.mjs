@@ -23,6 +23,7 @@ import {
   queueStats,
   DEFAULT_JOB_TIMEOUT_MS
 } from '../apps/api/src/toolchain/dispatch/job-queue.js'
+import { evaluateFiveHourCap } from '../apps/api/src/toolchain/dispatch/burn-rate-pacer.js'
 
 const argv = process.argv.slice(2)
 const opts = {}
@@ -129,6 +130,17 @@ async function main() {
   if (!job) {
     if (opts.json) process.stdout.write(`${JSON.stringify({ tick: 'awaiting_review', taskId: task.taskId }, null, 2)}\n`)
     return process.exit(0)
+  }
+
+  const quotaPool = opts['quota-pool'] || task.pinned?.compositeKey?.split(':')[0] || null
+  if (quotaPool) {
+    const callsInWindow = Number(opts['calls-in-window'] ?? 0)
+    const capCheck = evaluateFiveHourCap({ quotaPool, callsInWindow })
+    if (!capCheck.admitted) {
+      if (opts.json) process.stdout.write(`${JSON.stringify({ tick: 'deferred_5h_cap', taskId: task.taskId, ...capCheck }, null, 2)}\n`)
+      else process.stdout.write(`${task.taskId} deferred (${capCheck.reason}: ${quotaPool} ${callsInWindow}/${capCheck.cap})\n`)
+      return process.exit(0)
+    }
   }
 
   const ctx = {
