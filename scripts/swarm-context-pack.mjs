@@ -106,6 +106,8 @@ if (isMain) {
   -q, --query <pattern>     Run bounded git grep -n
       --files <a,b,c>       Comma-separated file paths to include
       --diff                Include git diff --stat
+      --since-sha <sha>     Include git log/diff delta since <sha>
+      --pool <name>         Apply pool-specific char cap (e.g. console-groq=6000)
       --max-chars <n>       Max character budget (default: 8000)
   -o, --out <path>          Write packed context to file
       --json                Output JSON metadata + text
