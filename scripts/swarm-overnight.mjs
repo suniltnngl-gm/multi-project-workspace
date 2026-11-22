@@ -33,6 +33,9 @@ if (argv.includes('--help') || argv.includes('-h')) {
       --max-minutes <n>        Max wall-clock minutes (default: 480)
       --max-failures <n>       Consecutive failure circuit breaker (default: 3)
       --tick-interval-sec <n>  Delay between ticks (default: 0)
+      --case-dir <dir>         Case registry directory for --auto-discover
+      --auto-discover          Run swarm-discover --mode rediscover on idle/start
+      --lesson-sync            Run swarm-lesson-sync --apply at end of run
       --dry-run                Simulate ticks only (default)
       --execute                Run live bounded queue ticks
       --json                   Output JSON summary
@@ -43,11 +46,14 @@ if (argv.includes('--help') || argv.includes('-h')) {
 const opts = {
   stateDir: join(homedir(), '.local/state/curl-ai-bridge/overnight'),
   queueDir: join(homedir(), '.local/state/curl-ai-bridge/queue/active'),
+  caseDir: join(homedir(), '.local/state/curl-ai-bridge/queue/cases'),
   registry: join(homedir(), '.local/state/curl-ai-bridge/sessions/swarm-sessions.json'),
   maxTicks: 10,
   maxMinutes: 480,
   maxFailures: 3,
   tickIntervalSec: 0,
+  autoDiscover: false,
+  lessonSync: false,
   execute: false,
   json: false
 }
@@ -57,8 +63,11 @@ for (let i = 0; i < argv.length; i++) {
   if (a === '--json') opts.json = true
   else if (a === '--execute') opts.execute = true
   else if (a === '--dry-run') opts.execute = false
+  else if (a === '--auto-discover') opts.autoDiscover = true
+  else if (a === '--lesson-sync') opts.lessonSync = true
   else if (a === '--state-dir') opts.stateDir = resolve(argv[++i])
   else if (a === '--queue-dir') opts.queueDir = resolve(argv[++i])
+  else if (a === '--case-dir') opts.caseDir = resolve(argv[++i])
   else if (a === '--registry') opts.registry = resolve(argv[++i])
   else if (a === '--max-ticks') opts.maxTicks = Number(argv[++i]) || 10
   else if (a === '--max-minutes') opts.maxMinutes = Number(argv[++i]) || 480
@@ -96,8 +105,18 @@ while (true) {
     continue
   }
 
-  const tasks = readQueue(opts.queueDir)
-  const nextTask = selectNextTask(tasks)
+  let tasks = readQueue(opts.queueDir)
+  let nextTask = selectNextTask(tasks)
+  if (!nextTask && opts.autoDiscover) {
+    const discoverCli = resolve(new URL('./swarm-discover.mjs', import.meta.url).pathname)
+    spawnSync(
+      process.execPath,
+      [discoverCli, '--mode', 'rediscover', '--queue-dir', opts.queueDir, '--case-dir', opts.caseDir, ...(opts.execute ? ['--apply'] : ['--dry-run']), '--json'],
+      { cwd: resolve(new URL('..', import.meta.url).pathname), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 }
+    )
+    tasks = readQueue(opts.queueDir)
+    nextTask = selectNextTask(tasks)
+  }
   if (!nextTask) {
     ticks.push({ tick: ticks.length + 1, status: 'idle', reason: 'no_actionable_tasks' })
     stopReason = 'queue_idle'
@@ -130,12 +149,25 @@ while (true) {
   consecutiveFailures = ok ? 0 : consecutiveFailures + 1
 }
 
+let lessonSyncRan = false
+if (opts.lessonSync) {
+  const lessonCli = resolve(new URL('./swarm-lesson-sync.mjs', import.meta.url).pathname)
+  const lres = spawnSync(
+    process.execPath,
+    [lessonCli, ...(opts.execute ? ['--apply'] : ['--dry-run']), '--json'],
+    { cwd: resolve(new URL('..', import.meta.url).pathname), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 }
+  )
+  lessonSyncRan = lres.status === 0
+}
+
 const report = {
   ok: true,
   mode: opts.execute ? 'execute' : 'dry-run',
   stopReason,
   ticksExecuted: ticks.length,
   consecutiveFailures,
+  autoDiscover: opts.autoDiscover,
+  lessonSyncRan,
   elapsedMs: Date.now() - startedAtMs,
   queueStats: queueStats(opts.queueDir),
   ticks
