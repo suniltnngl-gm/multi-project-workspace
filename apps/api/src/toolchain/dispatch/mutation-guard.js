@@ -34,6 +34,8 @@ export function classifyMutationRisk(commandOrAction) {
   return { allowed: true, risk: 'recoverable', rule: null, reason: 'ok' }
 }
 
+let backupSeq = 0
+
 export function createRecoveryBackup(targetPath, { backupDir = null } = {}) {
   if (!existsSync(targetPath)) {
     throw new Error(`backup_target_missing:${targetPath}`)
@@ -43,7 +45,8 @@ export function createRecoveryBackup(targetPath, { backupDir = null } = {}) {
   const data = readFileSync(targetPath)
   const digest = sha256(data)
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-  const backupPath = join(dir, `${basename(targetPath)}.${stamp}.${randomUUID().slice(0, 8)}.bak`)
+  const seq = String(++backupSeq).padStart(6, '0')
+  const backupPath = join(dir, `${basename(targetPath)}.${stamp}.${seq}.${randomUUID().slice(0, 8)}.bak`)
   const metaPath = `${backupPath}.meta.json`
 
   writeFileSync(backupPath, data, { mode: 0o600 })
