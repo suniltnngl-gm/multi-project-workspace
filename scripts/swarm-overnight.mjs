@@ -116,10 +116,11 @@ while (true) {
     continue
   }
 
+  const queueRunner = resolve(new URL('./swarm-queue-run.mjs', import.meta.url).pathname)
   const res = spawnSync(
     process.execPath,
-    [resolve(process.cwd(), 'scripts/swarm-queue-run.mjs'), '--queue-dir', opts.queueDir, '--quota-pool', pool, '--calls-in-window', String(capCheck.callsInWindow), '--json'],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 300_000 }
+    [queueRunner, '--queue-dir', opts.queueDir, '--quota-pool', pool, '--calls-in-window', String(capCheck.callsInWindow), '--json'],
+    { cwd: resolve(new URL('..', import.meta.url).pathname), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 300_000 }
   )
   const ok = res.status === 0
   recordPoolCall(opts.stateDir, { quotaPool: pool, taskId: nextTask.taskId, status: ok ? 'ok' : `exit_${res.status}` })
