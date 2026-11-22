@@ -2,10 +2,15 @@
 /**
  * Minimal resource-gated CLI wrapper for local llama.cpp GGUF models (Task #172).
  *
- * Defaults to --dry-run (no spawn). Pass --execute to invoke `llama-cli --single-turn`
- * with stdin closed (/dev/null) after passing the SP-004 host resource gate.
+ * Features:
+ * - Optional config at ~/.config/local-llama-cli/config.json (env: LOCAL_LLAMA_CONFIG)
+ * - Micro-skill injection via --skill <file.md>
+ * - Rolling bounded session memory via --session <id> (last 4 turns in JSONL; zero writes in --dry-run)
+ * - --prompt-file <path> or --prompt <text>
+ * - Defaults to --dry-run (no spawn). Pass --execute to invoke `llama-cli --single-turn`
+ *   with stdin closed (/dev/null) after passing the SP-004 host resource gate.
  */
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, appendFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -13,10 +18,62 @@ import { gatherTelemetry } from '../apps/api/src/toolchain/dispatch/host-telemet
 import { evaluateResourceGate } from '../apps/api/src/toolchain/dispatch/resource-gate.js'
 
 const MODELS_DIR = process.env.LLAMA_MODELS_DIR || join(homedir(), '.local/share/llama.cpp/models')
+const DEFAULT_CONFIG_PATH = process.env.LOCAL_LLAMA_CONFIG || join(homedir(), '.config/local-llama-cli/config.json')
+const DEFAULT_SESSIONS_DIR = process.env.LOCAL_LLAMA_SESSIONS_DIR || join(homedir(), '.local/state/local-llama-cli/sessions')
+const MAX_HISTORY_TURNS = 4
+
 export const LOCAL_LLAMA_MODELS = Object.freeze({
   '0.5b': { file: 'Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf', minFreeMemoryMb: 1536 },
   '1.5b': { file: 'Qwen2.5-Coder-1.5B-Instruct-Q4_K_M.gguf', minFreeMemoryMb: 2048 }
 })
+
+export function loadLocalLlamaConfig(configPath = DEFAULT_CONFIG_PATH) {
+  if (!configPath || !existsSync(configPath)) return {}
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, 'utf8'))
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+export function sanitizeSessionId(id) {
+  const clean = String(id || '').replace(/[^a-zA-Z0-9._-]/g, '_')
+  return clean || null
+}
+
+export function loadSessionHistory(sessionId, sessionsDir = DEFAULT_SESSIONS_DIR, maxTurns = MAX_HISTORY_TURNS) {
+  const safe = sanitizeSessionId(sessionId)
+  if (!safe) return []
+  const file = join(sessionsDir, `${safe}.jsonl`)
+  if (!existsSync(file)) return []
+  const lines = readFileSync(file, 'utf8').trim().split(/\r?\n/).filter(Boolean)
+  const records = []
+  for (const l of lines) {
+    try { records.push(JSON.parse(l)) } catch {}
+  }
+  return records.slice(-maxTurns)
+}
+
+export function appendSessionTurn(sessionId, turn, sessionsDir = DEFAULT_SESSIONS_DIR) {
+  const safe = sanitizeSessionId(sessionId)
+  if (!safe) return null
+  mkdirSync(sessionsDir, { recursive: true, mode: 0o700 })
+  const file = join(sessionsDir, `${safe}.jsonl`)
+  appendFileSync(file, `${JSON.stringify({ ...turn, at: new Date().toISOString() })}\n`, { encoding: 'utf8', mode: 0o600 })
+  return file
+}
+
+export function composePrompt({ skillText = '', history = [], prompt }) {
+  const parts = []
+  if (skillText && skillText.trim()) parts.push(`[SKILL]\n${skillText.trim()}`)
+  if (Array.isArray(history) && history.length > 0) {
+    const hist = history.map((h) => `User: ${h.prompt}\nAssistant: ${h.reply}`).join('\n')
+    parts.push(`[HISTORY]\n${hist}`)
+  }
+  parts.push(String(prompt || '').trim())
+  return parts.join('\n\n')
+}
 
 export function stripLlamaBanner(raw) {
   const text = String(raw || '')
@@ -34,7 +91,18 @@ const argv = process.argv.slice(2)
 const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)
 
 if (isMain) {
-  const opts = { model: '0.5b', maxTokens: '128', threads: '4', json: false, execute: false }
+  const cfg = loadLocalLlamaConfig()
+  const opts = {
+    model: cfg.defaultModel || '0.5b',
+    maxTokens: String(cfg.maxTokens || '128'),
+    threads: String(cfg.threads || '4'),
+    json: false,
+    execute: false,
+    session: null,
+    skill: null,
+    promptFile: null,
+    prompt: null
+  }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--json') opts.json = true
@@ -42,6 +110,9 @@ if (isMain) {
     else if (a === '--dry-run') opts.execute = false
     else if (a === '--model' || a === '-m') opts.model = argv[++i]
     else if (a === '--prompt' || a === '-p') opts.prompt = argv[++i]
+    else if (a === '--prompt-file') opts.promptFile = argv[++i]
+    else if (a === '--skill') opts.skill = argv[++i]
+    else if (a === '--session') opts.session = argv[++i]
     else if (a === '--max-tokens' || a === '-n') opts.maxTokens = argv[++i]
     else if (a === '--threads' || a === '-t') opts.threads = argv[++i]
   }
@@ -54,8 +125,22 @@ if (isMain) {
 
   const spec = LOCAL_LLAMA_MODELS[opts.model]
   if (!spec) fail(`unknown_model:${opts.model} (expected 0.5b|1.5b)`)
-  if (!opts.prompt || !opts.prompt.trim()) fail('prompt_required')
 
+  let rawPrompt = opts.prompt
+  if (opts.promptFile) {
+    if (!existsSync(opts.promptFile)) fail(`prompt_file_not_found:${opts.promptFile}`)
+    rawPrompt = readFileSync(opts.promptFile, 'utf8')
+  }
+  if (!rawPrompt || !rawPrompt.trim()) fail('prompt_required')
+
+  let skillText = ''
+  if (opts.skill) {
+    if (!existsSync(opts.skill)) fail(`skill_not_found:${opts.skill}`)
+    skillText = readFileSync(opts.skill, 'utf8')
+  }
+
+  const history = opts.session ? loadSessionHistory(opts.session) : []
+  const fullPrompt = composePrompt({ skillText, history, prompt: rawPrompt })
   const modelPath = join(MODELS_DIR, spec.file)
   const telemetry = gatherTelemetry()
   const gate = evaluateResourceGate({
@@ -70,7 +155,7 @@ if (isMain) {
     process.exit(3)
   }
 
-  const cmdArgs = ['-m', modelPath, '-p', opts.prompt, '-n', String(opts.maxTokens), '-t', String(opts.threads), '--single-turn']
+  const cmdArgs = ['-m', modelPath, '-p', fullPrompt, '-n', String(opts.maxTokens), '-t', String(opts.threads), '--single-turn']
   if (!opts.execute) {
     const payload = {
       ok: true,
@@ -78,7 +163,10 @@ if (isMain) {
       model: opts.model,
       modelPath,
       modelExists: existsSync(modelPath),
-      wouldSpawn: { bin: 'llama-cli', argv: cmdArgs.map((x) => (x === opts.prompt ? '<prompt>' : x)) },
+      session: sanitizeSessionId(opts.session),
+      historyTurnsLoaded: history.length,
+      skillLoaded: Boolean(skillText),
+      wouldSpawn: { bin: 'llama-cli', argv: cmdArgs.map((x) => (x === fullPrompt ? '<prompt>' : x)) },
       gate,
       cliArtifactBoundary: { mergeNativeArtifacts: false }
     }
@@ -92,13 +180,18 @@ if (isMain) {
   const res = spawnSync('llama-cli', cmdArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60000 })
   const durationMs = Date.now() - t0
   const ok = res.status === 0
+  const replyText = stripLlamaBanner(res.stdout)
+  if (ok && opts.session) {
+    appendSessionTurn(opts.session, { model: opts.model, prompt: rawPrompt.trim(), reply: replyText })
+  }
   const payload = {
     ok,
     mode: 'execute',
     model: opts.model,
+    session: sanitizeSessionId(opts.session),
     exitCode: res.status,
     durationMs,
-    text: stripLlamaBanner(res.stdout),
+    text: replyText,
     gate,
     cliArtifactBoundary: { mergeNativeArtifacts: false }
   }
