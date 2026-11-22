@@ -43,6 +43,7 @@ if (argv.includes('--help') || argv.includes('-h')) {
 const opts = {
   stateDir: join(homedir(), '.local/state/curl-ai-bridge/overnight'),
   queueDir: join(homedir(), '.local/state/curl-ai-bridge/queue/active'),
+  registry: join(homedir(), '.local/state/curl-ai-bridge/sessions/swarm-sessions.json'),
   maxTicks: 10,
   maxMinutes: 480,
   maxFailures: 3,
@@ -58,6 +59,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--dry-run') opts.execute = false
   else if (a === '--state-dir') opts.stateDir = resolve(argv[++i])
   else if (a === '--queue-dir') opts.queueDir = resolve(argv[++i])
+  else if (a === '--registry') opts.registry = resolve(argv[++i])
   else if (a === '--max-ticks') opts.maxTicks = Number(argv[++i]) || 10
   else if (a === '--max-minutes') opts.maxMinutes = Number(argv[++i]) || 480
   else if (a === '--max-failures') opts.maxFailures = Number(argv[++i]) || 3
@@ -119,7 +121,7 @@ while (true) {
   const queueRunner = resolve(new URL('./swarm-queue-run.mjs', import.meta.url).pathname)
   const res = spawnSync(
     process.execPath,
-    [queueRunner, '--queue-dir', opts.queueDir, '--quota-pool', pool, '--calls-in-window', String(capCheck.callsInWindow), '--json'],
+    [queueRunner, '--queue-dir', opts.queueDir, '--registry', opts.registry, '--quota-pool', pool, '--calls-in-window', String(capCheck.callsInWindow), '--json'],
     { cwd: resolve(new URL('..', import.meta.url).pathname), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 300_000 }
   )
   const ok = res.status === 0
