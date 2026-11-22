@@ -83,16 +83,23 @@ export function restoreRecoveryBackup(backupPath, targetPath) {
 export function protectedWriteFile(targetPath, nextContent, { backupDir = null } = {}) {
   const backup = existsSync(targetPath) ? createRecoveryBackup(targetPath, { backupDir }) : null
   mkdirSync(dirname(targetPath), { recursive: true })
+  const buf = Buffer.isBuffer(nextContent) ? nextContent : Buffer.from(String(nextContent), 'utf8')
+  const postEditSha256 = sha256(buf)
   const tmp = `${targetPath}.edit-${randomUUID()}`
-  writeFileSync(tmp, nextContent)
+  writeFileSync(tmp, buf)
   renameSync(tmp, targetPath)
-  return { ok: true, targetPath, backupPath: backup?.backupPath ?? null, previousSha256: backup?.sha256 ?? null }
+  if (backup) {
+    const meta = JSON.parse(readFileSync(backup.metaPath, 'utf8'))
+    meta.postEditSha256 = postEditSha256
+    writeFileSync(backup.metaPath, JSON.stringify(meta, null, 2), { mode: 0o600 })
+  }
+  return { ok: true, targetPath, backupPath: backup?.backupPath ?? null, previousSha256: backup?.sha256 ?? null, postEditSha256 }
 }
 
 /**
  * Undo ONLY the last edit to `targetPath`, leaving earlier edits and all other
- * files in the working set intact. Consumes the restored checkpoint so repeated
- * calls walk backward one edit at a time (LIFO).
+ * files in the working set intact. Fails closed if an unprotected edit modified
+ * `targetPath` after the latest checkpoint (`unprotected_edit_detected`).
  */
 export function undoLastEdit(targetPath, { backupDir = null } = {}) {
   const dir = backupDir || join(dirname(targetPath), '.backups')
@@ -104,8 +111,18 @@ export function undoLastEdit(targetPath, { backupDir = null } = {}) {
   if (!candidates.length) throw new Error(`no_backup_history:${targetPath}`)
 
   const latest = join(dir, candidates[candidates.length - 1])
+  const metaPath = `${latest}.meta.json`
+  if (existsSync(metaPath) && existsSync(targetPath)) {
+    const meta = JSON.parse(readFileSync(metaPath, 'utf8'))
+    if (meta.postEditSha256) {
+      const currentSha = sha256(readFileSync(targetPath))
+      if (currentSha !== meta.postEditSha256) {
+        throw new Error(`unprotected_edit_detected:${targetPath}`)
+      }
+    }
+  }
   const res = restoreRecoveryBackup(latest, targetPath)
   rmSync(latest, { force: true })
-  rmSync(`${latest}.meta.json`, { force: true })
+  rmSync(metaPath, { force: true })
   return { ...res, consumedBackup: latest }
 }

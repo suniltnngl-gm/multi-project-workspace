@@ -78,6 +78,11 @@ test('protectedWriteFile & undoLastEdit roll back ONLY the last edit on one file
     undoLastEdit(fileA, { backupDir: bdir })
     assert.strictEqual(readFileSync(fileA, 'utf8'), 'v2-passing')
     assert.strictEqual(readFileSync(fileB, 'utf8'), 'b2-passing')
+
+    // Regression: an unprotected edit after the last backup must fail closed on undo
+    writeFileSync(fileA, 'v2-unprotected-external-edit', 'utf8')
+    assert.throws(() => undoLastEdit(fileA, { backupDir: bdir }), /unprotected_edit_detected/)
+    assert.strictEqual(readFileSync(fileA, 'utf8'), 'v2-unprotected-external-edit')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
