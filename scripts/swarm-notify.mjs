@@ -62,12 +62,16 @@ if (opts.checkRemote) {
   const kGpu = run('kaggle', ['kernels', 'status', 'edmundrosariosunil/kaggle-qwen-coder'])
   const kTpu = run('kaggle', ['kernels', 'status', 'edmundrosariosunil/kaggle-tpu-smoke'])
   const colab = run('colab', ['sessions'])
+  const colabUsage = run('colab', ['usage'])
   const ghCi = run('gh', ['run', 'list', '--limit', '1', '--json', 'databaseId,status,conclusion'], mpwDir)
 
+  const rateMatch = colabUsage.match(/Usage rate:\s*([0-9.]+)\/hr/i)
+  const colabRate = rateMatch ? Number(rateMatch[1]) : 0
   const current = {
     kaggleGpu: (kGpu.match(/KernelWorkerStatus\.[A-Z]+/) || ['UNKNOWN'])[0],
     kaggleTpu: (kTpu.match(/KernelWorkerStatus\.[A-Z]+/) || ['UNKNOWN'])[0],
     colabSessions: /No active sessions/i.test(colab) ? 'none' : (colab.split(/\r?\n/).find((l) => /Hardware:/i.test(l)) || 'active').trim(),
+    colabBurnRate: colabRate > 0 ? `BURNING:${colabRate}/hr` : '0.00/hr',
     githubCi: ghCi.slice(0, 140)
   }
 
@@ -75,7 +79,7 @@ if (opts.checkRemote) {
   const transitions = diffRemoteStates(prev, current)
   const emitted = []
   for (const tr of transitions) {
-    const sev = /ERROR|failure/i.test(tr.after) ? 'critical' : 'info'
+    const sev = /ERROR|failure|BURNING/i.test(tr.after) ? 'critical' : 'info'
     emitted.push(emitNotification({
       title: `${tr.key} changed`,
       body: `${tr.before ?? 'initial'} -> ${tr.after}`,
