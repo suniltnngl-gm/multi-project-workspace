@@ -47,3 +47,38 @@ export function rankTasks(tasks, { lastUsedByPool = {} } = {}) {
     return String(a.taskId || '').localeCompare(String(b.taskId || ''))
   })
 }
+
+/**
+ * Select a safe parallel batch for a 2-core / 4-thread host:
+ * - At most `maxLocalCpu` (default 1) local CPU job per batch
+ * - Distinct quota pools only (no concurrent hits on the same pool)
+ * - At most 1 `build` writer on the default checkout (unless distinct `worktree` is set)
+ */
+export function selectParallelBatch(tasks, { maxParallel = 2, maxLocalCpu = 1, lastUsedByPool = {} } = {}) {
+  const ranked = rankTasks(tasks, { lastUsedByPool })
+  const batch = []
+  const usedPools = new Set()
+  const usedWorktrees = new Set()
+  let localCpuCount = 0
+
+  for (const t of ranked) {
+    if (batch.length >= maxParallel) break
+    const pool = t?.pinned?.compositeKey?.split(':')[0] ?? t?.costTier ?? t?.taskId
+    if (usedPools.has(pool)) continue
+
+    const isLocal = pool === 'local-llama-cpp' || t?.costTier === 'local'
+    if (isLocal && localCpuCount >= maxLocalCpu) continue
+
+    const nextJob = (t.jobs || []).find((j) => j.status === 'pending')
+    if (nextJob?.type === 'build') {
+      const wt = t.worktree || 'default-checkout'
+      if (usedWorktrees.has(wt)) continue
+      usedWorktrees.add(wt)
+    }
+
+    usedPools.add(pool)
+    if (isLocal) localCpuCount++
+    batch.push(t)
+  }
+  return batch
+}

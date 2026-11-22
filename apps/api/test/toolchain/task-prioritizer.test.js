@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { scoreTask, rankTasks } from '../../src/toolchain/dispatch/task-prioritizer.js'
+import { scoreTask, rankTasks, selectParallelBatch } from '../../src/toolchain/dispatch/task-prioritizer.js'
 import { selectNextTask, transitionToReplan } from '../../src/toolchain/dispatch/job-queue.js'
 
 test('scoreTask & rankTasks prioritize P0/blocker/local over P2/remote and break ties by pool-LRU', () => {
@@ -32,4 +32,17 @@ test('transitionToReplan bounds replans and parks task when maxReplans is exceed
   task = transitionToReplan(task, { reason: 'third_reject' })
   assert.strictEqual(task.state, 'parked')
   assert.match(task.parkReason, /max_replans_exceeded:third_reject/)
+})
+
+test('selectParallelBatch enforces maxLocalCpu=1, distinct pools, and writer worktree isolation', () => {
+  const tasks = [
+    { taskId: 'l1', priority: 'P0', costTier: 'local', state: 'queued', jobs: [{ id: 'j1', type: 'plan', status: 'pending' }] },
+    { taskId: 'l2', priority: 'P0', costTier: 'local', state: 'queued', jobs: [{ id: 'j1', type: 'plan', status: 'pending' }] },
+    { taskId: 'b1', priority: 'P1', costTier: 'daily', pinned: { compositeKey: 'pool-a:cli:m' }, state: 'queued', jobs: [{ id: 'j1', type: 'build', status: 'pending' }] },
+    { taskId: 'b2', priority: 'P1', costTier: 'daily', pinned: { compositeKey: 'pool-b:cli:m' }, state: 'queued', jobs: [{ id: 'j1', type: 'build', status: 'pending' }] },
+    { taskId: 'r1', priority: 'P2', costTier: 'daily', pinned: { compositeKey: 'pool-c:cli:m' }, state: 'queued', jobs: [{ id: 'j1', type: 'review', status: 'pending' }] }
+  ]
+  const batch = selectParallelBatch(tasks, { maxParallel: 3, maxLocalCpu: 1 })
+  // Picks l1 (skips l2 due to maxLocalCpu=1), picks b1 (skips b2 due to same default-checkout writer), picks r1
+  assert.deepStrictEqual(batch.map((t) => t.taskId), ['l1', 'b1', 'r1'])
 })

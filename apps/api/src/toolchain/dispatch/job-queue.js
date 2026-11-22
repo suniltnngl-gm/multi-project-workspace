@@ -22,10 +22,10 @@ export const DEFAULT_JOB_TIMEOUT_MS = Object.freeze({
   publish: 180_000
 })
 
-const TERMINAL_STATES = new Set(['done', 'parked', 'ready_to_publish'])
+const TERMINAL_STATES = new Set(['done', 'parked', 'ready_to_publish', 'waiting_remote'])
 const VALID_STATES = new Set([
   'queued', 'planning', 'replanning', 'building', 'review_plan', 'review_build',
-  'ready_to_publish', 'publishing', 'done', 'parked'
+  'waiting_remote', 'ready_to_publish', 'publishing', 'done', 'parked'
 ])
 
 function nowIso() {
