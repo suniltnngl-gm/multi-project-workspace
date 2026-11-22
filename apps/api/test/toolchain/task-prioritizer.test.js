@@ -46,3 +46,15 @@ test('selectParallelBatch enforces maxLocalCpu=1, distinct pools, and writer wor
   // Picks l1 (skips l2 due to maxLocalCpu=1), picks b1 (skips b2 due to same default-checkout writer), picks r1
   assert.deepStrictEqual(batch.map((t) => t.taskId), ['l1', 'b1', 'r1'])
 })
+
+test('selectParallelBatch blocks write-write and read-write file conflicts while allowing concurrent reads', () => {
+  const tasks = [
+    { taskId: 'w1', priority: 'P0', costTier: 'daily', pinned: { compositeKey: 'p1:c:m' }, worktree: 'wt1', writeFiles: ['a.js'], jobs: [{ id: 'j1', type: 'build', status: 'pending' }] },
+    { taskId: 'w2-same-file', priority: 'P0', costTier: 'daily', pinned: { compositeKey: 'p2:c:m' }, worktree: 'wt2', writeFiles: ['a.js'], jobs: [{ id: 'j1', type: 'build', status: 'pending' }] },
+    { taskId: 'r-dirty', priority: 'P1', costTier: 'daily', pinned: { compositeKey: 'p3:c:m' }, readFiles: ['a.js'], jobs: [{ id: 'j1', type: 'review', status: 'pending' }] },
+    { taskId: 'r-clean1', priority: 'P2', costTier: 'daily', pinned: { compositeKey: 'p4:c:m' }, readFiles: ['b.js'], jobs: [{ id: 'j1', type: 'review', status: 'pending' }] },
+    { taskId: 'r-clean2', priority: 'P2', costTier: 'daily', pinned: { compositeKey: 'p5:c:m' }, readFiles: ['b.js'], jobs: [{ id: 'j1', type: 'review', status: 'pending' }] }
+  ]
+  const batch = selectParallelBatch(tasks, { maxParallel: 4 })
+  assert.deepStrictEqual(batch.map((t) => t.taskId), ['w1', 'r-clean1', 'r-clean2'])
+})

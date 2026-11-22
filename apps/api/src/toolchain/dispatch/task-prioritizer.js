@@ -59,6 +59,8 @@ export function selectParallelBatch(tasks, { maxParallel = 2, maxLocalCpu = 1, l
   const batch = []
   const usedPools = new Set()
   const usedWorktrees = new Set()
+  const usedWriteFiles = new Set()
+  const usedReadFiles = new Set()
   let localCpuCount = 0
 
   for (const t of ranked) {
@@ -69,6 +71,11 @@ export function selectParallelBatch(tasks, { maxParallel = 2, maxLocalCpu = 1, l
     const isLocal = pool === 'local-llama-cpp' || t?.costTier === 'local'
     if (isLocal && localCpuCount >= maxLocalCpu) continue
 
+    const wFiles = Array.isArray(t.writeFiles) ? t.writeFiles : []
+    const rFiles = Array.isArray(t.readFiles) ? t.readFiles : []
+    if (wFiles.some((f) => usedWriteFiles.has(f) || usedReadFiles.has(f))) continue
+    if (rFiles.some((f) => usedWriteFiles.has(f))) continue
+
     const nextJob = (t.jobs || []).find((j) => j.status === 'pending')
     if (nextJob?.type === 'build') {
       const wt = t.worktree || 'default-checkout'
@@ -77,6 +84,8 @@ export function selectParallelBatch(tasks, { maxParallel = 2, maxLocalCpu = 1, l
     }
 
     usedPools.add(pool)
+    for (const f of wFiles) usedWriteFiles.add(f)
+    for (const f of rFiles) usedReadFiles.add(f)
     if (isLocal) localCpuCount++
     batch.push(t)
   }
