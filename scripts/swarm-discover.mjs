@@ -14,6 +14,7 @@ import { execFileSync } from 'node:child_process'
 import { createTask, readQueue, queueStats } from '../apps/api/src/toolchain/dispatch/job-queue.js'
 import { rankTasks, scoreTask } from '../apps/api/src/toolchain/dispatch/task-prioritizer.js'
 import { createWorkItem } from '../apps/api/src/toolchain/dispatch/case-task-lifecycle.js'
+import { readCases, writeCase } from '../apps/api/src/toolchain/dispatch/case-registry.js'
 
 function safeGit(repoDir, args) {
   try {
@@ -85,15 +86,32 @@ export function discoverCandidates({ repoDir = process.cwd(), seedTasks = [], ma
   return rankTasks(candidates).map((c) => ({ ...c, score: scoreTask(c) }))
 }
 
-export function syncDiscoveredToQueue(queueDir, candidates, { apply = false } = {}) {
+export function syncDiscoveredToQueue(queueDir, candidates, { apply = false, caseDir = null } = {}) {
   const existing = readQueue(queueDir)
   const existingIds = new Set(existing.map((t) => t.taskId))
+  const existingCaseIds = new Set(caseDir ? readCases(caseDir).map((c) => c.id) : [])
   const created = []
   const cases = []
   const skipped = []
 
   for (const c of candidates) {
     if (c.kind === 'case') {
+      if (existingCaseIds.has(c.taskId)) {
+        skipped.push(c.taskId)
+        continue
+      }
+      if (apply && caseDir) {
+        writeCase(caseDir, {
+          id: c.taskId,
+          title: c.summary,
+          kind: 'case',
+          state: 'open_case',
+          priority: c.priority,
+          costTier: c.costTier,
+          options: c.options || [],
+          selectedOption: null
+        })
+      }
       cases.push(c.taskId)
       continue
     }
@@ -134,6 +152,7 @@ if (isMain) {
     mode: 'discover',
     repoDir: process.cwd(),
     queueDir: null,
+    caseDir: null,
     seedJson: null,
     apply: false,
     json: false
@@ -146,6 +165,7 @@ if (isMain) {
     else if (a === '--mode') opts.mode = argv[++i]
     else if (a === '--repo') opts.repoDir = argv[++i]
     else if (a === '--queue-dir') opts.queueDir = argv[++i]
+    else if (a === '--case-dir') opts.caseDir = argv[++i]
     else if (a === '--seed-json') opts.seedJson = argv[++i]
   }
 
@@ -156,7 +176,7 @@ if (isMain) {
   }
 
   const candidates = discoverCandidates({ repoDir: opts.repoDir, seedTasks })
-  const sync = opts.queueDir ? syncDiscoveredToQueue(opts.queueDir, candidates, { apply: opts.apply }) : null
+  const sync = opts.queueDir ? syncDiscoveredToQueue(opts.queueDir, candidates, { apply: opts.apply, caseDir: opts.caseDir }) : null
   const payload = {
     ok: true,
     mode: opts.mode,
