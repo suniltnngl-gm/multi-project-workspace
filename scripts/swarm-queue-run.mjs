@@ -74,8 +74,10 @@ function runJob({ job, task, ctx }) {
     if (opts.registry) args.push('--registry', resolve(opts.registry))
     if (job.type === 'plan') {
       args.push('--plan-cli', ctx.cli, '--plan-model', ctx.model, '--plan-prompt', ctx.prompt || `plan ${task.taskId}`)
+      if (ctx.provider) args.push('--plan-provider', ctx.provider)
     } else if (job.type === 'build') {
       args.push('--build-cli', ctx.cli, '--build-model', ctx.model, '--build-prompt', ctx.prompt || `build ${task.taskId}`)
+      if (ctx.provider) args.push('--build-provider', ctx.provider)
     } else if (job.type === 'publish') {
       // Operator gate: publish is never auto-authorized.
       return resolvePromise({ status: 'skipped', reason: 'publish_requires_operator_authorization' })
@@ -146,6 +148,7 @@ async function main() {
   const ctx = {
     cli: opts.cli || task.pinned?.cli || 'agy',
     model: opts.model || task.pinned?.model || '',
+    provider: opts.provider || task.pinned?.provider || null,
     prompt: opts.prompt || ''
   }
 
