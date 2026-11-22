@@ -223,3 +223,36 @@ export function evaluateFiveHourCap({ quotaPool, callsInWindow = 0, caps = DEFAU
     reason: admitted ? 'within_5h_window_cap' : 'five_hour_window_cap_reached'
   }
 }
+
+/**
+ * Quota-aware monthly pacer (e.g. github-copilot: 3%/day -> 90% over 30 days + 10% reserve).
+ * - When `remainingPct` is exposed by the endpoint, admits if `remainingPct > reservePct + daysRemaining * dailyBudgetPct`.
+ * - When `remainingPct` is NOT exposed (null/undefined), falls back to static 5-hour cap (`1 call / 5h`).
+ */
+export function evaluateMonthlyDailyBudget({
+  quotaPool = 'github-copilot',
+  remainingPct = null,
+  daysRemaining = 15,
+  dailyBudgetPct = 3,
+  reservePct = 10,
+  callsIn5hWindow = 0
+} = {}) {
+  if (typeof remainingPct !== 'number' || !Number.isFinite(remainingPct)) {
+    const fb = evaluateFiveHourCap({ quotaPool, callsInWindow: callsIn5hWindow })
+    return { ...fb, mode: 'fallback_5h_cap', targetFloorPct: null }
+  }
+  const days = Math.max(0, Number(daysRemaining) || 0)
+  const targetFloorPct = Math.min(100, reservePct + days * dailyBudgetPct)
+  const admitted = remainingPct > targetFloorPct
+  return {
+    quotaPool,
+    mode: 'daily_pct_budget',
+    remainingPct,
+    targetFloorPct,
+    dailyBudgetPct,
+    reservePct,
+    admitted,
+    headroomPct: +(remainingPct - targetFloorPct).toFixed(2),
+    reason: admitted ? 'within_monthly_3pct_daily_budget' : 'monthly_daily_pct_floor_reached'
+  }
+}

@@ -4,6 +4,7 @@ import {
   evaluatePoolPacing,
   rankPoolsByPacing,
   evaluateFiveHourCap,
+  evaluateMonthlyDailyBudget,
   WINDOW_DURATION_MS
 } from '../../src/toolchain/dispatch/burn-rate-pacer.js'
 
@@ -104,4 +105,22 @@ test('evaluateFiveHourCap enforces copilot=1/5h, agy=4/5h per pool, and uncapped
     assert.strictEqual(res.admitted, true)
     assert.strictEqual(res.cap, null)
   }
+})
+
+test('evaluateMonthlyDailyBudget paces 3%/day (90% in 30d + 10% reserve) and falls back to 1/5h when remainingPct is unknown', () => {
+  // 15 days left -> floor = 10% + 15*3% = 55%
+  const ok = evaluateMonthlyDailyBudget({ remainingPct: 60, daysRemaining: 15 })
+  assert.strictEqual(ok.mode, 'daily_pct_budget')
+  assert.strictEqual(ok.admitted, true)
+  assert.strictEqual(ok.targetFloorPct, 55)
+
+  const throttled = evaluateMonthlyDailyBudget({ remainingPct: 54, daysRemaining: 15 })
+  assert.strictEqual(throttled.admitted, false)
+  assert.strictEqual(throttled.reason, 'monthly_daily_pct_floor_reached')
+
+  // Unknown remainingPct -> falls back to static 1/5h cap
+  const fb0 = evaluateMonthlyDailyBudget({ remainingPct: null, callsIn5hWindow: 0 })
+  assert.strictEqual(fb0.mode, 'fallback_5h_cap')
+  assert.strictEqual(fb0.admitted, true)
+  assert.strictEqual(evaluateMonthlyDailyBudget({ remainingPct: null, callsIn5hWindow: 1 }).admitted, false)
 })
