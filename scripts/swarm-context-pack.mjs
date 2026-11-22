@@ -1,0 +1,115 @@
+#!/usr/bin/env node
+/**
+ * Zero-LLM local discovery & bounded context packer (Task #172, Week 2).
+ *
+ * Pre-packs git status, git diff, git grep matches, and targeted file excerpts
+ * into a bounded prompt bundle before invoking local-llama-cli or cloud siblings.
+ */
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { resolve, relative } from 'node:path'
+import { execFileSync } from 'node:child_process'
+
+export function estimateTokens(text) {
+  return Math.ceil(String(text || '').length / 4)
+}
+
+function safeGit(repoDir, args) {
+  try {
+    return execFileSync('git', ['-C', repoDir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim()
+  } catch {
+    return ''
+  }
+}
+
+export function buildContextPack({
+  repoDir = process.cwd(),
+  query = null,
+  files = [],
+  includeDiff = false,
+  maxChars = 8000,
+  maxGrepLines = 25
+} = {}) {
+  const root = resolve(repoDir)
+  const sections = []
+
+  const status = safeGit(root, ['status', '--short'])
+  if (status) {
+    sections.push({ name: 'git_status', content: status.split(/\r?\n/).slice(0, 30).join('\n') })
+  }
+
+  if (includeDiff) {
+    const diffStat = safeGit(root, ['diff', '--stat'])
+    if (diffStat) sections.push({ name: 'git_diff_stat', content: diffStat })
+  }
+
+  if (query && String(query).trim()) {
+    const grepOut = safeGit(root, ['grep', '-n', '-I', '--max-count', '5', String(query).trim()])
+    if (grepOut) {
+      sections.push({
+        name: 'git_grep',
+        content: grepOut.split(/\r?\n/).slice(0, maxGrepLines).join('\n')
+      })
+    }
+  }
+
+  for (const f of files) {
+    const abs = resolve(root, f)
+    if (!existsSync(abs)) continue
+    const rel = relative(root, abs)
+    const raw = readFileSync(abs, 'utf8')
+    sections.push({ name: `file:${rel}`, content: raw })
+  }
+
+  let text = sections.map((s) => `### ${s.name}\n${s.content}`).join('\n\n')
+  let truncated = false
+  if (text.length > maxChars) {
+    text = `${text.slice(0, Math.max(0, maxChars - 24))}\n...[truncated ${text.length - maxChars} chars]`
+    truncated = true
+  }
+
+  return {
+    ok: true,
+    repo: root,
+    sectionCount: sections.length,
+    sections: sections.map((s) => s.name),
+    charCount: text.length,
+    estimatedTokens: estimateTokens(text),
+    truncated,
+    text
+  }
+}
+
+const argv = process.argv.slice(2)
+const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)
+
+if (isMain) {
+  const opts = {
+    repoDir: process.cwd(),
+    query: null,
+    files: [],
+    includeDiff: false,
+    maxChars: 8000,
+    out: null,
+    json: false
+  }
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a === '--json') opts.json = true
+    else if (a === '--diff') opts.includeDiff = true
+    else if (a === '--repo') opts.repoDir = argv[++i]
+    else if (a === '--query' || a === '-q') opts.query = argv[++i]
+    else if (a === '--files') opts.files = String(argv[++i] || '').split(',').map((s) => s.trim()).filter(Boolean)
+    else if (a === '--max-chars') opts.maxChars = Number(argv[++i]) || 8000
+    else if (a === '--out' || a === '-o') opts.out = argv[++i]
+  }
+
+  const pack = buildContextPack(opts)
+  if (opts.out) {
+    writeFileSync(opts.out, `${pack.text}\n`, 'utf8')
+  }
+  if (opts.json) {
+    process.stdout.write(`${JSON.stringify({ ...pack, outFile: opts.out || null }, null, 2)}\n`)
+  } else {
+    process.stdout.write(`${pack.text}\n`)
+  }
+}
