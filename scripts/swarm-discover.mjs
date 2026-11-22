@@ -41,7 +41,7 @@ export function discoverCandidates({ repoDir = process.cwd(), seedTasks = [], ma
     })
   }
 
-  const todos = safeGit(root, ['grep', '-n', '-I', '-E', 'FIXME|TODO', '--', 'scripts/', 'apps/api/src/toolchain/'])
+  const todos = safeGit(root, ['grep', '-n', '-I', '-E', 'FIXME|TODO', '--', 'scripts/', 'apps/api/src/toolchain/', ':!scripts/swarm-discover.mjs'])
   if (todos) {
     const lines = todos.split(/\r?\n/).filter(Boolean).slice(0, maxTodos)
     lines.forEach((line, idx) => {
