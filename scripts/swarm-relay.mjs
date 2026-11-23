@@ -1,32 +1,57 @@
 #!/usr/bin/env node
 /**
- * SWARM RELAY — graceful multi-sibling relay runner.
+ * SWARM RELAY — graceful, quota-aware multi-sibling relay runner.
  *
- * Alternates sibling CLIs (default: hermes -> direct) across N soft windows.
- * Each sibling runs to completion on its own: there is NO hard kill and NO
- * wall-clock timeout. `--soft-window-sec` is advisory only — once a sibling
- * exceeds it we record `softWindowExceeded` and keep waiting, so in-flight
- * work is never lost and no artifacts are left half-written.
+ * Round-robin parent promotion: each sibling works one window, then is promoted to
+ * the parent slot for the next sibling; on wrap-around the previous parent is demoted
+ * back to a sibling. See scripts/swarm-ring-state.mjs for the durable ledger.
  *
- * Defaults to --dry-run (prints the relay plan, spawns nothing). Pass
- * --execute to run the siblings sequentially for real.
+ * Window contract (noHardKill): the relay never installs a routine wall-clock timer.
+ * A window is a cooperative budget — the sibling is told the deadline, the relay stops
+ * admitting new sub-turns once the budget is spent, and promotion happens at turn exit.
+ * Only an explicit `--stall-kill-sec <n>` (default 0 = disabled) interrupts a runaway.
+ *
+ * Quota-aware slot selection is delegated to scripts/swarm-quota-ring.mjs (pure).
+ *
+ * Defaults to --dry-run (prints the relay plan, spawns nothing). Pass --execute to run.
  */
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
   checkPoolFiveHourAdmission,
+  countPoolCallsInWindow,
   recordPoolCall
 } from '../apps/api/src/toolchain/dispatch/overnight-supervisor.js'
 import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
+import {
+  RING_PRESETS,
+  loadPoolBudgets,
+  poolForSibling,
+  resolveRing,
+  selectSlot
+} from './swarm-quota-ring.mjs'
+import {
+  DEFAULT_RING_STATE_DIR,
+  advanceRingState,
+  createRingState,
+  readRingState,
+  writeRingState
+} from './swarm-ring-state.mjs'
 
 export const RELAY_MODES = ['discover', 'fix']
 export const DEFAULT_SIBLINGS = ['hermes', 'direct']
 export const DEFAULT_WINDOWS = 3
 export const DEFAULT_SOFT_WINDOW_SEC = 300
+export const DEFAULT_ROUNDS = 1
+export const DEFAULT_MAX_CONSERVE_WINDOWS = 1
+export const DEFAULT_STALL_KILL_SEC = 0
 export const DEFAULT_REPORT_DIR = join(homedir(), '.local/state/curl-ai-bridge/reports')
+
+/** Sibling CLIs that accept an explicit `--model` flag. */
+const MODEL_FLAG_CLIS = new Set(['hermes', 'opencode', 'agy'])
 
 const SIBLING_TOKEN = /^[a-z0-9][a-z0-9._-]*$/
 
@@ -44,6 +69,13 @@ function positiveInt(value, fallback, label) {
   return Math.floor(n)
 }
 
+function nonNegativeInt(value, fallback, label) {
+  if (value === undefined || value === null) return fallback
+  const n = Number(value)
+  if (!Number.isFinite(n) || n < 0) throw new Error(`${label} must be a non-negative number (got ${value})`)
+  return Math.floor(n)
+}
+
 export function normalizeSiblings(siblings = DEFAULT_SIBLINGS) {
   const raw = Array.isArray(siblings) ? siblings : String(siblings ?? '').split(',')
   const list = raw
@@ -57,62 +89,64 @@ export function normalizeSiblings(siblings = DEFAULT_SIBLINGS) {
   return list
 }
 
+/** Parse `--model-map a=model,b=model` or a JSON object string. */
+export function parseModelMap(value) {
+  if (!value) return {}
+  if (typeof value === 'object') return { ...value }
+  const text = String(value).trim()
+  if (text.startsWith('{')) {
+    const parsed = JSON.parse(text)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('model_map_json_invalid')
+    return { ...parsed }
+  }
+  const map = {}
+  for (const pair of text.split(',')) {
+    const [k, v] = pair.split('=').map((s) => s.trim())
+    if (!k || !v) throw new Error(`model_map_pair_invalid:${pair}`)
+    map[k] = v
+  }
+  return map
+}
+
+/** Parse an optional quota-status JSON file (`{ pools: { pool: { weeklyRemainingPct } }, conservePools: [] }`). */
+function readQuotaStatus(path) {
+  if (!path) return { quota: {}, conservePools: [] }
+  const parsed = JSON.parse(readFileSync(path, 'utf8'))
+  const pools = parsed?.pools && typeof parsed.pools === 'object' ? parsed.pools : {}
+  const quota = {}
+  for (const [pool, v] of Object.entries(pools)) {
+    quota[pool] = { weeklyRemainingPct: Number(v?.weeklyRemainingPct ?? 100) }
+  }
+  return { quota, conservePools: Array.isArray(parsed?.conservePools) ? [...parsed.conservePools] : [] }
+}
+
 /**
  * Pure planner: no I/O, no CLI spawning. Deterministic in its inputs.
- * @returns {{version:string, mode:string, siblings:string[], windows:number, softWindowSec:number,
- *   reportDir:string, execution:string, assignmentStrategy:string, noHardKill:boolean,
- *   hardKill:boolean, killsSiblings:boolean, killSwitchFile:string, summaryReportPath:string,
- *   assignments:Array<{window:number, sibling:string, softWindowSec:number, hardKill:boolean, reportPath:string}>}}
  */
 export function buildRelayPlan({
   mode = 'discover',
   siblings = DEFAULT_SIBLINGS,
   windows = DEFAULT_WINDOWS,
   softWindowSec = DEFAULT_SOFT_WINDOW_SEC,
+  windowSec = null,
+  rounds = DEFAULT_ROUNDS,
+  preset = null,
+  modelMap = {},
   reportDir = DEFAULT_REPORT_DIR
 } = {}) {
   const planMode = String(mode ?? 'discover').trim().toLowerCase()
   if (!RELAY_MODES.includes(planMode)) {
     throw new Error(`invalid mode '${mode}' (expected one of: ${RELAY_MODES.join('|')})`)
   }
-  const list = normalizeSiblings(siblings)
+  const list = preset ? resolveRing(null, preset) : normalizeSiblings(siblings)
   const windowCount = positiveInt(windows, DEFAULT_WINDOWS, 'windows')
-  const softSec = positiveInt(softWindowSec, DEFAULT_SOFT_WINDOW_SEC, 'softWindowSec')
+  const softSec = positiveInt(windowSec ?? softWindowSec, DEFAULT_SOFT_WINDOW_SEC, 'windowSec')
   const dir = resolve(expandHome(reportDir))
+  const models = modelMap && typeof modelMap === 'object' ? modelMap : {}
 
-  const assignments = Array.from({ length: windowCount }, (_, i) => {
-    const window = i + 1
-    const idx = i % list.length
-    const sibling = list[idx]
-    const siblingSlot = `sibling${idx + 1}`
-    const promotedToParentSlot = `parent${idx + 1}`
-    const hasParent = i > 0
-    const prevIdx = hasParent ? (i - 1) % list.length : null
-    const parentSibling = hasParent ? list[prevIdx] : null
-    const parentSlot = hasParent ? `parent${prevIdx + 1}` : null
-    const parentWindow = hasParent ? i : null
-    const parentFindingsPath = hasParent
-      ? join(dir, `relay-${planMode}-w${i}-${parentSibling}-findings.json`)
-      : null
-    const demotedFromParentSlot = i >= list.length ? `parent${idx + 1}` : null
-
-    return {
-      window,
-      sibling,
-      role: 'sibling',
-      siblingSlot,
-      promotedToParentSlot,
-      demotedFromParentSlot,
-      parentSibling,
-      parentSlot,
-      parentWindow,
-      parentFindingsPath,
-      softWindowSec: softSec,
-      hardKill: false,
-      findingsPath: join(dir, `relay-${planMode}-w${window}-${sibling}-findings.json`),
-      reportPath: join(dir, `relay-${planMode}-w${window}-${sibling}.json`)
-    }
-  })
+  const assignments = Array.from({ length: windowCount }, (_, i) => buildAssignment({
+    list, index: i, dir, planMode, softSec, models
+  }))
 
   return {
     version: 'relay-plan/v1',
@@ -120,6 +154,9 @@ export function buildRelayPlan({
     siblings: list,
     windows: windowCount,
     softWindowSec: softSec,
+    rounds: rounds === 'continuous' ? 'continuous' : positiveInt(rounds, DEFAULT_ROUNDS, 'rounds'),
+    preset: preset || null,
+    modelMap: models,
     reportDir: dir,
     execution: 'sequential',
     assignmentStrategy: 'round_robin',
@@ -129,6 +166,45 @@ export function buildRelayPlan({
     killSwitchFile: join(homedir(), '.local/state/curl-ai-bridge/overnight/STOP_SWARM'),
     summaryReportPath: join(dir, `relay-${planMode}-summary.json`),
     assignments
+  }
+}
+
+/** One window's assignment. `index` is zero-based across the whole run (rounds included). */
+export function buildAssignment({ list, index, dir, planMode, softSec, models = {} }) {
+  const window = index + 1
+  const idx = index % list.length
+  const sibling = list[idx]
+  const siblingSlot = `sibling${idx + 1}`
+  const promotedToParentSlot = `parent${idx + 1}`
+  const hasParent = index > 0
+  const prevIdx = hasParent ? (index - 1) % list.length : null
+  const parentSibling = hasParent ? list[prevIdx] : null
+  const parentSlot = hasParent ? `parent${prevIdx + 1}` : null
+  const parentWindow = hasParent ? index : null
+  const parentFindingsPath = hasParent
+    ? join(dir, `relay-${planMode}-w${index}-${parentSibling}-findings.json`)
+    : null
+  const demotedFromParentSlot = index >= list.length ? `parent${idx + 1}` : null
+
+  return {
+    window,
+    index,
+    round: Math.floor(index / list.length) + 1,
+    sibling,
+    role: 'sibling',
+    siblingSlot,
+    promotedToParentSlot,
+    demotedFromParentSlot,
+    parentSibling,
+    parentSlot,
+    parentWindow,
+    parentFindingsPath,
+    model: models[sibling] || null,
+    pool: poolForSibling(sibling),
+    softWindowSec: softSec,
+    hardKill: false,
+    findingsPath: join(dir, `relay-${planMode}-w${window}-${sibling}-findings.json`),
+    reportPath: join(dir, `relay-${planMode}-w${window}-${sibling}.json`)
   }
 }
 
@@ -144,12 +220,18 @@ export function buildSiblingPrompt({
   parentSlot = null,
   parentFindingsPath = null,
   softWindowSec,
-  reportPath
+  reportPath,
+  deadlineIso = null
 }) {
   const budget = `Soft window budget ${softWindowSec}s (advisory only — do not self-kill; finish gracefully).`
+  const deadlineLine = deadlineIso
+    ? `Window deadline ${deadlineIso} (cooperative budget: finish before it; the relay stops admitting new sub-turns once the budget is spent).`
+    : ''
   const roleLine = [
     siblingSlot ? `Role: ${siblingSlot}${demotedFromParentSlot ? ` (demoted from ${demotedFromParentSlot} in round-robin ring)` : ''}.` : '',
-    parentSibling ? `Active Parent: ${parentSlot} (${parentSibling}) — read parent findings at ${parentFindingsPath} and query via "swarm ask --all <question>" if clarity is needed.` : 'Active Parent: none (bootstrap window 1).',
+    parentSibling
+      ? `Active Parent: ${parentSlot} (${parentSibling}) — read parent findings at ${parentFindingsPath} and query via "swarm ask --parent-slot ${parentSlot} <question>" if clarity is needed.`
+      : 'Active Parent: none (bootstrap window 1).',
     promotedToParentSlot ? `On completion, you are promoted to ${promotedToParentSlot} for the next sibling.` : ''
   ].filter(Boolean).join(' ')
   if (mode === 'fix') {
@@ -158,6 +240,7 @@ export function buildSiblingPrompt({
       roleLine,
       `Apply the smallest verified fix set for the active case/task, run focused tests, and write a concise JSON report to ${reportPath}.`,
       'Never force-push, never reset --hard, never discard untracked work.',
+      deadlineLine,
       budget
     ].filter(Boolean).join(' ')
   }
@@ -166,6 +249,7 @@ export function buildSiblingPrompt({
     roleLine,
     `Discover prioritized work and multi-option cases, then write a concise JSON report to ${reportPath}.`,
     'Read-only exploration only: propose options, do not mutate the working tree.',
+    deadlineLine,
     budget
   ].filter(Boolean).join(' ')
 }
@@ -177,10 +261,10 @@ function envBinName(sibling) {
 /**
  * Resolve the argv for a sibling CLI. `opencode` is pinned to `run --standalone`
  * (never `serve`, per workspace hard rules). Unknown siblings fall back to a
- * same-named binary. Override with SWARM_RELAY_<SIBLING>_BIN, e.g.
- * SWARM_RELAY_HERMES_BIN="hermes chat --prompt".
+ * same-named binary. Override with SWARM_RELAY_<SIBLING>_BIN.
+ * `model` is appended only for CLIs that accept `--model`.
  */
-export function buildSiblingCommand(sibling, { prompt }) {
+export function buildSiblingCommand(sibling, { prompt, model = null }) {
   const override = process.env[envBinName(sibling)]
   let base
   if (override && override.trim()) base = override.trim().split(/\s+/)
@@ -197,12 +281,41 @@ export function buildSiblingCommand(sibling, { prompt }) {
     // Hard rule: never launch opencode serve/attach from the relay.
     base = base.filter((token) => token !== 'serve')
   }
-  return { command: base[0], args: [...base.slice(1), prompt] }
+  const args = [...base.slice(1)]
+  if (model && MODEL_FLAG_CLIS.has(sibling)) args.push('--model', String(model))
+  args.push(prompt)
+  return { command: base[0], args }
 }
 
 function writeReport(path, payload) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
   protectedWriteFile(path, `${JSON.stringify(payload, null, 2)}\n`)
+}
+
+/**
+ * Run one child. No routine timer: `stallKillSec` defaults to 0 (disabled) so a normal
+ * turn is never interrupted. When enabled, a runaway turn is killed at the stall limit.
+ */
+function runChild({ command, args, cwd, env, stallKillSec, windowStartMs }) {
+  return new Promise((resolvePromise) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'inherit', 'inherit'], cwd, env, detached: true })
+    let settled = false
+    let timer = null
+    const finish = (status, signal, error, stallKilled) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolvePromise({ status, signal, error, stallKilled, elapsedMs: Date.now() - windowStartMs })
+    }
+    if (Number(stallKillSec) > 0 && child.pid) {
+      timer = setTimeout(() => {
+        try { process.kill(-child.pid, 'SIGKILL') } catch { try { child.kill('SIGKILL') } catch { /* already gone */ } }
+        finish(null, 'SIGKILL', null, true)
+      }, Number(stallKillSec) * 1000)
+    }
+    child.on('error', (err) => finish(null, null, err, false))
+    child.on('close', (code, signal) => finish(code, signal, null, false))
+  })
 }
 
 function parseArgs(argv) {
@@ -211,6 +324,15 @@ function parseArgs(argv) {
     siblings: DEFAULT_SIBLINGS.join(','),
     windows: DEFAULT_WINDOWS,
     softWindowSec: DEFAULT_SOFT_WINDOW_SEC,
+    windowSec: null,
+    rounds: String(DEFAULT_ROUNDS),
+    preset: null,
+    modelMap: null,
+    allowConserve: false,
+    maxConserveWindows: DEFAULT_MAX_CONSERVE_WINDOWS,
+    stallKillSec: DEFAULT_STALL_KILL_SEC,
+    quotaStatus: null,
+    ringStateDir: DEFAULT_RING_STATE_DIR,
     reportDir: DEFAULT_REPORT_DIR,
     execute: false,
     json: false,
@@ -226,6 +348,15 @@ function parseArgs(argv) {
     else if (a === '--siblings') opts.siblings = argv[++i]
     else if (a === '--windows') opts.windows = argv[++i]
     else if (a === '--soft-window-sec') opts.softWindowSec = argv[++i]
+    else if (a === '--window-sec') opts.windowSec = argv[++i]
+    else if (a === '--rounds') opts.rounds = argv[++i]
+    else if (a === '--preset') opts.preset = argv[++i]
+    else if (a === '--model-map') opts.modelMap = argv[++i]
+    else if (a === '--allow-conserve') opts.allowConserve = true
+    else if (a === '--max-conserve-windows') opts.maxConserveWindows = argv[++i]
+    else if (a === '--stall-kill-sec') opts.stallKillSec = argv[++i]
+    else if (a === '--quota-status') opts.quotaStatus = argv[++i]
+    else if (a === '--ring-state-dir') opts.ringStateDir = argv[++i]
     else if (a === '--report-dir') opts.reportDir = argv[++i]
     else throw new Error(`unknown argument '${a}' (try --help)`)
   }
@@ -234,13 +365,22 @@ function parseArgs(argv) {
 
 const USAGE = `Usage: node scripts/swarm-relay.mjs [options]
 
-Graceful multi-sibling relay: alternates sibling CLIs across soft windows.
-No hard kill and no timeout — each sibling finishes on its own.
+Graceful, quota-aware multi-sibling relay with round-robin parent promotion.
+No routine hard kill: a window is a cooperative budget; only --stall-kill-sec interrupts.
 
       --mode <discover|fix>      Relay intent (default: discover)
       --siblings <csv>           Sibling CLIs to alternate (default: hermes,direct)
-      --windows <n>              Number of relay windows (default: 3)
-      --soft-window-sec <n>      Advisory per-window budget in seconds (default: 300)
+      --preset <name>            Roster preset (tier1-ring = hermes,direct,gemini-api,opencode)
+      --windows <n>              Windows per round (default: 3)
+      --rounds <n|continuous>    Rounds to run (default: 1)
+      --window-sec <n>           Cooperative window budget in seconds (default: 300)
+      --soft-window-sec <n>      Alias for --window-sec
+      --model-map <csv|json>     Per-sibling model, e.g. hermes=model,direct=model
+      --allow-conserve           Admit CONSERVE pools (agy-*) up to --max-conserve-windows
+      --max-conserve-windows <n> Cap on CONSERVE windows (default: 1)
+      --stall-kill-sec <n>       Opt-in runaway kill in seconds (default 0 = disabled)
+      --quota-status <file>      JSON with per-pool weeklyRemainingPct + conservePools
+      --ring-state-dir <dir>     Ring ledger directory
       --report-dir <dir>         Report directory (default: ~/.local/state/curl-ai-bridge/reports)
       --dry-run                  Print plan only (default)
       --execute                  Run siblings sequentially, waiting for each to finish
@@ -248,14 +388,24 @@ No hard kill and no timeout — each sibling finishes on its own.
   -h, --help                     Show this help
 `
 
-export function runRelay(argv) {
+export async function runRelay(argv) {
   const opts = parseArgs(argv)
   if (opts.help) {
     process.stdout.write(USAGE)
     return { ok: true, help: true }
   }
 
-  const plan = buildRelayPlan(opts)
+  const plan = buildRelayPlan({
+    mode: opts.mode,
+    siblings: opts.siblings,
+    windows: opts.windows,
+    softWindowSec: opts.softWindowSec,
+    windowSec: opts.windowSec,
+    rounds: opts.rounds,
+    preset: opts.preset,
+    modelMap: parseModelMap(opts.modelMap),
+    reportDir: opts.reportDir
+  })
   const startedAt = new Date().toISOString()
 
   if (!opts.execute) {
@@ -263,9 +413,9 @@ export function runRelay(argv) {
       process.stdout.write(`${JSON.stringify({ ok: true, mode: 'dry-run', executed: false, startedAt, plan }, null, 2)}\n`)
     } else {
       const lines = [
-        `relay plan (dry-run): mode=${plan.mode} windows=${plan.windows} siblings=${plan.siblings.join('->')}`,
-        `soft_window=${plan.softWindowSec}s noHardKill=${plan.noHardKill} execution=${plan.execution} report_dir=${plan.reportDir}`,
-        ...plan.assignments.map((a) => `  w${a.window} ${a.sibling} -> ${a.reportPath}`),
+        `relay plan (dry-run): mode=${plan.mode} windows=${plan.windows} rounds=${plan.rounds} siblings=${plan.siblings.join('->')}`,
+        `window=${plan.softWindowSec}s noHardKill=${plan.noHardKill} stallKillSec=${opts.stallKillSec} execution=${plan.execution} report_dir=${plan.reportDir}`,
+        ...plan.assignments.map((a) => `  w${a.window} r${a.round} ${a.sibling} (${a.pool}) -> ${a.reportPath}`),
         `summary -> ${plan.summaryReportPath}`,
         'dry-run: no sibling CLIs spawned (pass --execute to run)'
       ]
@@ -274,20 +424,60 @@ export function runRelay(argv) {
     return { ok: true, mode: 'dry-run', executed: false, plan }
   }
 
+  const stateDir = join(homedir(), '.local/state/curl-ai-bridge/overnight')
+  const cwd = resolve(new URL('..', import.meta.url).pathname)
+  const { quota, conservePools } = readQuotaStatus(opts.quotaStatus)
+  const budgets = loadPoolBudgets({
+    countCalls: (pool) => countPoolCallsInWindow(stateDir, pool),
+    quota,
+    conservePools
+  })
+
+  const priorState = readRingState(opts.ringStateDir)
+  let ringState = priorState && Array.isArray(priorState.siblings) && priorState.siblings.join(',') === plan.siblings.join(',')
+    ? priorState
+    : createRingState({ siblings: plan.siblings, mode: plan.mode, nowIso: startedAt })
+
   const windows = []
   let stopReason = 'completed'
+  let conserveWindowsUsed = Number(priorState?.conserveWindowsUsed || 0) || 0
+  const totalWindows = plan.rounds === 'continuous' ? Number.POSITIVE_INFINITY : plan.windows * plan.rounds
 
-  for (const assignment of plan.assignments) {
+  for (let index = 0; index < totalWindows; index += 1) {
     if (existsSync(plan.killSwitchFile)) {
       stopReason = 'kill_switch_armed'
       break
     }
 
+    const assignment = buildAssignment({
+      list: plan.siblings, index, dir: plan.reportDir, planMode: plan.mode,
+      softSec: plan.softWindowSec, models: plan.modelMap
+    })
+    const choice = selectSlot({
+      ring: plan.siblings,
+      windowIndex: index,
+      budgets,
+      modelMap: plan.modelMap,
+      allowConserve: opts.allowConserve,
+      maxConserveWindows: nonNegativeInt(opts.maxConserveWindows, DEFAULT_MAX_CONSERVE_WINDOWS, 'maxConserveWindows'),
+      conserveWindowsUsed
+    })
+    if (choice.conserve) conserveWindowsUsed = choice.conserveWindowsUsed
+    if (!choice.admitted) {
+      windows.push({
+        window: assignment.window, round: assignment.round, sibling: assignment.sibling,
+        status: 'deferred_quota', reason: choice.reason, elapsedMs: 0, hardKilled: false
+      })
+      stopReason = 'quota_exhausted'
+      break
+    }
+
+    const deadlineMs = Date.now() + plan.softWindowSec * 1000
     const prompt = buildSiblingPrompt({
       mode: plan.mode,
       window: assignment.window,
-      windows: plan.windows,
-      sibling: assignment.sibling,
+      windows: totalWindows === Number.POSITIVE_INFINITY ? 'continuous' : totalWindows,
+      sibling: choice.sibling,
       siblingSlot: assignment.siblingSlot,
       promotedToParentSlot: assignment.promotedToParentSlot,
       demotedFromParentSlot: assignment.demotedFromParentSlot,
@@ -295,48 +485,63 @@ export function runRelay(argv) {
       parentSlot: assignment.parentSlot,
       parentFindingsPath: assignment.parentFindingsPath,
       softWindowSec: plan.softWindowSec,
-      reportPath: assignment.findingsPath || assignment.reportPath
+      reportPath: assignment.findingsPath || assignment.reportPath,
+      deadlineIso: new Date(deadlineMs).toISOString()
     })
-    const stateDir = join(homedir(), '.local/state/curl-ai-bridge/overnight')
-    let activeSibling = assignment.sibling
-    if (activeSibling === 'agy') {
-      const cap = checkPoolFiveHourAdmission(stateDir, 'agy-gemini')
-      if (!cap.admitted) activeSibling = 'hermes'
-      else recordPoolCall(stateDir, { quotaPool: 'agy-gemini', taskId: `relay-w${assignment.window}`, status: 'ok' })
-    }
-    const { command, args } = buildSiblingCommand(activeSibling, { prompt })
+
+    const { command, args } = buildSiblingCommand(choice.sibling, { prompt, model: choice.model })
     const windowStartedAt = new Date().toISOString()
     const windowStartMs = Date.now()
-
-    // No `timeout` on purpose: the relay never hard-kills a sibling.
-    // Use stdin='ignore' so headless CLIs (like `hermes -z`) never block waiting for stdin EOF.
-    const res = spawnSync(command, args, {
-      stdio: ['ignore', 'inherit', 'inherit'],
-      cwd: resolve(new URL('..', import.meta.url).pathname),
-      env: { ...process.env, SWARM_RELAY_WINDOW: String(assignment.window), SWARM_RELAY_MODE: plan.mode }
+    const res = await runChild({
+      command, args, cwd, stallKillSec: opts.stallKillSec, windowStartMs,
+      env: {
+        ...process.env,
+        SWARM_RELAY_WINDOW: String(assignment.window),
+        SWARM_RELAY_MODE: plan.mode,
+        SWARM_RELAY_WINDOW_INDEX: String(index),
+        SWARM_RELAY_ROUND: String(assignment.round),
+        SWARM_RELAY_SLOT: assignment.siblingSlot,
+        SWARM_RELAY_PARENT_SLOT: assignment.parentSlot || '',
+        SWARM_RELAY_WINDOW_SEC: String(plan.softWindowSec),
+        SWARM_RELAY_DEADLINE_AT: new Date(deadlineMs).toISOString()
+      }
     })
 
-    const elapsedMs = Date.now() - windowStartMs
     const exitCode = typeof res.status === 'number' ? res.status : null
     const entry = {
       window: assignment.window,
-      sibling: assignment.sibling,
+      round: assignment.round,
+      sibling: choice.sibling,
+      pool: choice.pool,
+      model: choice.model,
+      substitutedFor: choice.substitutedFor,
       command,
       argv: args,
       startedAt: windowStartedAt,
       finishedAt: new Date().toISOString(),
-      elapsedMs,
-      softWindowSec: plan.softWindowSec,
-      softWindowExceeded: elapsedMs > plan.softWindowSec * 1000,
-      hardKilled: false,
+      elapsedMs: res.elapsedMs,
+      windowSec: plan.softWindowSec,
+      softWindowExceeded: res.elapsedMs > plan.softWindowSec * 1000,
+      hardKilled: res.stallKilled === true,
       exitCode,
       signal: res.signal || null,
-      status: res.error ? 'spawn_error' : exitCode === 0 ? 'ok' : 'failed',
+      status: res.error ? 'spawn_error' : res.stallKilled ? 'stall_killed' : exitCode === 0 ? 'ok' : 'failed',
       error: res.error ? String(res.error.code || res.error.message) : null,
       findingsPath: assignment.findingsPath || null
     }
+    ringState = advanceRingState(ringState, assignment, {
+      model: choice.model, pool: choice.pool, findingsPath: assignment.findingsPath
+    })
+    ringState.conserveWindowsUsed = conserveWindowsUsed
+    writeRingState(opts.ringStateDir, ringState)
+
     windows.push(entry)
     writeReport(assignment.reportPath, { ...entry, mode: plan.mode, noHardKill: true })
+
+    // Quota ledger: one call against the pool actually used.
+    if (choice.pool) {
+      recordPoolCall(stateDir, { quotaPool: choice.pool, taskId: `relay-w${assignment.window}`, status: entry.status === 'ok' ? 'ok' : `exit_${exitCode ?? 'null'}` })
+    }
 
     if (res.error && res.error.code === 'ENOENT') {
       // Missing CLI: keep relaying so the remaining siblings still run.
@@ -344,18 +549,17 @@ export function runRelay(argv) {
     }
     if (exitCode !== 0) {
       // Self-healing failover: retry once with an alternate $0 sibling (hermes or direct)
-      const fallbackSibling = assignment.sibling === 'hermes' ? 'direct' : 'hermes'
+      const fallbackSibling = choice.sibling === 'hermes' ? 'direct' : 'hermes'
       const fbCmd = buildSiblingCommand(fallbackSibling, { prompt })
       const fbStartMs = Date.now()
-      const fbRes = spawnSync(fbCmd.command, fbCmd.args, {
-        stdio: ['ignore', 'inherit', 'inherit'],
-        cwd: resolve(new URL('..', import.meta.url).pathname),
-        env: { ...process.env, SWARM_RELAY_WINDOW: String(assignment.window), SWARM_RELAY_MODE: plan.mode, SWARM_RELAY_FALLBACK_FROM: assignment.sibling }
+      const fbRes = await runChild({
+        command: fbCmd.command, args: fbCmd.args, cwd, stallKillSec: opts.stallKillSec, windowStartMs: fbStartMs,
+        env: { ...process.env, SWARM_RELAY_WINDOW: String(assignment.window), SWARM_RELAY_MODE: plan.mode, SWARM_RELAY_FALLBACK_FROM: choice.sibling }
       })
       const fbCode = typeof fbRes.status === 'number' ? fbRes.status : null
       entry.failover = {
         fallbackSibling,
-        elapsedMs: Date.now() - fbStartMs,
+        elapsedMs: fbRes.elapsedMs,
         exitCode: fbCode,
         status: !fbRes.error && fbCode === 0 ? 'ok' : 'failed'
       }
@@ -367,6 +571,10 @@ export function runRelay(argv) {
       stopReason = 'sibling_failed'
     }
   }
+
+  ringState.finishedAt = new Date().toISOString()
+  ringState.stopReason = stopReason
+  writeRingState(opts.ringStateDir, ringState)
 
   const summary = {
     ok: windows.every((w) => w.status === 'ok' || w.status === 'ok_after_failover'),
@@ -392,11 +600,12 @@ export function runRelay(argv) {
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 if (isMain) {
-  try {
-    const result = runRelay(process.argv.slice(2))
-    if (result.mode === 'execute' && result.ok === false) process.exitCode = 1
-  } catch (err) {
-    process.stderr.write(`swarm-relay: ${err.message}\n`)
-    process.exitCode = 2
-  }
+  runRelay(process.argv.slice(2))
+    .then((result) => {
+      if (result && result.mode === 'execute' && result.ok === false) process.exitCode = 1
+    })
+    .catch((err) => {
+      process.stderr.write(`swarm-relay: ${err.message}\n`)
+      process.exitCode = 2
+    })
 }

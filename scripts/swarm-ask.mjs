@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 /**
- * Cross-session read-only query CLI (`swarm ask --session <id> "<question>"`).
+ * Cross-session read-only query CLI (`swarm ask --session <id> | --all | --parent-slot <slot> "<question>"`).
  *
  * Defaults to Tier 1 (`--mode grep`, $0 zero-LLM).
  * Explicit `--mode llm` enforces READ-ONLY prompt wrapper and warns if session >60KB.
+ * `--parent-slot` resolves a relay ring slot (parent1..parentK / siblingN / CLI name)
+ * through the ring ledger and greps that parent's findings artifact.
  */
 import { spawnSync } from 'node:child_process'
+import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -18,6 +21,11 @@ import {
   checkPoolFiveHourAdmission,
   recordPoolCall
 } from '../apps/api/src/toolchain/dispatch/overnight-supervisor.js'
+import {
+  DEFAULT_RING_STATE_DIR,
+  readRingState,
+  resolveSlot
+} from './swarm-ring-state.mjs'
 
 const argv = process.argv.slice(2)
 const flag = (name, fallback = null) => {
@@ -27,10 +35,12 @@ const flag = (name, fallback = null) => {
 const has = (name) => argv.includes(name)
 
 if (has('--help') || has('-h') || argv.length === 0) {
-  console.log(`Usage: swarm ask (--session <id> | --all) "<question>" [options]
+  console.log(`Usage: swarm ask (--session <id> | --all | --parent-slot <slot>) "<question>" [options]
 Options:
   --session <id>           Target session/conversation ID
   --all                    Search across ALL handoff cards and AGY transcripts ($0 grep)
+  --parent-slot <slot>     Query a relay ring slot (parent1..parentK / siblingN / CLI name)
+  --ring-state-dir <dir>   Ring ledger directory (default: ~/.local/state/curl-ai-bridge/relay)
   --mode <grep|llm>        Query mode: grep ($0 default) or llm (bounded READ-ONLY headless)
   --cli <agy>              CLI backend for --mode llm (default: agy)
   --timeout <sec>          Timeout in seconds for --mode llm (default: 120)
@@ -45,6 +55,8 @@ Options:
 }
 
 const sessionId = flag('--session', null)
+const parentSlotKey = flag('--parent-slot', null)
+const ringStateDir = flag('--ring-state-dir', DEFAULT_RING_STATE_DIR)
 const mode = flag('--mode', 'grep')
 const cli = flag('--cli', 'agy')
 const timeoutSec = Number(flag('--timeout', '120')) || 120
@@ -53,7 +65,7 @@ const transcriptPath = flag('--transcript', null)
 const handoffDir = flag('--handoff-dir', resolveDefaultHandoffDir())
 
 // Extract positional question (first arg not belonging to a known flag)
-const valueFlags = new Set(['--session', '--mode', '--cli', '--timeout', '--max-matches', '--transcript', '--handoff-dir', '--pool', '--state-dir'])
+const valueFlags = new Set(['--session', '--mode', '--cli', '--timeout', '--max-matches', '--transcript', '--handoff-dir', '--pool', '--state-dir', '--parent-slot', '--ring-state-dir'])
 const positionals = []
 for (let i = 0; i < argv.length; i += 1) {
   if (valueFlags.has(argv[i])) {
@@ -66,9 +78,61 @@ for (let i = 0; i < argv.length; i += 1) {
 const question = positionals.join(' ').trim()
 const searchAll = has('--all')
 
-if ((!sessionId && !searchAll) || !question) {
-  console.error('swarm ask: (--session <id> or --all) and "<question>" are required')
+if ((!sessionId && !searchAll && !parentSlotKey) || !question) {
+  console.error('swarm ask: (--session <id> | --all | --parent-slot <slot>) and "<question>" are required')
   process.exit(1)
+}
+
+/** Grep one artifact (the parent's findings file) for the question, case-insensitive. */
+function grepArtifact(path, query, limit) {
+  if (!path || !existsSync(path)) return { path, found: false, matches: [] }
+  const lines = readFileSync(path, 'utf8').split(/\r?\n/)
+  const needle = String(query || '').toLowerCase()
+  const matches = []
+  for (let i = 0; i < lines.length && matches.length < limit; i += 1) {
+    if (lines[i].toLowerCase().includes(needle)) {
+      matches.push({ line: i + 1, snippet: lines[i].slice(0, 220) })
+    }
+  }
+  return { path, found: true, matches }
+}
+
+if (parentSlotKey) {
+  const state = readRingState(ringStateDir)
+  const slot = resolveSlot(state, parentSlotKey)
+  if (!slot) {
+    console.error(`swarm ask: unknown parent slot '${parentSlotKey}' (ring ledger ${join(ringStateDir, 'ring-state.json')}` + (state ? ' has slots: ' + Object.keys(state.slots).join(',') : ' missing or unreadable') + ')')
+    process.exit(1)
+  }
+  const artifact = grepArtifact(slot.findingsPath, question, maxMatches)
+  const payload = {
+    ok: true,
+    mode: 'grep-parent',
+    parentSlot: parentSlotKey,
+    resolvedSlot: slot.key,
+    cli: slot.cli,
+    model: slot.model,
+    pool: slot.pool,
+    role: slot.role,
+    findingsPath: slot.findingsPath,
+    artifactFound: artifact.found,
+    matchCount: artifact.matches.length,
+    matches: artifact.matches
+  }
+  if (has('--json')) {
+    console.log(JSON.stringify(payload, null, 2))
+  } else if (!artifact.found) {
+    console.log(`swarm ask [grep-parent]: slot=${slot.key} cli=${slot.cli} findings=${slot.findingsPath} (artifact not present yet)`)
+  } else {
+    console.log(`swarm ask [grep-parent]: slot=${slot.key} cli=${slot.cli} matches=${artifact.matches.length}`)
+    for (const m of artifact.matches) {
+      console.log(`  [${slot.cli} findings:${m.line}] ${m.snippet}`)
+    }
+    if (artifact.matches.length === 0) {
+      console.log('  (no matches in parent findings — try --all for a wider grep)')
+    }
+  }
+  process.exit(0)
 }
 
 if (searchAll) {

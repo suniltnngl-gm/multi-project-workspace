@@ -4,11 +4,12 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { buildRelayPlan, buildSiblingCommand } from '../../../scripts/swarm-relay.mjs'
+import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap } from '../../../scripts/swarm-relay.mjs'
 import { computeEvidenceFingerprint, reconcileStaleDiscoveredTasks, parseSeedPayload } from '../../../scripts/swarm-discover.mjs'
 import { buildExecutiveBrief } from '../../../scripts/swarm-brief.mjs'
 import { evaluateOpenCase } from '../../../scripts/swarm-case-solve.mjs'
 import { evaluateDeterministicDiff } from '../../../scripts/swarm-review.mjs'
+import { createRingState, advanceRingState, resolveSlot, readRingState, writeRingState } from '../../../scripts/swarm-ring-state.mjs'
 
 test('offloaded parent helpers (brief, case-solve, review) enforce unrecoverable pause and deterministic gates', () => {
   const paused = evaluateOpenCase({
@@ -46,8 +47,7 @@ test('buildSiblingCommand supports agy, hermes, opencode, and direct as multi-CL
 test('parseSeedPayload converts relay-discover-report/v1 into tasks and multi-option cases', () => {
   const seeds = parseSeedPayload({
     schema: 'relay-discover-report/v1',
-    prioritized_work: [{ id: 'W7', priority: 'P2', title: 'Refresh anchor', options: ['refresh'] }],
-    multi_option_cases: [{ id: 'CASE-E', title: 'Relay rotation', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }]
+    prioritized_work: [{ id: 'W7', priority: 'P2', title: 'Refresh anchor', options: ['refresh'] }], multi_option_cases: [{ id: 'CASE-E', title: 'Relay rotation', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }]
   })
   assert.equal(seeds.length, 2)
   assert.equal(seeds[0].taskId, 'w7')
@@ -142,4 +142,79 @@ test('swarm-relay.mjs --dry-run --json exits 0 with relay-plan/v1', () => {
   assert.equal(plan.version, 'relay-plan/v1')
   assert.equal(plan.noHardKill, true)
   assert.equal(plan.assignments.length, 3)
+})
+
+test('relay rounds and assignments: round wraps at K and carries model/pool', () => {
+  const plan = buildRelayPlan({ preset: 'tier1-ring', windows: 4, rounds: 2, modelMap: { hermes: 'm/hermes' }, reportDir: '/tmp/relay-rounds' })
+  assert.equal(plan.rounds, 2)
+  assert.equal(plan.modelMap.hermes, 'm/hermes')
+  assert.equal(plan.assignments[0].model, 'm/hermes')
+  assert.equal(plan.assignments[0].pool, 'nous-hermes-free')
+
+  const first = buildAssignment({ list: plan.siblings, index: 0, dir: plan.reportDir, planMode: 'discover', softSec: 300, models: plan.modelMap })
+  assert.equal(first.round, 1)
+  const wrapped = buildAssignment({ list: plan.siblings, index: 4, dir: plan.reportDir, planMode: 'discover', softSec: 300, models: plan.modelMap })
+  assert.equal(wrapped.round, 2)
+  assert.equal(wrapped.window, 5)
+  assert.equal(wrapped.demotedFromParentSlot, 'parent1')
+  assert.equal(wrapped.parentSlot, 'parent4')
+})
+
+test('model map parsing and per-sibling --model wiring', () => {
+  assert.deepEqual(parseModelMap('hermes=a/b,direct=c/d'), { hermes: 'a/b', direct: 'c/d' })
+  assert.deepEqual(parseModelMap('{"hermes":"a/b"}'), { hermes: 'a/b' })
+  assert.throws(() => parseModelMap('hermes'), /model_map_pair_invalid/)
+
+  const withModel = buildSiblingCommand('hermes', { prompt: 'hi', model: 'm/x' })
+  assert.deepEqual(withModel.args, ['-z', '--model', 'm/x', 'hi'])
+  const agyWithModel = buildSiblingCommand('agy', { prompt: 'hi', model: 'm/y' })
+  assert.deepEqual(agyWithModel.args, ['-p', '--model', 'm/y', 'hi'])
+  const geminiNoFlag = buildSiblingCommand('gemini-api', { prompt: 'hi', model: 'm/z' })
+  assert.deepEqual(geminiNoFlag.args, ['prompt', 'hi'])
+  const directNoFlag = buildSiblingCommand('direct', { prompt: 'hi', model: 'm/z' })
+  assert.equal(directNoFlag.args.includes('--model'), false)
+})
+
+test('sibling prompt carries the cooperative deadline and parent-scoped query', () => {
+  const prompt = buildSiblingPrompt({
+    mode: 'discover', window: 2, windows: 4, sibling: 'direct', siblingSlot: 'sibling2',
+    promotedToParentSlot: 'parent2', parentSibling: 'hermes', parentSlot: 'parent1',
+    parentFindingsPath: '/tmp/p1.json', softWindowSec: 300, reportPath: '/tmp/w2.json',
+    deadlineIso: '2026-11-23T10:05:00.000Z'
+  })
+  assert.match(prompt, /Window deadline 2026-11-23T10:05:00\.000Z/)
+  assert.match(prompt, /swarm ask --parent-slot parent1 <question>/)
+  assert.match(prompt, /promoted to parent2/)
+  assert.doesNotMatch(prompt, /SIGTERM/)
+})
+
+test('ring ledger round-trips through protectedWriteFile and resolves parent slots', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ring-state-'))
+  try {
+    assert.equal(readRingState(dir), null)
+    let state = createRingState({ siblings: ['hermes', 'direct', 'gemini-api', 'opencode'], mode: 'discover', nowIso: '2026-11-23T10:00:00.000Z' })
+    state = advanceRingState(state, {
+      window: 1, sibling: 'hermes', siblingSlot: 'sibling1',
+      promotedToParentSlot: 'parent1', demotedFromParentSlot: null, parentSlot: null
+    }, { model: 'm/1', pool: 'nous-hermes-free', findingsPath: '/tmp/w1-hermes-findings.json' }, { nowIso: '2026-11-23T10:01:00.000Z' })
+    writeRingState(dir, state)
+    const loaded = readRingState(dir)
+    assert.equal(loaded.schema, 'ring-state/v1')
+    assert.equal(loaded.generation, 1)
+    assert.equal(loaded.slots.sibling1.role, 'parent')
+    assert.equal(loaded.slots.sibling1.promotedAs, 'parent1')
+    assert.equal(resolveSlot(loaded, 'parent1').findingsPath, '/tmp/w1-hermes-findings.json')
+    assert.equal(resolveSlot(loaded, 'hermes').key, 'sibling1')
+
+    const wrapped = advanceRingState(loaded, {
+      window: 5, sibling: 'hermes', siblingSlot: 'sibling1',
+      promotedToParentSlot: 'parent1', demotedFromParentSlot: 'parent1', parentSlot: 'parent4'
+    }, { model: 'm/2', pool: 'nous-hermes-free', findingsPath: '/tmp/w5-hermes-findings.json' }, { nowIso: '2026-11-23T10:25:00.000Z' })
+    assert.equal(wrapped.round, 2)
+    assert.equal(wrapped.slots.sibling1.role, 'sibling')
+    assert.equal(wrapped.slots.sibling1.parentSlot, 'parent4')
+    assert.equal(wrapped.slots.sibling1.promotedAs, null)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
