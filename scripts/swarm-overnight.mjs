@@ -27,6 +27,7 @@ import {
 import { scanAndCompactLocalSessions } from '../apps/api/src/toolchain/dispatch/session-compactor.js'
 import { createLeaseStore } from '../apps/api/src/toolchain/dispatch/lease-store.js'
 import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
+import { discoverCandidates, reconcileStaleDiscoveredTasks } from './swarm-discover.mjs'
 
 const argv = process.argv.slice(2)
 if (argv.includes('--help') || argv.includes('-h')) {
@@ -103,15 +104,13 @@ try {
 } catch {}
 
 function reconcileStaleTasks() {
-  const dirtyPath = join(opts.queueDir, 'disc-dirty-tracked.json')
-  if (!existsSync(dirtyPath)) return
-  const diff = spawnSync('git', ['-C', repoDir, 'diff', '--name-only'], { encoding: 'utf8', timeout: 5000 })
-  if (diff.status === 0 && !String(diff.stdout || '').trim()) {
-    const archiveDir = join(opts.queueDir, '..', 'archive')
-    mkdirSync(archiveDir, { recursive: true })
-    renameSync(dirtyPath, join(archiveDir, 'disc-dirty-tracked.json'))
-    reapedEntries.push('disc-dirty-tracked')
-  }
+  try {
+    const liveCandidates = discoverCandidates({ repoDir })
+    const res = reconcileStaleDiscoveredTasks(opts.queueDir, liveCandidates, { apply: opts.execute })
+    for (const id of res.expired) {
+      if (!reapedEntries.includes(id)) reapedEntries.push(id)
+    }
+  } catch {}
 }
 
 while (true) {

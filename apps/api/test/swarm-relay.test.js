@@ -45,6 +45,7 @@ test('buildRelayPlan alternates hermes -> opencode -> hermes with noHardKill: tr
     ['hermes', 'opencode', 'hermes']
   )
   assert.ok(plan.assignments[0].reportPath.endsWith('relay-discover-w1-hermes.json'))
+  assert.ok(plan.assignments[0].findingsPath.endsWith('relay-discover-w1-hermes-findings.json'))
   assert.ok(plan.assignments[1].reportPath.endsWith('relay-discover-w2-opencode.json'))
   assert.ok(plan.assignments[2].reportPath.endsWith('relay-discover-w3-hermes.json'))
 })

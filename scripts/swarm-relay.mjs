@@ -83,6 +83,7 @@ export function buildRelayPlan({
       sibling,
       softWindowSec: softSec,
       hardKill: false,
+      findingsPath: join(dir, `relay-${planMode}-w${window}-${sibling}-findings.json`),
       reportPath: join(dir, `relay-${planMode}-w${window}-${sibling}.json`)
     }
   })
@@ -240,15 +241,16 @@ export function runRelay(argv) {
       windows: plan.windows,
       sibling: assignment.sibling,
       softWindowSec: plan.softWindowSec,
-      reportPath: assignment.reportPath
+      reportPath: assignment.findingsPath || assignment.reportPath
     })
     const { command, args } = buildSiblingCommand(assignment.sibling, { prompt })
     const windowStartedAt = new Date().toISOString()
     const windowStartMs = Date.now()
 
     // No `timeout` on purpose: the relay never hard-kills a sibling.
+    // Use stdin='ignore' so headless CLIs (like `hermes -z`) never block waiting for stdin EOF.
     const res = spawnSync(command, args, {
-      stdio: 'inherit',
+      stdio: ['ignore', 'inherit', 'inherit'],
       cwd: resolve(new URL('..', import.meta.url).pathname),
       env: { ...process.env, SWARM_RELAY_WINDOW: String(assignment.window), SWARM_RELAY_MODE: plan.mode }
     })
@@ -269,7 +271,8 @@ export function runRelay(argv) {
       exitCode,
       signal: res.signal || null,
       status: res.error ? 'spawn_error' : exitCode === 0 ? 'ok' : 'failed',
-      error: res.error ? String(res.error.code || res.error.message) : null
+      error: res.error ? String(res.error.code || res.error.message) : null,
+      findingsPath: assignment.findingsPath || null
     }
     windows.push(entry)
     writeReport(assignment.reportPath, { ...entry, mode: plan.mode, noHardKill: true })
@@ -284,7 +287,7 @@ export function runRelay(argv) {
       const fbCmd = buildSiblingCommand(fallbackSibling, { prompt })
       const fbStartMs = Date.now()
       const fbRes = spawnSync(fbCmd.command, fbCmd.args, {
-        stdio: 'inherit',
+        stdio: ['ignore', 'inherit', 'inherit'],
         cwd: resolve(new URL('..', import.meta.url).pathname),
         env: { ...process.env, SWARM_RELAY_WINDOW: String(assignment.window), SWARM_RELAY_MODE: plan.mode, SWARM_RELAY_FALLBACK_FROM: assignment.sibling }
       })
