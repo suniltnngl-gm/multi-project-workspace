@@ -20,11 +20,18 @@ export function evaluateDeterministicDiff({ diffText = '', diffCheckExitCode = 0
   if (testExitCode !== 0) {
     return { ok: false, verdict: 'REJECT', reason: 'unit_tests_failed' }
   }
-  const redacted = redactSecrets(diffText)
-  if (redacted.includes('[REDACTED]')) {
+  const addedOrRaw = diffText.includes('\n+')
+    ? diffText
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('+') && !line.startsWith('+++'))
+      .map((line) => line.slice(1))
+      .join('\n')
+    : diffText
+  const redacted = redactSecrets(addedOrRaw)
+  if (redacted !== addedOrRaw) {
     return { ok: false, verdict: 'REJECT', reason: 'secret_pattern_detected_in_diff' }
   }
-  if (/\b(git\s+push\s+--force|git\s+reset\s+--hard)\b/.test(diffText)) {
+  if (/\b(git\s+push\s+--force|git\s+reset\s+--hard|git\s+checkout\s+(?:--\s+)?\.|git\s+restore\s+(?:--staged\s+--worktree\s+|--worktree\s+)?\.)(?:\s|$)/.test(addedOrRaw)) {
     return { ok: false, verdict: 'REJECT', reason: 'unrecoverable_command_in_diff' }
   }
   return { ok: true, verdict: 'ACCEPT', reason: 'deterministic_gates_passed' }

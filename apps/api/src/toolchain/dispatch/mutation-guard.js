@@ -3,13 +3,15 @@
  * helper for swarm state & repo operations.
  */
 import { createHash, randomUUID } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 
 const UNRECOVERABLE_PATTERNS = [
   { id: 'git_force_push', re: /\bgit\s+push\b[^\n]*(--force\b|-f\b|--force-with-lease\b)/i },
   { id: 'git_hard_reset', re: /\bgit\s+reset\s+--hard\b/i },
   { id: 'git_clean_force', re: /\bgit\s+clean\s+-[a-z]*f/i },
+  { id: 'git_wholesale_checkout', re: /\bgit\s+(?:checkout\s+(?:--\s+)?\.|restore\s+(?:--staged\s+--worktree\s+|--worktree\s+)?\.|stash\s+(?:drop|clear))(?:\s|$)/i },
   { id: 'rm_rf_root_or_home', re: /\brm\s+-[a-z]*r[a-z]*f\s+(\/|~|\$HOME|\/home\/sunilkr\/Code\b)/i },
   { id: 'sql_destructive', re: /\b(DROP\s+(TABLE|VIEW|SCHEMA|DATABASE)|TRUNCATE\s+TABLE)\b/i },
   { id: 'cloud_destructive', re: /\b(gcloud\s+projects\s+delete|gsutil\s+rm|gcloud\s+storage\s+rm)\b/i }
@@ -228,17 +230,16 @@ export function undoLastEdit(targetPath, { backupDir = null } = {}) {
 /**
  * Git-checkpoint backup compactor: once changes are staged, committed, or pushed
  * to git/GitHub, git itself holds the durable history for repo files and the
- * milestone is checkpointed. This function:
- *   1. Prunes `.backups/` for the committed/pushed repo files (`keepRepoBackups = 0`
- *      by default, removing empty `.backups/` directories inside the repo).
- *   2. Compacts out-of-repo state `.backups/` directories (`stateBackupDirs`) down
- *      to `keepStateBackups` (default `1` — preserving only the single latest
- *      last-minute undo checkpoint per state file).
+ * milestone is checkpointed. However, every passing diff MUST remain protected by
+ * all three layers: (1) local git commit, (2) GitHub remote push, and (3) at least
+ * 1 per-file `.backups/` checkpoint (`keepRepoBackups = 1` min, `keepStateBackups = 1` min)
+ * so a subsequent bad edit can still be rolled back per-file via `undoLastEdit`
+ * without ever resorting to a wholesale git revert.
  */
 export function pruneBackupsAfterGitCheckpoint({
   committedPaths = [],
   stateBackupDirs = [],
-  keepRepoBackups = 0,
+  keepRepoBackups = 1,
   keepStateBackups = 1,
   maxTotalBytes = DEFAULT_MAX_BACKUP_DIR_BYTES
 } = {}) {
@@ -279,4 +280,74 @@ export function pruneBackupsAfterGitCheckpoint({
   }
 
   return { ok: true, prunedCount, freedBytes }
+}
+
+/**
+ * Triple-layer Passing-Diff Checkpoint (`backup` + `git commit` + `GitHub push`):
+ * Ensures every passing diff is protected by:
+ *   1. A fresh per-file `.backups/` snapshot of each passing file (`createRecoveryBackup`,
+ *      compacted to `keepRepoBackups: 1` so recovery size stays minimal while preserving
+ *      instant per-file undo if a subsequent edit breaks tests),
+ *   2. A local git stage + commit of ONLY the specified passing `files`,
+ *   3. Optional push to `remote` / `branch` (GitHub) + state backup compaction.
+ */
+export function checkpointPassingDiff({
+  repoDir,
+  files = [],
+  message = 'chore(checkpoint): passing diff checkpoint',
+  backupRoot = null,
+  stateBackupDirs = [],
+  push = false,
+  remote = 'origin',
+  branch = 'master',
+  runGit = null
+} = {}) {
+  if (!repoDir) throw new Error('repoDir_required')
+  const root = resolve(repoDir)
+  const relFiles = files.map((f) => String(f).trim()).filter(Boolean)
+  if (!relFiles.length) throw new Error('checkpoint_files_required')
+
+  const absFiles = relFiles.map((f) => resolve(root, f))
+  const backups = []
+  for (const abs of absFiles) {
+    if (!existsSync(abs)) throw new Error(`checkpoint_file_missing:${abs}`)
+    const bdir = backupRoot ? join(resolve(backupRoot), '.backups') : null
+    const bak = createRecoveryBackup(abs, {
+      backupDir: bdir,
+      maxBackupsPerFile: 1
+    })
+    backups.push({ file: abs, backupPath: bak.backupPath, sha256: bak.sha256 })
+  }
+
+  const execGit = runGit || ((args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' }).trim())
+  execGit(['add', '--', ...relFiles])
+  execGit(['commit', '-m', message, '--', ...relFiles])
+  const commitSha = execGit(['rev-parse', '--short', 'HEAD'])
+
+  let pushed = false
+  if (push) {
+    execGit(['push', remote, branch])
+    pushed = true
+  }
+
+  const pruned = pruneBackupsAfterGitCheckpoint({
+    committedPaths: backupRoot ? [] : absFiles,
+    stateBackupDirs: [
+      ...(backupRoot ? [join(resolve(backupRoot), '.backups')] : []),
+      ...stateBackupDirs
+    ],
+    keepRepoBackups: 1,
+    keepStateBackups: 1
+  })
+
+  return {
+    ok: true,
+    commitSha,
+    pushed,
+    remote: push ? remote : null,
+    branch: push ? branch : null,
+    files: relFiles,
+    backups,
+    pruned
+  }
 }

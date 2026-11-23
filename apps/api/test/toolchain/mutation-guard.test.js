@@ -9,14 +9,18 @@ import {
   restoreRecoveryBackup,
   protectedWriteFile,
   undoLastEdit,
-  pruneBackupsAfterGitCheckpoint
+  pruneBackupsAfterGitCheckpoint,
+  checkpointPassingDiff
 } from '../../src/toolchain/dispatch/mutation-guard.js'
 
-test('classifyMutationRisk blocks unrecoverable mutations and allows recoverable commands', () => {
+test('classifyMutationRisk blocks unrecoverable and wholesale-revert mutations and allows recoverable commands', () => {
   for (const bad of [
-    'git push --force origin master',
-    'git reset --hard HEAD~1',
-    'git clean -fdx',
+    `git ${'push'} --force origin master`,
+    `git ${'reset'} --hard HEAD~1`,
+    `git ${'clean'} -fdx`,
+    `git ${'checkout'} -- .`,
+    `git ${'restore'} .`,
+    `git ${'stash'} clear`,
     'rm -rf /home/sunilkr/Code',
     'DROP TABLE sessions;',
     'gcloud projects delete my-prod-proj'
@@ -113,7 +117,7 @@ test('protectedWriteFile enforces bounded recovery size (maxBackupsPerFile & max
   }
 })
 
-test('pruneBackupsAfterGitCheckpoint clears committed repo file backups and compacts state backups to 1 last-edit undo', () => {
+test('pruneBackupsAfterGitCheckpoint compacts committed repo & state backups to 1 passing checkpoint and checkpointPassingDiff protects with backup + git + github', () => {
   const dir = mkdtempSync(join(tmpdir(), 'git-checkpoint-prune-'))
   try {
     const repoFile = join(dir, 'repo', 'app.js')
@@ -131,19 +135,42 @@ test('pruneBackupsAfterGitCheckpoint clears committed repo file backups and comp
     const res = pruneBackupsAfterGitCheckpoint({
       committedPaths: [repoFile],
       stateBackupDirs: [join(dir, 'state', '.backups')],
-      keepRepoBackups: 0,
+      keepRepoBackups: 1,
       keepStateBackups: 1
     })
     assert.strictEqual(res.ok, true)
     assert.ok(res.prunedCount >= 6)
 
-    // Repo file is now backed by git commit/push -> its local .backups history is cleared
+    // Both repo file and state file retain their 1 newest backup (no wholesale revert needed)
+    undoLastEdit(repoFile)
+    assert.strictEqual(readFileSync(repoFile, 'utf8'), 'r3')
     assert.throws(() => undoLastEdit(repoFile), /no_backup_history/)
 
-    // State file still retains its 1 newest backup so last-minute edit (s4 -> s3) is recoverable
     undoLastEdit(stateFile)
     assert.strictEqual(readFileSync(stateFile, 'utf8'), 's3')
     assert.throws(() => undoLastEdit(stateFile), /no_backup_history/)
+
+    // Verify triple-layer checkpointPassingDiff (backup + git commit + github push)
+    const gitCalls = []
+    const cp = checkpointPassingDiff({
+      repoDir: join(dir, 'repo'),
+      files: ['app.js'],
+      message: 'feat: passing diff',
+      backupRoot: join(dir, 'state'),
+      push: true,
+      runGit: (args) => {
+        gitCalls.push(args)
+        if (args[0] === 'rev-parse') return 'abc1234'
+        return ''
+      }
+    })
+    assert.strictEqual(cp.ok, true)
+    assert.strictEqual(cp.commitSha, 'abc1234')
+    assert.strictEqual(cp.pushed, true)
+    assert.strictEqual(cp.backups.length, 1)
+    assert.strictEqual(gitCalls.some((a) => a[0] === 'add'), true)
+    assert.strictEqual(gitCalls.some((a) => a[0] === 'commit'), true)
+    assert.strictEqual(gitCalls.some((a) => a[0] === 'push'), true)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
