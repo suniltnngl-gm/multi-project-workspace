@@ -149,6 +149,8 @@ export function loadPoolBudgets({
     const weeklyRemainingPct = Number(quota[pool]?.weeklyRemainingPct ?? 100)
     const capped = cap !== null && callsInWindow >= cap
     const exhausted = weeklyRemainingPct <= 0
+    const quotaAdmitted = !capped && !exhausted
+    const eligible = quotaAdmitted && !conserve
     budgets[pool] = {
       pool,
       cap,
@@ -158,8 +160,16 @@ export function loadPoolBudgets({
       conserve,
       dailyBudgetPct: policy.dailyBudgetPct ?? null,
       reservePct: policy.reservePct ?? null,
-      admitted: !capped && !exhausted,
-      reason: capped ? 'five_hour_cap_reached' : exhausted ? 'weekly_quota_exhausted' : 'admitted'
+      admitted: quotaAdmitted,
+      quotaAdmitted,
+      eligible,
+      reason: capped
+        ? 'five_hour_cap_reached'
+        : exhausted
+          ? 'weekly_quota_exhausted'
+          : conserve
+            ? 'conserve_excluded_by_default'
+            : 'admitted'
     }
   }
   return budgets

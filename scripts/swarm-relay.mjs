@@ -415,7 +415,7 @@ function parseArgs(argv) {
     else if (a === '--max-conserve-windows') opts.maxConserveWindows = argv[++i]
     else if (a === '--sub-turns') opts.subTurns = argv[++i]
     else if (a === '--stall-kill-sec') opts.stallKillSec = argv[++i]
-    else if (a === '--quota-status') {
+    else if (a === '--quota-status' || a === 'quota-status') {
       const next = argv[i + 1]
       if (!next || next.startsWith('--')) {
         opts.printQuotaStatus = true
@@ -476,9 +476,10 @@ export async function runRelay(argv) {
     } else {
       const lines = [
         `swarm relay quota-status (source=${statusInfo.source || 'sqlite'} | 5h window + live weekly/CONSERVE admission):`,
-        ...Object.values(budgets).map((b) =>
-          `  ${b.pool}: admitted=${b.admitted} conserve=${b.conserve} calls5h=${b.callsInWindow}/${b.cap ?? 'uncapped'} weekly=${b.weeklyRemainingPct}% reason=${b.reason}`
-        )
+        ...Object.values(budgets).map((b) => {
+          const effEligible = b.admitted && (!b.conserve || opts.allowConserve)
+          return `  ${b.pool}: eligible=${effEligible} quotaAdmitted=${b.admitted} conserve=${b.conserve} calls5h=${b.callsInWindow}/${b.cap ?? 'uncapped'} weekly=${b.weeklyRemainingPct}% reason=${b.reason}`
+        })
       ]
       process.stdout.write(`${lines.join('\n')}\n`)
     }

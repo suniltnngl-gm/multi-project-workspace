@@ -219,3 +219,38 @@ test('ring ledger round-trips through protectedWriteFile and resolves parent slo
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('swarm ask fails closed with exit 1 on missing value or unknown parent-slot, and evaluateResourceGate handles caller aliases without RangeError', async () => {
+  const askScript = resolve(new URL('../../../scripts/swarm-ask.mjs', import.meta.url).pathname)
+  const relayScript = resolve(new URL('../../../scripts/swarm-relay.mjs', import.meta.url).pathname)
+  const { evaluateResourceGate } = await import('../src/toolchain/dispatch/resource-gate.js')
+
+  // Missing value for --parent-slot must exit non-zero
+  assert.throws(() => {
+    execFileSync(process.execPath, [askScript, '--parent-slot', '--json'], { encoding: 'utf8', stdio: 'pipe' })
+  })
+
+  // Missing ring ledger for --parent-slot must exit non-zero
+  const emptyDir = mkdtempSync(join(tmpdir(), 'empty-ring-'))
+  try {
+    assert.throws(() => {
+      execFileSync(process.execPath, [askScript, '--parent-slot', 'parent1', '--ring-state-dir', emptyDir, 'what?'], { encoding: 'utf8', stdio: 'pipe' })
+    })
+  } finally {
+    rmSync(emptyDir, { recursive: true, force: true })
+  }
+
+  // Bare `swarm relay quota-status` (positional or flag) exits 0 and prints eligible/quotaAdmitted
+  const qsOut = execFileSync(process.execPath, [relayScript, 'quota-status'], { encoding: 'utf8' })
+  assert.match(qsOut, /agy-gemini: eligible=false quotaAdmitted=true conserve=true/)
+  assert.match(qsOut, /agy-claude-gpt: eligible=false quotaAdmitted=false conserve=true/)
+
+  // Regression for Hermes's RangeError repro when evaluateResourceGate defers without explicit `nowMs`
+  const gateRes = evaluateResourceGate({
+    telemetry: { freeMemoryMb: 1, loadAvg1: 0, cpuCount: 8 },
+    activeCount: 0,
+    now: new Date()
+  })
+  assert.equal(gateRes.verdict, 'deferred')
+  assert.ok(typeof gateRes.nextEligibleAt === 'string' && gateRes.nextEligibleAt.length > 0)
+})

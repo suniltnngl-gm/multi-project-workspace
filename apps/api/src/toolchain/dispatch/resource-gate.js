@@ -38,16 +38,33 @@ export function resolveGateConfig({ env = {}, overrides = {} } = {}) {
  * Fixed check order: busy -> low memory -> high load. `reasons` lists ONLY failing/deferral reasons
  * (empty when admitted); informational conditions such as an unavailable load reading go to `notes`.
  */
-export function evaluateResourceGate({ activeProcesses = 0, activeSlotExpiries = [], telemetry = {}, config = DEFAULT_GATE_CONFIG, nowMs }) {
-  const cfg = { ...DEFAULT_GATE_CONFIG, ...config }
+export function evaluateResourceGate({
+  activeProcesses,
+  activeCount = 0,
+  activeSlotExpiries = [],
+  telemetry = {},
+  config,
+  limits,
+  nowMs,
+  now
+} = {}) {
+  const cfg = { ...DEFAULT_GATE_CONFIG, ...(limits || {}), ...(config || {}) }
+  const active = Number.isFinite(Number(activeProcesses)) ? Number(activeProcesses) : Number(activeCount) || 0
+  const resolvedNowMs = Number.isFinite(Number(nowMs))
+    ? Number(nowMs)
+    : now instanceof Date
+      ? now.getTime()
+      : typeof now === 'string'
+        ? (parseIsoStrict(now) ?? Date.now())
+        : Date.now()
   const reasons = []
   const notes = []
   let nextMs = null
 
-  if (activeProcesses >= cfg.maxConcurrentProcesses) {
+  if (active >= cfg.maxConcurrentProcesses) {
     reasons.push('resource_gate_busy')
     const live = activeSlotExpiries.filter((e) => Number.isFinite(e))
-    nextMs = live.length ? Math.min(...live) : nowMs + cfg.retryAfterMs
+    nextMs = live.length ? Math.min(...live) : resolvedNowMs + cfg.retryAfterMs
   }
   if (!Number.isFinite(telemetry.freeMemoryMb) || telemetry.freeMemoryMb < cfg.minFreeMemoryMb) {
     reasons.push('resource_gate_low_memory')
@@ -64,7 +81,7 @@ export function evaluateResourceGate({ activeProcesses = 0, activeSlotExpiries =
   }
 
   const deferred = reasons.length > 0
-  if (deferred && nextMs === null) nextMs = nowMs + cfg.retryAfterMs
+  if (deferred && nextMs === null) nextMs = resolvedNowMs + cfg.retryAfterMs
   return {
     verdict: deferred ? 'deferred' : 'admitted',
     reasons,
