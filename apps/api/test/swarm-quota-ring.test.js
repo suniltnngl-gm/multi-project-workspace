@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { buildRelayPlan } from '../../../scripts/swarm-relay.mjs'
-import { loadPoolBudgets, selectSlot, evaluateCopilotMonthly, resolveRing, poolForSibling, readLiveSqliteQuota } from '../../../scripts/swarm-quota-ring.mjs'
+import { loadPoolBudgets, selectSlot, evaluateCopilotMonthly, resolveRing, poolForSibling, readLiveSqliteQuota, guestFallbackCandidates } from '../../../scripts/swarm-quota-ring.mjs'
 
 test('loadPoolBudgets excludes capped, weekly-exhausted and unknown-limit pools honestly', () => {
   const budgets = loadPoolBudgets({
@@ -117,7 +117,7 @@ test('k5-pipeline-ring preset rotates 5-stage jobs (discover->case-solve->build-
   assert.equal(plan.rounds, 6)
   assert.equal(plan.assignments.length, 30)
 
-  // Round 1 (W1..W5): discover -> case-solve -> build -> review (direct-vercel) -> publish (local guest fallback)
+  // Round 1 (W1..W5): discover -> case-solve -> build -> review (direct-vercel) -> publish (live roster sibling; never the local dry-run default)
   assert.deepEqual(
     plan.assignments.slice(0, 5).map((a) => ({ job: a.job, sibling: a.sibling, pool: a.pool })),
     [
@@ -125,7 +125,7 @@ test('k5-pipeline-ring preset rotates 5-stage jobs (discover->case-solve->build-
       { job: 'case-solve', sibling: 'direct', pool: 'cloudflare-workers-ai' },
       { job: 'build', sibling: 'gemini-api', pool: 'gemini-api-key' },
       { job: 'review', sibling: 'direct-vercel', pool: 'vercel-ai-gateway' },
-      { job: 'publish', sibling: 'local', pool: 'local-llama-cpp' }
+      { job: 'publish', sibling: 'hermes', pool: 'nous-hermes-free' }
     ]
   )
 
@@ -139,19 +139,33 @@ test('k5-pipeline-ring preset rotates 5-stage jobs (discover->case-solve->build-
   // Verify runtime selectSlot guest admission on Round 1 vs Round 6
   const budgets = loadPoolBudgets({ countCalls: () => 0 })
   const r1Guest = selectSlot({ ring: plan.siblings, windowIndex: 4, round: 1, budgets })
-  assert.equal(r1Guest.sibling, 'local')
-  assert.equal(r1Guest.pool, 'local-llama-cpp')
+  assert.equal(r1Guest.sibling, 'hermes')
+  assert.equal(r1Guest.pool, 'nous-hermes-free')
+  assert.equal(r1Guest.substitutedFor, 'guest')
 
   const r6Guest = selectSlot({ ring: plan.siblings, windowIndex: 29, round: 6, budgets })
   assert.equal(r6Guest.sibling, 'copilot')
   assert.equal(r6Guest.pool, 'github-copilot')
 
-  // When Copilot 1/5h cap is reached on Round 6, guest falls back to local
+  // When Copilot 1/5h cap is reached on Round 6, guest falls back to a live roster sibling
   const r6Capped = selectSlot({
     ring: plan.siblings, windowIndex: 29, round: 6,
     budgets: loadPoolBudgets({ countCalls: (p) => (p === 'github-copilot' ? 1 : 0) })
   })
-  assert.equal(r6Capped.sibling, 'local')
+  assert.equal(r6Capped.sibling, 'hermes')
+})
+
+test('guestFallbackCandidates prefers copilot on cadence rounds, agy under allowConserve, then live roster siblings before local', () => {
+  const list = ['hermes', 'direct', 'gemini-api', 'direct-vercel', 'guest']
+  // Round 1, no conserve: first live roster sibling in ring order after `guest`.
+  assert.equal(guestFallbackCandidates({ list, round: 1, allowConserve: false })[0], 'hermes')
+  // Cadence round: copilot leads; CONSERVE round: agy leads.
+  assert.equal(guestFallbackCandidates({ list, round: 6, allowConserve: false })[0], 'copilot')
+  assert.equal(guestFallbackCandidates({ list, round: 1, allowConserve: true })[0], 'agy')
+  // `local` is only ever the last resort while a live roster sibling exists.
+  const candidates = guestFallbackCandidates({ list, round: 1, allowConserve: false })
+  assert.ok(candidates.indexOf('local') > candidates.indexOf('hermes'))
+  assert.ok(candidates.includes('direct-vercel'))
 })
 
 test('readLiveSqliteQuota loads live weeklyRemainingPct and conservePools from workspace SQLite database', () => {

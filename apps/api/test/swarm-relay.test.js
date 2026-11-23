@@ -1,10 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap } from '../../../scripts/swarm-relay.mjs'
+import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus } from '../../../scripts/swarm-relay.mjs'
 import { computeEvidenceFingerprint, reconcileStaleDiscoveredTasks, parseSeedPayload } from '../../../scripts/swarm-discover.mjs'
 import { buildExecutiveBrief } from '../../../scripts/swarm-brief.mjs'
 import { evaluateOpenCase } from '../../../scripts/swarm-case-solve.mjs'
@@ -217,6 +217,62 @@ test('ring ledger round-trips through protectedWriteFile and resolves parent slo
     assert.equal(wrapped.slots.sibling1.promotedAs, null)
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('window status separates ok_no_findings from failure and counts as success', () => {
+  assert.equal(resolveWindowStatus({ exitCode: 0, findingsWritten: true }), 'ok')
+  assert.equal(resolveWindowStatus({ exitCode: 0, findingsWritten: false }), 'ok_no_findings')
+  assert.equal(resolveWindowStatus({ exitCode: 2, findingsWritten: false }), 'failed')
+  assert.equal(resolveWindowStatus({ error: { code: 'ENOENT' }, exitCode: null, findingsWritten: false }), 'spawn_error')
+  assert.equal(resolveWindowStatus({ stallKilled: true, exitCode: null, findingsWritten: false }), 'stall_killed')
+
+  assert.equal(isSuccessfulWindowStatus('ok'), true)
+  assert.equal(isSuccessfulWindowStatus('ok_no_findings'), true)
+  assert.equal(isSuccessfulWindowStatus('ok_after_failover'), true)
+  assert.equal(isSuccessfulWindowStatus('failed'), false)
+  assert.equal(isSuccessfulWindowStatus('deferred_quota'), false)
+})
+
+test('execute: sibling exit 0 without a findings artifact records ok_no_findings, never silent ok', () => {
+  const root = mkdtempSync(join(tmpdir(), 'relay-findings-'))
+  const scriptPath = resolve(new URL('../../../scripts/swarm-relay.mjs', import.meta.url).pathname)
+  try {
+    const home = join(root, 'home')
+    const reports = join(root, 'reports')
+    const ring = join(root, 'ring')
+    mkdirSync(home, { recursive: true })
+    const fakeBin = join(root, 'fake-sibling.mjs')
+    writeFileSync(fakeBin, [
+      'import { writeFileSync, mkdirSync } from "node:fs"',
+      'import { dirname } from "node:path"',
+      'const prompt = process.argv[process.argv.length - 1] || ""',
+      'const m = prompt.match(/(\\/(?:[^\\s"]+)-findings\\.json)/)',
+      'if (m && process.env.FAKE_WRITE_FINDINGS === "1") { mkdirSync(dirname(m[1]), { recursive: true }); writeFileSync(m[1], "{}\\n") }',
+      'process.exit(0)'
+    ].join('\n'))
+
+    const run = (extraEnv) => JSON.parse(execFileSync(
+      process.execPath,
+      [scriptPath, '--mode', 'discover', '--siblings', 'hermes', '--windows', '1', '--execute', '--report-dir', reports, '--ring-state-dir', ring, '--json'],
+      { encoding: 'utf8', env: { ...process.env, HOME: home, SWARM_RELAY_HERMES_BIN: `${process.execPath} ${fakeBin}`, ...extraEnv } }
+    ))
+
+    const missing = run({})
+    assert.equal(missing.ok, true)
+    assert.equal(missing.windows.length, 1)
+    assert.equal(missing.windows[0].status, 'ok_no_findings')
+    assert.equal(missing.windows[0].exitCode, 0)
+    assert.equal(missing.windows[0].findingsWritten, false)
+    assert.ok(missing.windows[0].findingsPath.endsWith('relay-discover-w1-hermes-findings.json'))
+
+    const written = run({ FAKE_WRITE_FINDINGS: '1' })
+    assert.equal(written.ok, true)
+    assert.equal(written.windows[0].status, 'ok')
+    assert.equal(written.windows[0].findingsWritten, true)
+    assert.equal(existsSync(written.windows[0].findingsPath), true)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })
 

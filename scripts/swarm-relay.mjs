@@ -33,7 +33,8 @@ import {
   poolForSibling,
   readLiveSqliteQuota,
   resolveRing,
-  selectSlot
+  selectSlot,
+  guestFallbackCandidates
 } from './swarm-quota-ring.mjs'
 import {
   DEFAULT_RING_STATE_DIR,
@@ -54,6 +55,24 @@ export const DEFAULT_REPORT_DIR = join(homedir(), '.local/state/curl-ai-bridge/r
 
 /** Sibling CLIs that accept an explicit `--model` flag. */
 const MODEL_FLAG_CLIS = new Set(['hermes', 'opencode', 'agy'])
+
+/**
+ * Classify one window's outcome. A sibling that exits 0 without writing its findings
+ * artifact is `ok_no_findings` — a legitimate "found nothing" result, never a failure —
+ * so the missing-artifact blind spot becomes visible in the ledger instead of silently
+ * recording `status:'ok'` for a stage that produced no report.
+ */
+export function resolveWindowStatus({ error = null, stallKilled = false, exitCode = null, findingsWritten = false } = {}) {
+  if (error) return 'spawn_error'
+  if (stallKilled) return 'stall_killed'
+  if (exitCode !== 0) return 'failed'
+  return findingsWritten ? 'ok' : 'ok_no_findings'
+}
+
+/** Statuses that count as a successful relay window for the summary verdict. */
+export function isSuccessfulWindowStatus(status) {
+  return status === 'ok' || status === 'ok_no_findings' || status === 'ok_after_failover'
+}
 
 const SIBLING_TOKEN = /^[a-z0-9][a-z0-9._-]*$/
 
@@ -188,7 +207,7 @@ export function buildAssignment({ list, index, dir, planMode, softSec, models = 
   const round = Math.floor(index / list.length) + 1
   const rawSibling = list[idx]
   const sibling = rawSibling === 'guest'
-    ? (round % 6 === 0 ? 'copilot' : (allowConserve ? 'agy' : 'local'))
+    ? guestFallbackCandidates({ list, round, allowConserve })[0]
     : rawSibling
   const job = planMode === 'pipeline'
     ? PIPELINE_JOBS[idx % PIPELINE_JOBS.length]
@@ -200,7 +219,7 @@ export function buildAssignment({ list, index, dir, planMode, softSec, models = 
   const prevRound = hasParent ? Math.floor((index - 1) / list.length) + 1 : null
   const rawParentSibling = hasParent ? list[prevIdx] : null
   const parentSibling = rawParentSibling === 'guest'
-    ? (prevRound % 6 === 0 ? 'copilot' : (allowConserve ? 'agy' : 'local'))
+    ? guestFallbackCandidates({ list, round: prevRound, allowConserve })[0]
     : rawParentSibling
   const parentSlot = hasParent ? `parent${prevIdx + 1}` : null
   const parentWindow = hasParent ? index : null
@@ -620,6 +639,8 @@ export async function runRelay(argv) {
     }
 
     const exitCode = typeof res.status === 'number' ? res.status : null
+    const findingsPath = assignment.findingsPath || assignment.reportPath || null
+    const findingsWritten = Boolean(findingsPath && existsSync(findingsPath))
     const entry = {
       window: assignment.window,
       round: assignment.round,
@@ -640,9 +661,10 @@ export async function runRelay(argv) {
       hardKilled: res.stallKilled === true,
       exitCode,
       signal: res.signal || null,
-      status: res.error ? 'spawn_error' : res.stallKilled ? 'stall_killed' : exitCode === 0 ? 'ok' : 'failed',
+      status: resolveWindowStatus({ error: res.error, stallKilled: res.stallKilled === true, exitCode, findingsWritten }),
       error: res.error ? String(res.error.code || res.error.message) : null,
-      findingsPath: assignment.findingsPath || null
+      findingsPath,
+      findingsWritten
     }
     ringState = advanceRingState(ringState, assignment, {
       model: choice.model, pool: choice.pool, findingsPath: assignment.findingsPath
@@ -692,7 +714,7 @@ export async function runRelay(argv) {
   writeRingState(opts.ringStateDir, ringState)
 
   const summary = {
-    ok: windows.every((w) => w.status === 'ok' || w.status === 'ok_after_failover'),
+    ok: windows.every((w) => isSuccessfulWindowStatus(w.status)),
     mode: 'execute',
     executed: true,
     relayMode: plan.mode,

@@ -199,6 +199,33 @@ export function evaluateCopilotMonthly({
 }
 
 /**
+ * Deterministic candidate order for the virtual `guest` roster slot.
+ *
+ * Order: `copilot` on its cadence round, then `agy` when CONSERVE admission is
+ * allowed, then the live roster siblings in ring order (so a stage never resolves
+ * to the resource-gated `local` dry-run default while a real CLI is available),
+ * and finally `$0` `local`/`hermes` as the last resort.
+ */
+export function guestFallbackCandidates({ list, round = null, allowConserve = false, copilotCadenceRound = 6 } = {}) {
+  const ring = Array.isArray(list) ? list : resolveRing(list)
+  const currentRound = round ?? 1
+  const out = []
+  if (copilotCadenceRound > 0 && currentRound % copilotCadenceRound === 0) out.push('copilot')
+  if (allowConserve) out.push('agy')
+  const pos = ring.indexOf('guest')
+  if (pos >= 0) {
+    for (let step = 1; step < ring.length; step += 1) {
+      const candidate = ring[(pos + step) % ring.length]
+      if (candidate !== 'guest' && !out.includes(candidate)) out.push(candidate)
+    }
+  }
+  for (const fallback of ['local', 'hermes']) {
+    if (!out.includes(fallback)) out.push(fallback)
+  }
+  return out
+}
+
+/**
  * Choose the sibling for one window.
  * Deterministic: walks the ring from the roster position, substituting the next
  * admitted sibling when the preferred one is capped / exhausted / CONSERVE-excluded.
@@ -224,16 +251,9 @@ export function selectSlot({
   // Resolve virtual `guest` slot (`W5` in `k5-pipeline-ring`):
   //   1. On `copilotCadenceRound` (default Round 6, or multiples of 6), try `copilot` if admitted + monthly budget allows
   //   2. If `allowConserve` is enabled and within `maxConserveWindows`, try `agy`
-  //   3. Otherwise fall back to `$0` `local` or `hermes`
+  //   3. Otherwise try the live roster siblings in ring order, then `$0` `local`/`hermes`
   if (preferred === 'guest') {
-    const guestCandidates = []
-    if (copilotCadenceRound > 0 && currentRound % copilotCadenceRound === 0) {
-      guestCandidates.push('copilot')
-    }
-    if (allowConserve) {
-      guestCandidates.push('agy')
-    }
-    guestCandidates.push('local', 'hermes')
+    const guestCandidates = guestFallbackCandidates({ list, round: currentRound, allowConserve, copilotCadenceRound })
     for (const candidate of guestCandidates) {
       const pool = poolForSibling(candidate)
       const budget = budgets[pool] || {
