@@ -32,10 +32,12 @@ test('computeEvidenceFingerprint is deterministic and reconcileStaleDiscoveredTa
     const aDir = join(root, 'archive')
     execFileSync('mkdir', ['-p', qDir])
     writeFileSync(join(qDir, 'disc-dirty-tracked.json'), JSON.stringify({ taskId: 'disc-dirty-tracked', state: 'parked', priority: 'P1', jobs: [] }))
+    writeFileSync(join(qDir, 'disc-todo-1.json'), JSON.stringify({ taskId: 'disc-todo-1', state: 'building', priority: 'P2', jobs: [] }))
     const res = reconcileStaleDiscoveredTasks(qDir, [], { apply: true })
     assert.deepEqual(res.expired, ['disc-dirty-tracked'])
     assert.equal(existsSync(join(qDir, 'disc-dirty-tracked.json')), false)
     assert.equal(existsSync(join(aDir, 'disc-dirty-tracked.json')), true)
+    assert.equal(existsSync(join(qDir, 'disc-todo-1.json')), true)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

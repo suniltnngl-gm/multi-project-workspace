@@ -143,9 +143,10 @@ export function reconcileStaleDiscoveredTasks(queueDir, candidates, { apply = fa
   const existing = readQueue(queueDir)
   const expired = []
   const archiveDir = join(queueDir, '..', 'archive')
+  const RESTING_STATES = new Set(['queued', 'parked'])
   for (const t of existing) {
     if (!String(t.taskId || '').startsWith('disc-')) continue
-    if (t.state === 'done') continue
+    if (!RESTING_STATES.has(t.state)) continue
     if (!liveIds.has(t.taskId)) {
       expired.push(t.taskId)
       if (apply) {
