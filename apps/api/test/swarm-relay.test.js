@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, readFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus } from '../../../scripts/swarm-relay.mjs'
@@ -311,23 +311,35 @@ test('swarm ask fails closed with exit 1 on missing value or unknown parent-slot
   assert.ok(typeof gateRes.nextEligibleAt === 'string' && gateRes.nextEligibleAt.length > 0)
 })
 
-test('swarm-relay --quota-aware --write-plan persists a 5h schedule artifact', () => {
+test('swarm-relay --quota-aware --write-plan persists a 0600 schedule artifact inside the state root', () => {
   const scriptPath = resolve(new URL('../../../scripts/swarm-relay.mjs', import.meta.url).pathname)
-  const dir = mkdtempSync(join(tmpdir(), 'relay-plan-'))
+  const home = mkdtempSync(join(tmpdir(), 'relay-home-'))
   try {
-    const planPath = join(dir, 'schedule.json')
-    const out = execFileSync(process.execPath, [scriptPath, '--preset', 'k5-pipeline-ring', '--windows', '60', '--window-sec', '300', '--quota-aware', '--write-plan', planPath, '--dry-run', '--json'], { encoding: 'utf8' })
+    const out = execFileSync(process.execPath, [scriptPath, '--preset', 'k5-pipeline-ring', '--windows', '60', '--window-sec', '300', '--quota-aware', '--write-plan', '--dry-run', '--json'], { encoding: 'utf8', env: { ...process.env, HOME: home } })
     const parsed = JSON.parse(out)
     assert.equal(parsed.quotaAware, true)
-    assert.equal(parsed.schedulePath, planPath)
-    assert.equal(parsed.plan.windows, 60)
-    assert.equal(parsed.plan.assignments.length, 60)
-    const onDisk = JSON.parse(readFileSync(planPath, 'utf8'))
+    assert.ok(parsed.schedulePath.startsWith(join(home, '.local/state/curl-ai-bridge')))
+    assert.equal(statSync(parsed.schedulePath).mode & 0o777, 0o600)
+    const onDisk = JSON.parse(readFileSync(parsed.schedulePath, 'utf8'))
     assert.equal(onDisk.plan.assignments.length, 60)
     // copilot is nominal at rounds 6 and 12; runtime admission caps it to <=1/5h
     assert.equal(onDisk.plan.assignments.filter((a) => a.pool === 'github-copilot').length, 2)
   } finally {
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('swarm-relay --write-plan rejects paths outside the state root', () => {
+  const scriptPath = resolve(new URL('../../../scripts/swarm-relay.mjs', import.meta.url).pathname)
+  const home = mkdtempSync(join(tmpdir(), 'relay-home-'))
+  const outside = mkdtempSync(join(tmpdir(), 'relay-out-'))
+  try {
+    assert.throws(() => {
+      execFileSync(process.execPath, [scriptPath, '--preset', 'k5-pipeline-ring', '--windows', '5', '--write-plan', join(outside, 'schedule.json'), '--dry-run', '--json'], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, HOME: home } })
+    }, /--write-plan path outside the state dir/)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(outside, { recursive: true, force: true })
   }
 })
 

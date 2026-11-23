@@ -16,7 +16,7 @@
  * Defaults to --dry-run (prints the relay plan, spawns nothing). Pass --execute to run.
  */
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -537,11 +537,17 @@ export async function runRelay(argv) {
     // Persist the schedule artifact for cross-session inspection ($0).
     let schedulePath = null
     if (opts.writePlan) {
+      const stateRoot = resolve(homedir(), '.local/state/curl-ai-bridge')
       schedulePath = opts.writePlan === 'auto'
-        ? join(homedir(), '.local/state/curl-ai-bridge/relay', `${startedAt.replace(/[:.]/g, '-')}-schedule.json`)
+        ? join(stateRoot, 'relay', `${startedAt.replace(/[:.]/g, '-')}-schedule.json`)
         : resolve(opts.writePlan)
+      // Fail closed: schedule artifacts must stay inside the curl-ai-bridge state root.
+      const rel = relative(stateRoot, schedulePath)
+      if (!rel || isAbsolute(rel) || rel === '..' || rel.startsWith(`..${sep}`)) {
+        throw new Error(`--write-plan path outside the state dir is not allowed: ${schedulePath}`)
+      }
       mkdirSync(dirname(schedulePath), { recursive: true })
-      protectedWriteFile(schedulePath, `${JSON.stringify({ ok: true, mode: 'dry-run', executed: false, startedAt, quotaAware: Boolean(opts.quotaAware), plan }, null, 2)}\n`)
+      protectedWriteFile(schedulePath, `${JSON.stringify({ ok: true, mode: 'dry-run', executed: false, startedAt, quotaAware: Boolean(opts.quotaAware), plan }, null, 2)}\n`, { mode: 0o600 })
       process.stderr.write(`relay: schedule written -> ${schedulePath}\n`)
     }
     if (opts.json) {

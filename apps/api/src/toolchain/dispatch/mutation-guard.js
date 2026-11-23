@@ -177,7 +177,8 @@ export function restoreRecoveryBackup(backupPath, targetPath) {
 export function protectedWriteFile(targetPath, nextContent, {
   backupDir = null,
   maxBackupsPerFile = DEFAULT_MAX_BACKUPS_PER_FILE,
-  maxTotalBytes = DEFAULT_MAX_BACKUP_DIR_BYTES
+  maxTotalBytes = DEFAULT_MAX_BACKUP_DIR_BYTES,
+  mode = null
 } = {}) {
   const backup = existsSync(targetPath)
     ? createRecoveryBackup(targetPath, { backupDir, maxBackupsPerFile, maxTotalBytes })
@@ -186,7 +187,7 @@ export function protectedWriteFile(targetPath, nextContent, {
   const buf = Buffer.isBuffer(nextContent) ? nextContent : Buffer.from(String(nextContent), 'utf8')
   const postEditSha256 = sha256(buf)
   const tmp = `${targetPath}.edit-${randomUUID()}`
-  writeFileSync(tmp, buf)
+  writeFileSync(tmp, buf, mode ? { mode } : undefined)
   renameSync(tmp, targetPath)
   if (backup) {
     const meta = JSON.parse(readFileSync(backup.metaPath, 'utf8'))
