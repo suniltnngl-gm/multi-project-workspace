@@ -157,7 +157,17 @@ while (true) {
     break
   }
 
-  const pool = nextTask.pinned?.compositeKey?.split(':')[0] || nextTask.costTier || 'local-llama-cpp'
+  const TIER_DEFAULT_POOL = {
+    weekly: 'agy-gemini',
+    monthly: 'github-copilot',
+    daily: 'opencode-tidepool-free',
+    local: 'local-llama-cpp'
+  }
+  const pool =
+    nextTask.pinned?.compositeKey?.split(':')[0] ||
+    TIER_DEFAULT_POOL[nextTask.costTier] ||
+    nextTask.costTier ||
+    'local-llama-cpp'
   const capCheck = checkPoolFiveHourAdmission(opts.stateDir, pool)
   if (!capCheck.admitted) {
     ticks.push({ tick: ticks.length + 1, taskId: nextTask.taskId, pool, status: 'deferred_5h_cap', reason: capCheck.reason })

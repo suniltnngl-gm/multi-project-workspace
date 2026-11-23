@@ -38,6 +38,8 @@ Options:
   --max-matches <n>        Max grep matches (default: 8)
   --transcript <path>      Explicit transcript path override
   --handoff-dir <dir>      Override handoff directory
+  --pool <pool>            Quota pool for --mode llm 5h cap (default: agy-gemini)
+  --state-dir <dir>        Overnight state directory for 5h cap ledger
   --json                   Output JSON`)
   process.exit(0)
 }
@@ -51,7 +53,7 @@ const transcriptPath = flag('--transcript', null)
 const handoffDir = flag('--handoff-dir', resolveDefaultHandoffDir())
 
 // Extract positional question (first arg not belonging to a known flag)
-const valueFlags = new Set(['--session', '--mode', '--cli', '--timeout', '--max-matches', '--transcript', '--handoff-dir'])
+const valueFlags = new Set(['--session', '--mode', '--cli', '--timeout', '--max-matches', '--transcript', '--handoff-dir', '--pool', '--state-dir'])
 const positionals = []
 for (let i = 0; i < argv.length; i += 1) {
   if (valueFlags.has(argv[i])) {
