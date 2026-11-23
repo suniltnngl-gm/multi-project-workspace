@@ -27,7 +27,7 @@ import { evaluateFiveHourCap } from '../apps/api/src/toolchain/dispatch/burn-rat
 
 const argv = process.argv.slice(2)
 const opts = {}
-const boolFlags = new Set(['json', 'dry-run', 'allow-publish', 'once'])
+const boolFlags = new Set(['json', 'dry-run', 'once'])
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i]
   if (!a.startsWith('--')) continue
@@ -82,7 +82,6 @@ function runJob({ job, task, ctx }) {
       // Operator gate: publish is never auto-authorized.
       return resolvePromise({ status: 'skipped', reason: 'publish_requires_operator_authorization' })
     }
-    if (opts['allow-publish']) args.push('--allow-publish')
     if (opts['dry-run']) args.push('--dry-run')
 
     const child = spawn(process.execPath, args, { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] })

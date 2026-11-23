@@ -56,7 +56,7 @@ export function buildCliCommand({
   resume = false,
   prompt,
   cwd,
-  autoCompact = false,
+  autoCompact = true,
   transcriptPath = null,
   compactThresholds = undefined
 }) {

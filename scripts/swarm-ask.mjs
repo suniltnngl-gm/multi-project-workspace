@@ -6,11 +6,17 @@
  * Explicit `--mode llm` enforces READ-ONLY prompt wrapper and warns if session >60KB.
  */
 import { spawnSync } from 'node:child_process'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import {
   buildReadOnlyAskCommand,
   grepSessionTranscript,
   resolveDefaultHandoffDir
 } from '../apps/api/src/toolchain/dispatch/session-handoff.js'
+import {
+  checkPoolFiveHourAdmission,
+  recordPoolCall
+} from '../apps/api/src/toolchain/dispatch/overnight-supervisor.js'
 
 const argv = process.argv.slice(2)
 const flag = (name, fallback = null) => {
@@ -78,15 +84,27 @@ if (mode === 'grep') {
 }
 
 if (mode === 'llm') {
+  const stateRoot = process.env.SWARM_STATE_ROOT || join(homedir(), '.local', 'state', 'curl-ai-bridge')
+  const stateDir = flag('--state-dir', join(stateRoot, 'overnight'))
+  const pool = flag('--pool', cli === 'agy' ? 'agy-gemini' : cli)
+  const cap = checkPoolFiveHourAdmission(stateDir, pool)
+  if (!cap.admitted) {
+    const msg = `swarm ask [blocked]: 5h cap reached for pool=${pool} (${cap.callsInWindow ?? 0}/${cap.cap}). Use --mode grep ($0).`
+    if (has('--json')) console.log(JSON.stringify({ ok: false, mode: 'llm', blocked: true, pool, cap }, null, 2))
+    else console.error(msg)
+    process.exit(2)
+  }
+
   const spec = buildReadOnlyAskCommand({ sessionId, question, cli, timeoutSec, transcriptPath })
   if (spec.sizeWarning) {
     const kb = Math.round(spec.stats.bytes / 1024)
     console.error(`swarm ask [warn]: target session ${sessionId} is ${kb}KB (>60KB). Prefer --mode grep to save weekly quota.`)
   }
   if (has('--dry-run')) {
-    console.log(JSON.stringify({ ok: true, dryRun: true, mode: 'llm', sessionId, sizeWarning: spec.sizeWarning, command: spec.command, args: spec.args }, null, 2))
+    console.log(JSON.stringify({ ok: true, dryRun: true, mode: 'llm', sessionId, pool, cap, sizeWarning: spec.sizeWarning, command: spec.command, args: spec.args }, null, 2))
     process.exit(0)
   }
+  recordPoolCall(stateDir, pool, { source: 'swarm-ask', sessionId })
   const child = spawnSync(spec.command, spec.args, { encoding: 'utf8', timeout: (timeoutSec + 10) * 1000 })
   if (has('--json')) {
     console.log(JSON.stringify({

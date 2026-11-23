@@ -58,7 +58,7 @@ const opts = {
   tickIntervalSec: 0,
   autoDiscover: false,
   lessonSync: false,
-  autoCompact: false,
+  autoCompact: true,
   execute: false,
   json: false
 }
@@ -71,6 +71,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--auto-discover') opts.autoDiscover = true
   else if (a === '--lesson-sync') opts.lessonSync = true
   else if (a === '--auto-compact') opts.autoCompact = true
+  else if (a === '--no-auto-compact') opts.autoCompact = false
   else if (a === '--state-dir') opts.stateDir = resolve(argv[++i])
   else if (a === '--queue-dir') opts.queueDir = resolve(argv[++i])
   else if (a === '--case-dir') opts.caseDir = resolve(argv[++i])
