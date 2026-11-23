@@ -3,6 +3,7 @@ set -euo pipefail
 
 MPW_DIR="${MPW_DIR:-$HOME/Code/multi-project-workspace}"
 STATE_ROOT="${SWARM_STATE_ROOT:-$HOME/.local/state/curl-ai-bridge}"
+export MPW_DIR
 OVERNIGHT_DIR="$STATE_ROOT/overnight"
 STOP_FILE="$OVERNIGHT_DIR/STOP_SWARM"
 
@@ -171,6 +172,8 @@ case "$cmd" in
     ;;
   doctor)
     "$0" status
+    # entry/swarm is unversioned and must stay byte-identical to the repo copy.
+    node "$MPW_DIR/scripts/swarm-entry-drift.mjs" || true
     # Resolve the script path before any cd: callers may invoke `swarm` from any cwd.
     SWARM_CLI_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
     node -e '
