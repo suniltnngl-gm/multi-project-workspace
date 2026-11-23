@@ -44,7 +44,8 @@ export function createRingState({
   siblings,
   mode = 'discover',
   nowIso = new Date().toISOString(),
-  generation = 0
+  generation = 0,
+  runId = null
 } = {}) {
   const list = Array.isArray(siblings) ? [...siblings] : []
   const slots = {}
@@ -61,6 +62,7 @@ export function createRingState({
   })
   return {
     schema: RING_STATE_SCHEMA,
+    runId,
     createdAt: nowIso,
     updatedAt: nowIso,
     generation,

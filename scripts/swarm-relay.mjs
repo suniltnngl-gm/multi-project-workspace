@@ -42,7 +42,6 @@ import {
   DEFAULT_RING_STATE_DIR,
   advanceRingState,
   createRingState,
-  readRingState,
   writeRingState
 } from './swarm-ring-state.mjs'
 
@@ -268,7 +267,7 @@ export function buildAssignment({ list, index, dir, planMode, softSec, models = 
   const parentSlot = hasParent ? `parent${prevIdx + 1}` : null
   const parentWindow = hasParent ? index : null
   const parentFindingsPath = hasParent
-    ? join(dir, `relay-${planMode}-w${index}-${parentSibling}-findings.json`)
+    ? join(dir, `relay-${planMode}-r${prevRound}-w${parentWindow}-${parentSibling}-findings.json`)
     : null
   const demotedFromParentSlot = index >= list.length ? `parent${idx + 1}` : null
 
@@ -291,8 +290,8 @@ export function buildAssignment({ list, index, dir, planMode, softSec, models = 
     pool: poolForSibling(sibling),
     softWindowSec: softSec,
     hardKill: false,
-    findingsPath: join(dir, `relay-${planMode}-w${window}-${sibling}-findings.json`),
-    reportPath: join(dir, `relay-${planMode}-w${window}-${sibling}.json`)
+    findingsPath: join(dir, `relay-${planMode}-r${round}-w${window}-${sibling}-findings.json`),
+    reportPath: join(dir, `relay-${planMode}-r${round}-w${window}-${sibling}.json`)
   }
 }
 
@@ -416,8 +415,21 @@ function writeReport(path, payload) {
  * Run one child. No routine timer: `stallKillSec` defaults to 0 (disabled) so a normal
  * turn is never interrupted. When enabled, a runaway turn is killed at the stall limit.
  */
-function runChild({ command, args, cwd, env, stallKillSec, windowStartMs }) {
+function runChild({ command, args, cwd, env, stallKillSec, windowStartMs, horizonDeadlineMs = null }) {
   return new Promise((resolvePromise) => {
+    // Cooperative caps: an explicit stall bound and/or the run horizon. Both are opt-in.
+    const limits = []
+    if (Number(stallKillSec) > 0) limits.push(Number(stallKillSec) * 1000)
+    if (horizonDeadlineMs) {
+      const remaining = horizonDeadlineMs - Date.now()
+      if (remaining <= 0) {
+        resolvePromise({ status: null, signal: 'HORIZON', error: new Error('horizon_reached'), stallKilled: false, elapsedMs: Date.now() - windowStartMs })
+        return
+      }
+      limits.push(remaining)
+    }
+    const limitMs = limits.length ? Math.min(...limits) : 0
+
     const child = spawn(command, args, { stdio: ['ignore', 'inherit', 'inherit'], cwd, env, detached: true })
     let settled = false
     let timer = null
@@ -427,11 +439,15 @@ function runChild({ command, args, cwd, env, stallKillSec, windowStartMs }) {
       if (timer) clearTimeout(timer)
       resolvePromise({ status, signal, error, stallKilled, elapsedMs: Date.now() - windowStartMs })
     }
-    if (Number(stallKillSec) > 0 && child.pid) {
+    if (limitMs > 0 && child.pid) {
       timer = setTimeout(() => {
-        try { process.kill(-child.pid, 'SIGKILL') } catch { try { child.kill('SIGKILL') } catch { /* already gone */ } }
-        finish(null, 'SIGKILL', null, true)
-      }, Number(stallKillSec) * 1000)
+        // Graceful first, hard kill 5s later; never a routine hard kill.
+        try { process.kill(-child.pid, 'SIGTERM') } catch { try { child.kill('SIGTERM') } catch { /* already gone */ } }
+        setTimeout(() => {
+          try { process.kill(-child.pid, 'SIGKILL') } catch { try { child.kill('SIGKILL') } catch { /* already gone */ } }
+        }, 5000)
+        finish(null, 'SIGTERM', null, true)
+      }, limitMs)
     }
     child.on('error', (err) => finish(null, null, err, false))
     child.on('close', (code, signal) => finish(code, signal, null, false))
@@ -459,6 +475,7 @@ function parseArgs(argv) {
     horizonMs: null,
     allowPartialRound: false,
     minSubTurnSec: 30,
+    clampToHorizon: false,
     printQuotaStatus: false,
     ringStateDir: DEFAULT_RING_STATE_DIR,
     reportDir: DEFAULT_REPORT_DIR,
@@ -500,6 +517,7 @@ function parseArgs(argv) {
     else if (a === '--horizon-ms') opts.horizonMs = argv[++i]
     else if (a === '--allow-partial-round') opts.allowPartialRound = true
     else if (a === '--min-sub-turn-sec') opts.minSubTurnSec = argv[++i]
+    else if (a === '--clamp-to-horizon') opts.clampToHorizon = true
     else if (a === '--write-plan') {
       const next = argv[i + 1]
       if (!next || next.startsWith('--')) opts.writePlan = 'auto'
@@ -532,6 +550,7 @@ No routine hard kill: a window is a cooperative budget; only --stall-kill-sec in
       --horizon-ms <n>           Wall-clock horizon (default 18000000 = 5h); the earliest active pool-call reset pulls it earlier
       --allow-partial-round      Allow starting a round that cannot finish inside the horizon
       --min-sub-turn-sec <n>     Floor for a window's advisory budget after drift (default 30)
+      --clamp-to-horizon         Also cap each sub-turn at the remaining horizon (--horizon-ms)
       --write-plan [file]        Persist the schedule/plan JSON (bare: <state>/relay/<ts>-schedule.json)
       --ring-state-dir <dir>     Ring ledger directory
       --report-dir <dir>         Report directory (default: ~/.local/state/curl-ai-bridge/reports)
@@ -649,14 +668,13 @@ export async function runRelay(argv) {
     conservePools
   })
 
-  const priorState = readRingState(opts.ringStateDir)
-  let ringState = priorState && Array.isArray(priorState.siblings) && priorState.siblings.join(',') === plan.siblings.join(',')
-    ? priorState
-    : createRingState({ siblings: plan.siblings, mode: plan.mode, nowIso: startedAt })
+  // Each invocation gets a fresh, run-scoped ledger: no slot/parent carry-over.
+  const runId = startedAt.replace(/[:.]/g, '-')
+  let ringState = createRingState({ siblings: plan.siblings, mode: plan.mode, nowIso: startedAt, generation: 0, runId })
 
   const windows = []
   let stopReason = 'completed'
-  let conserveWindowsUsed = Number(priorState?.conserveWindowsUsed || 0) || 0
+  let conserveWindowsUsed = 0
   let roundBase = null
   const roundVerdicts = new Map()
   const totalWindows = plan.rounds === 'continuous' ? Number.POSITIVE_INFINITY : plan.windows * plan.rounds
@@ -740,6 +758,7 @@ export async function runRelay(argv) {
       subTurnsExecuted += 1
       res = await runChild({
         command, args, cwd, stallKillSec: opts.stallKillSec, windowStartMs,
+        horizonDeadlineMs: opts.clampToHorizon ? horizonDeadlineMs : null,
         env: {
           ...process.env,
           ...windowPolicyEnv(assignment.job),
@@ -780,6 +799,7 @@ export async function runRelay(argv) {
       subTurnsExecuted,
       subTurnsStoppedByBudget,
       hardKilled: res.stallKilled === true,
+      killedByStallGuard: res.stallKilled === true,
       exitCode,
       signal: res.signal || null,
       status: resolveWindowStatus({ error: res.error, stallKilled: res.stallKilled === true, exitCode, findingsWritten }),
@@ -844,23 +864,40 @@ export async function runRelay(argv) {
     }
 
     if (res.error && res.error.code === 'ENOENT') {
-      // Missing CLI: keep relaying so the remaining siblings still run.
+      // Missing CLI: account the skipped pool call, then keep relaying.
+      recordPoolCall(stateDir, { quotaPool: choice.pool, taskId: `relay-w${assignment.window}`, status: 'missing_cli' })
       continue
     }
     if (exitCode !== 0) {
       // Self-healing failover: retry once with an alternate $0 sibling (hermes or direct)
       const fallbackSibling = choice.sibling === 'hermes' ? 'direct' : 'hermes'
+      const fbPool = poolForSibling(fallbackSibling)
       const fbCmd = buildSiblingCommand(fallbackSibling, { prompt })
       const fbStartMs = Date.now()
       const fbRes = await runChild({
         command: fbCmd.command, args: fbCmd.args, cwd, stallKillSec: opts.stallKillSec, windowStartMs: fbStartMs,
-        env: { ...process.env, SWARM_RELAY_WINDOW: String(assignment.window), SWARM_RELAY_MODE: plan.mode, SWARM_RELAY_FALLBACK_FROM: choice.sibling }
+        horizonDeadlineMs: opts.clampToHorizon ? horizonDeadlineMs : null,
+        env: { ...process.env, ...windowPolicyEnv(assignment.job), SWARM_RELAY_WINDOW: String(assignment.window), SWARM_RELAY_MODE: plan.mode, SWARM_RELAY_FALLBACK_FROM: choice.sibling }
       })
       const fbCode = typeof fbRes.status === 'number' ? fbRes.status : null
+      // Account the call against the pool that actually ran, and attribute the slot to it.
+      recordPoolCall(stateDir, { quotaPool: fbPool, taskId: `relay-w${assignment.window}`, status: !fbRes.error && fbCode === 0 ? 'ok' : `exit_${fbCode ?? 'null'}` })
+      ringState.slots[assignment.siblingSlot] = {
+        ...(ringState.slots[assignment.siblingSlot] || {}),
+        cli: fallbackSibling,
+        pool: fbPool,
+        model: null,
+        findingsPath: assignment.findingsPath
+      }
+      ringState.activeSlot = assignment.siblingSlot
+      ringState.updatedAt = new Date().toISOString()
+      writeRingState(opts.ringStateDir, ringState)
       entry.failover = {
         fallbackSibling,
+        pool: fbPool,
         elapsedMs: fbRes.elapsedMs,
         exitCode: fbCode,
+        killedByStallGuard: fbRes.stallKilled === true,
         status: !fbRes.error && fbCode === 0 ? 'ok' : 'failed'
       }
       if (entry.failover.status === 'ok') {

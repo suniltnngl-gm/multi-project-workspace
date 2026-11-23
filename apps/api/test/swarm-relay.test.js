@@ -135,10 +135,10 @@ test('buildRelayPlan alternates hermes -> opencode -> hermes with noHardKill: tr
     plan.assignments.map((a) => a.sibling),
     ['hermes', 'opencode', 'hermes']
   )
-  assert.ok(plan.assignments[0].reportPath.endsWith('relay-discover-w1-hermes.json'))
-  assert.ok(plan.assignments[0].findingsPath.endsWith('relay-discover-w1-hermes-findings.json'))
-  assert.ok(plan.assignments[1].reportPath.endsWith('relay-discover-w2-opencode.json'))
-  assert.ok(plan.assignments[2].reportPath.endsWith('relay-discover-w3-hermes.json'))
+  assert.ok(plan.assignments[0].reportPath.endsWith('relay-discover-r1-w1-hermes.json'))
+  assert.ok(plan.assignments[0].findingsPath.endsWith('relay-discover-r1-w1-hermes-findings.json'))
+  assert.ok(plan.assignments[1].reportPath.endsWith('relay-discover-r1-w2-opencode.json'))
+  assert.ok(plan.assignments[2].reportPath.endsWith('relay-discover-r2-w3-hermes.json'))
 })
 
 test('swarm-relay.mjs --dry-run --json exits 0 with relay-plan/v1', () => {
@@ -271,7 +271,7 @@ test('execute: sibling exit 0 without a findings artifact records ok_no_findings
     assert.equal(missing.windows[0].status, 'ok_no_findings')
     assert.equal(missing.windows[0].exitCode, 0)
     assert.equal(missing.windows[0].findingsWritten, false)
-    assert.ok(missing.windows[0].findingsPath.endsWith('relay-discover-w1-hermes-findings.json'))
+    assert.ok(missing.windows[0].findingsPath.endsWith('relay-discover-r1-w1-hermes-findings.json'))
 
     const written = run({ FAKE_WRITE_FINDINGS: '1' })
     assert.equal(written.ok, true)
@@ -383,4 +383,18 @@ test('Phase 3 horizon math: rolling pool reset pulls the deadline earlier; drift
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('per-round artifact filenames and run-scoped ring ledger prevent cross-round collisions', () => {
+  const plan = buildRelayPlan({ preset: 'k5-pipeline-ring', windows: 6, rounds: 2, reportDir: '/tmp/relay-roundnames' })
+  const r1w1 = plan.assignments[0]
+  const r2w6 = plan.assignments[5]
+  assert.match(r1w1.findingsPath, /-r1-w1-/)
+  assert.match(r2w6.findingsPath, /-r2-w6-/)
+  assert.notEqual(r1w1.findingsPath, r2w6.findingsPath)
+
+  const st = createRingState({ siblings: ['hermes', 'direct'], mode: 'pipeline', runId: 'run-abc' })
+  assert.equal(st.runId, 'run-abc')
+  assert.equal(st.generation, 0)
+  assert.deepEqual(Object.keys(st.slots), ['sibling1', 'sibling2'])
 })
