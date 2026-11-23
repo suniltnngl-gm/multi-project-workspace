@@ -8,13 +8,18 @@
  * Defaults to --dry-run (zero writes). Pass --apply --queue-dir <dir> to enqueue newly
  * discovered tasks (deduplicated by taskId) into the SP-007/SP-009 job queue.
  */
-import { existsSync, readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { createTask, readQueue, queueStats } from '../apps/api/src/toolchain/dispatch/job-queue.js'
 import { rankTasks, scoreTask } from '../apps/api/src/toolchain/dispatch/task-prioritizer.js'
 import { createWorkItem } from '../apps/api/src/toolchain/dispatch/case-task-lifecycle.js'
 import { readCases, writeCase } from '../apps/api/src/toolchain/dispatch/case-registry.js'
+
+export function computeEvidenceFingerprint({ source = 'unknown', summary = '', headSha = '' } = {}) {
+  return createHash('sha256').update(`${source}|${headSha}|${String(summary).trim()}`).digest('hex').slice(0, 16)
+}
 
 function safeGit(repoDir, args) {
   try {
@@ -83,10 +88,44 @@ export function discoverCandidates({ repoDir = process.cwd(), seedTasks = [], ma
     })
   }
 
-  return rankTasks(candidates).map((c) => ({ ...c, score: scoreTask(c) }))
+  const headSha = safeGit(root, ['rev-parse', '--short', 'HEAD']) || 'no-git'
+  return rankTasks(candidates).map((c) => ({
+    ...c,
+    headSha,
+    evidenceFingerprint: computeEvidenceFingerprint({ source: c.source, summary: c.summary, headSha }),
+    score: scoreTask(c)
+  }))
+}
+
+/**
+ * Auto-archive any active `disc-*` task in queueDir whose premise is no longer present
+ * in the live discovered candidate set (e.g., `disc-dirty-tracked` after tree is clean).
+ */
+export function reconcileStaleDiscoveredTasks(queueDir, candidates, { apply = false } = {}) {
+  if (!queueDir || !existsSync(queueDir)) return { expiredCount: 0, expired: [] }
+  const liveIds = new Set((candidates || []).map((c) => c.taskId))
+  const existing = readQueue(queueDir)
+  const expired = []
+  const archiveDir = join(queueDir, '..', 'archive')
+  for (const t of existing) {
+    if (!String(t.taskId || '').startsWith('disc-')) continue
+    if (t.state === 'done') continue
+    if (!liveIds.has(t.taskId)) {
+      expired.push(t.taskId)
+      if (apply) {
+        const src = join(queueDir, `${t.taskId}.json`)
+        if (existsSync(src)) {
+          mkdirSync(archiveDir, { recursive: true })
+          renameSync(src, join(archiveDir, `${t.taskId}.json`))
+        }
+      }
+    }
+  }
+  return { expiredCount: expired.length, expired }
 }
 
 export function syncDiscoveredToQueue(queueDir, candidates, { apply = false, caseDir = null } = {}) {
+  const reconciled = reconcileStaleDiscoveredTasks(queueDir, candidates, { apply })
   const existing = readQueue(queueDir)
   const existingIds = new Set(existing.map((t) => t.taskId))
   const existingCaseIds = new Set(caseDir ? readCases(caseDir).map((c) => c.id) : [])
@@ -140,6 +179,8 @@ export function syncDiscoveredToQueue(queueDir, candidates, { apply = false, cas
     cases,
     skippedCount: skipped.length,
     skipped,
+    expiredCount: reconciled.expiredCount,
+    expired: reconciled.expired,
     stats: existsSync(queueDir) ? queueStats(queueDir) : null
   }
 }

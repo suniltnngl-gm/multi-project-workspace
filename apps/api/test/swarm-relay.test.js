@@ -1,8 +1,32 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { resolve } from 'node:path'
+import { mkdtempSync, writeFileSync, existsSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { buildRelayPlan } from '../../../scripts/swarm-relay.mjs'
+import { computeEvidenceFingerprint, reconcileStaleDiscoveredTasks } from '../../../scripts/swarm-discover.mjs'
+
+test('computeEvidenceFingerprint is deterministic and reconcileStaleDiscoveredTasks archives stale disc-* tasks', () => {
+  const fp1 = computeEvidenceFingerprint({ source: 'git_diff', summary: 'dirty 2 files', headSha: 'abc1234' })
+  const fp2 = computeEvidenceFingerprint({ source: 'git_diff', summary: 'dirty 2 files', headSha: 'abc1234' })
+  assert.equal(fp1, fp2)
+  assert.equal(fp1.length, 16)
+
+  const root = mkdtempSync(join(tmpdir(), 'disc-reconcile-'))
+  try {
+    const qDir = join(root, 'active')
+    const aDir = join(root, 'archive')
+    execFileSync('mkdir', ['-p', qDir])
+    writeFileSync(join(qDir, 'disc-dirty-tracked.json'), JSON.stringify({ taskId: 'disc-dirty-tracked', state: 'parked', priority: 'P1', jobs: [] }))
+    const res = reconcileStaleDiscoveredTasks(qDir, [], { apply: true })
+    assert.deepEqual(res.expired, ['disc-dirty-tracked'])
+    assert.equal(existsSync(join(qDir, 'disc-dirty-tracked.json')), false)
+    assert.equal(existsSync(join(aDir, 'disc-dirty-tracked.json')), true)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 test('buildRelayPlan alternates hermes -> opencode -> hermes with noHardKill: true', () => {
   const plan = buildRelayPlan({
