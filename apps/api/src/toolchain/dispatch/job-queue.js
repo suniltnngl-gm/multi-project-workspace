@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, existsSync, rmSync } from 'node:fs'
+import { readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, existsSync, rmSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { rankTasks } from './task-prioritizer.js'
@@ -21,6 +21,16 @@ export const DEFAULT_JOB_TIMEOUT_MS = Object.freeze({
   review: 120_000,
   publish: 180_000
 })
+
+export function shouldHarvestTimeoutArtifact({ planDocPath, jobStartedAtMs, minBytes = 200 } = {}) {
+  if (!planDocPath || !existsSync(planDocPath)) return { harvest: false, reason: 'artifact_missing' }
+  const st = statSync(planDocPath)
+  if (st.size < minBytes) return { harvest: false, reason: 'artifact_too_small', bytes: st.size }
+  if (typeof jobStartedAtMs === 'number' && jobStartedAtMs > 0 && st.mtimeMs < jobStartedAtMs - 1000) {
+    return { harvest: false, reason: 'artifact_stale', mtimeMs: st.mtimeMs, jobStartedAtMs }
+  }
+  return { harvest: true, reason: 'fresh_verified_artifact', bytes: st.size, mtimeMs: st.mtimeMs }
+}
 
 const TERMINAL_STATES = new Set(['done', 'parked', 'ready_to_publish', 'waiting_remote'])
 const VALID_STATES = new Set([

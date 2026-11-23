@@ -18,7 +18,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 export const RELAY_MODES = ['discover', 'fix']
-export const DEFAULT_SIBLINGS = ['hermes', 'opencode']
+export const DEFAULT_SIBLINGS = ['hermes', 'direct']
 export const DEFAULT_WINDOWS = 3
 export const DEFAULT_SOFT_WINDOW_SEC = 300
 export const DEFAULT_REPORT_DIR = join(homedir(), '.local/state/curl-ai-bridge/reports')

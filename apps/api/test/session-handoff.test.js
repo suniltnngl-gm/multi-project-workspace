@@ -14,6 +14,7 @@ import {
   buildReadOnlyAskCommand
 } from '../src/toolchain/dispatch/session-handoff.js'
 import { evaluateSessionCompaction } from '../src/toolchain/dispatch/session-compactor.js'
+import { shouldHarvestTimeoutArtifact } from '../src/toolchain/dispatch/job-queue.js'
 import {
   recordPoolCall,
   checkPoolFiveHourAdmission
@@ -152,6 +153,29 @@ test('grepAllSessionTranscripts searches across multiple handoff cards newest-fi
     assert.equal(res.ok, true)
     assert.equal(res.mode, 'grep-all')
     assert.equal(res.matchCount, 2)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('shouldHarvestTimeoutArtifact accepts fresh >=200B artifact and rejects stale or tiny files', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harvest-test-'))
+  try {
+    const planPath = join(dir, 'TASK-plan.md')
+    const jobStart = Date.now()
+    writeFileSync(planPath, 'x'.repeat(250))
+    const fresh = shouldHarvestTimeoutArtifact({ planDocPath: planPath, jobStartedAtMs: jobStart })
+    assert.equal(fresh.harvest, true)
+
+    const stale = shouldHarvestTimeoutArtifact({ planDocPath: planPath, jobStartedAtMs: jobStart + 60_000 })
+    assert.equal(stale.harvest, false)
+    assert.equal(stale.reason, 'artifact_stale')
+
+    const tinyPath = join(dir, 'TINY-plan.md')
+    writeFileSync(tinyPath, 'short')
+    const tiny = shouldHarvestTimeoutArtifact({ planDocPath: tinyPath, jobStartedAtMs: jobStart })
+    assert.equal(tiny.harvest, false)
+    assert.equal(tiny.reason, 'artifact_too_small')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

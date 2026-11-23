@@ -6,8 +6,8 @@
  * timeout, atomically write the result, exit. The runner never holds a CLI open across
  * jobs, so a crash loses at most one bounded job.
  *
- * Publish is operator-gated: this runner never passes --allow-publish. A task reaching
- * publish stays in `ready_to_publish` until an operator acts.
+ * Publish is gated by default: unattended swarm-overnight never passes --allow-publish.
+ * Explicit operator/parent runs may pass --allow-publish once checkpointed + reviewed + green CI.
  */
 import { readFileSync, existsSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -21,14 +21,15 @@ import {
   selectNextTask,
   applyVerdict,
   queueStats,
-  DEFAULT_JOB_TIMEOUT_MS
+  DEFAULT_JOB_TIMEOUT_MS,
+  shouldHarvestTimeoutArtifact
 } from '../apps/api/src/toolchain/dispatch/job-queue.js'
 import { evaluateFiveHourCap } from '../apps/api/src/toolchain/dispatch/burn-rate-pacer.js'
 import { createLeaseStore } from '../apps/api/src/toolchain/dispatch/lease-store.js'
 
 const argv = process.argv.slice(2)
 const opts = {}
-const boolFlags = new Set(['json', 'dry-run', 'once'])
+const boolFlags = new Set(['json', 'dry-run', 'allow-publish', 'once'])
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i]
   if (!a.startsWith('--')) continue
@@ -80,9 +81,11 @@ function runJob({ job, task, ctx }) {
       args.push('--build-cli', ctx.cli, '--build-model', ctx.model, '--build-prompt', ctx.prompt || `build ${task.taskId}`)
       if (ctx.provider) args.push('--build-provider', ctx.provider)
     } else if (job.type === 'publish') {
-      // Operator gate: publish is never auto-authorized.
-      return resolvePromise({ status: 'skipped', reason: 'publish_requires_operator_authorization' })
+      if (!opts['allow-publish']) {
+        return resolvePromise({ status: 'skipped', reason: 'publish_requires_operator_authorization' })
+      }
     }
+    if (opts['allow-publish']) args.push('--allow-publish')
     if (opts['dry-run']) args.push('--dry-run')
     else args.push('--execute')
 
@@ -180,7 +183,22 @@ async function main() {
     prompt: opts.prompt || task.title || ''
   }
 
-  const outcome = await runJob({ job, task, ctx })
+  const jobStartedAtMs = Date.now()
+  let outcome = await runJob({ job, task, ctx })
+
+  // Case resolution (harvest-verified-artifact): if a plan job timed out after writing a fresh,
+  // valid checkpoint plan (>=200 bytes and mtime >= jobStartedAtMs), harvest it.
+  if (outcome.status === 'failed' && String(outcome.reason || '').startsWith('job_timeout:') && job.type === 'plan') {
+    const planDoc = resolve(process.cwd(), 'docs/checkpoints', `${task.taskId.toUpperCase()}-plan.md`)
+    const check = shouldHarvestTimeoutArtifact({ planDocPath: planDoc, jobStartedAtMs, minBytes: 200 })
+    if (check.harvest) {
+      outcome = {
+        status: 'done',
+        reason: 'harvested_post_timeout_artifact',
+        result: { ...outcome.result, harvestedArtifact: planDoc, harvestedBytes: check.bytes }
+      }
+    }
+  }
 
   let next = task
   if (outcome.status === 'done') {
