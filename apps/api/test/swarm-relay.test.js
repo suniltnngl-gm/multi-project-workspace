@@ -79,6 +79,39 @@ test('computeEvidenceFingerprint is deterministic and reconcileStaleDiscoveredTa
   }
 })
 
+test('buildRelayPlan enforces round-robin parent promotion and sibling demotion ring across 4 windows', () => {
+  const plan = buildRelayPlan({
+    mode: 'discover',
+    siblings: ['hermes', 'direct', 'opencode'],
+    windows: 4,
+    softWindowSec: 300,
+    reportDir: '/tmp/relay-ring'
+  })
+  // Window 1: sibling1 (hermes), no parent yet, promoted to parent1
+  assert.equal(plan.assignments[0].siblingSlot, 'sibling1')
+  assert.equal(plan.assignments[0].parentSlot, null)
+  assert.equal(plan.assignments[0].promotedToParentSlot, 'parent1')
+  assert.equal(plan.assignments[0].demotedFromParentSlot, null)
+
+  // Window 2: sibling2 (direct), parent is parent1 (hermes), promoted to parent2
+  assert.equal(plan.assignments[1].siblingSlot, 'sibling2')
+  assert.equal(plan.assignments[1].parentSlot, 'parent1')
+  assert.equal(plan.assignments[1].parentSibling, 'hermes')
+  assert.equal(plan.assignments[1].promotedToParentSlot, 'parent2')
+
+  // Window 3: sibling3 (opencode), parent is parent2 (direct), promoted to parent3
+  assert.equal(plan.assignments[2].siblingSlot, 'sibling3')
+  assert.equal(plan.assignments[2].parentSlot, 'parent2')
+  assert.equal(plan.assignments[2].parentSibling, 'direct')
+  assert.equal(plan.assignments[2].promotedToParentSlot, 'parent3')
+
+  // Window 4 (wrap-around): parent1 demoted back to sibling1 (hermes), while parent3 (opencode) is its parent
+  assert.equal(plan.assignments[3].siblingSlot, 'sibling1')
+  assert.equal(plan.assignments[3].demotedFromParentSlot, 'parent1')
+  assert.equal(plan.assignments[3].parentSlot, 'parent3')
+  assert.equal(plan.assignments[3].parentSibling, 'opencode')
+})
+
 test('buildRelayPlan alternates hermes -> opencode -> hermes with noHardKill: true', () => {
   const plan = buildRelayPlan({
     mode: 'discover',

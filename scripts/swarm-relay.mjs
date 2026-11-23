@@ -81,10 +81,31 @@ export function buildRelayPlan({
 
   const assignments = Array.from({ length: windowCount }, (_, i) => {
     const window = i + 1
-    const sibling = list[i % list.length]
+    const idx = i % list.length
+    const sibling = list[idx]
+    const siblingSlot = `sibling${idx + 1}`
+    const promotedToParentSlot = `parent${idx + 1}`
+    const hasParent = i > 0
+    const prevIdx = hasParent ? (i - 1) % list.length : null
+    const parentSibling = hasParent ? list[prevIdx] : null
+    const parentSlot = hasParent ? `parent${prevIdx + 1}` : null
+    const parentWindow = hasParent ? i : null
+    const parentFindingsPath = hasParent
+      ? join(dir, `relay-${planMode}-w${i}-${parentSibling}-findings.json`)
+      : null
+    const demotedFromParentSlot = i >= list.length ? `parent${idx + 1}` : null
+
     return {
       window,
       sibling,
+      role: 'sibling',
+      siblingSlot,
+      promotedToParentSlot,
+      demotedFromParentSlot,
+      parentSibling,
+      parentSlot,
+      parentWindow,
+      parentFindingsPath,
       softWindowSec: softSec,
       hardKill: false,
       findingsPath: join(dir, `relay-${planMode}-w${window}-${sibling}-findings.json`),
@@ -110,22 +131,42 @@ export function buildRelayPlan({
   }
 }
 
-export function buildSiblingPrompt({ mode, window, windows, sibling, softWindowSec, reportPath }) {
+export function buildSiblingPrompt({
+  mode,
+  window,
+  windows,
+  sibling,
+  siblingSlot = null,
+  promotedToParentSlot = null,
+  demotedFromParentSlot = null,
+  parentSibling = null,
+  parentSlot = null,
+  parentFindingsPath = null,
+  softWindowSec,
+  reportPath
+}) {
   const budget = `Soft window budget ${softWindowSec}s (advisory only — do not self-kill; finish gracefully).`
+  const roleLine = [
+    siblingSlot ? `Role: ${siblingSlot}${demotedFromParentSlot ? ` (demoted from ${demotedFromParentSlot} in round-robin ring)` : ''}.` : '',
+    parentSibling ? `Active Parent: ${parentSlot} (${parentSibling}) — read parent findings at ${parentFindingsPath} and query via "swarm ask --all <question>" if clarity is needed.` : 'Active Parent: none (bootstrap window 1).',
+    promotedToParentSlot ? `On completion, you are promoted to ${promotedToParentSlot} for the next sibling.` : ''
+  ].filter(Boolean).join(' ')
   if (mode === 'fix') {
     return [
       `swarm relay window ${window}/${windows} -> ${sibling} (mode=fix).`,
+      roleLine,
       `Apply the smallest verified fix set for the active case/task, run focused tests, and write a concise JSON report to ${reportPath}.`,
       'Never force-push, never reset --hard, never discard untracked work.',
       budget
-    ].join(' ')
+    ].filter(Boolean).join(' ')
   }
   return [
     `swarm relay window ${window}/${windows} -> ${sibling} (mode=discover).`,
+    roleLine,
     `Discover prioritized work and multi-option cases, then write a concise JSON report to ${reportPath}.`,
     'Read-only exploration only: propose options, do not mutate the working tree.',
     budget
-  ].join(' ')
+  ].filter(Boolean).join(' ')
 }
 
 function envBinName(sibling) {
@@ -246,6 +287,12 @@ export function runRelay(argv) {
       window: assignment.window,
       windows: plan.windows,
       sibling: assignment.sibling,
+      siblingSlot: assignment.siblingSlot,
+      promotedToParentSlot: assignment.promotedToParentSlot,
+      demotedFromParentSlot: assignment.demotedFromParentSlot,
+      parentSibling: assignment.parentSibling,
+      parentSlot: assignment.parentSlot,
+      parentFindingsPath: assignment.parentFindingsPath,
       softWindowSec: plan.softWindowSec,
       reportPath: assignment.findingsPath || assignment.reportPath
     })
