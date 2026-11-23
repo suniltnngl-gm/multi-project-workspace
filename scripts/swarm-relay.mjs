@@ -17,7 +17,7 @@
  */
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
@@ -26,7 +26,7 @@ import {
   recordPoolCall
 } from '../apps/api/src/toolchain/dispatch/overnight-supervisor.js'
 import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
-import { applyPublishGate, deterministicRoundReview, readReviewVerdict, roundBaseSha } from './swarm-publish-gate.mjs'
+import { applyPublishGate, deterministicRoundReview, modifiedFilesSince, readReviewVerdict, roundBaseSha } from './swarm-publish-gate.mjs'
 import { windowPolicyEnv } from './swarm-window-policy.mjs'
 import {
   PIPELINE_JOBS,
@@ -78,14 +78,62 @@ export function isSuccessfulWindowStatus(status) {
 /**
  * GOV-1 review gate: an ACCEPT requires a valid W4 artifact AND clean deterministic
  * gates AND no unreviewed head advance since the round base.
+ * `deterministicOnly` permits an ACCEPT when the sibling emitted no verdict at all,
+ * provided every deterministic gate ran and the round actually produced a diff.
  */
-export function evaluateReviewGate({ artifactVerdict = null, artifactReason = null, detOk = false, detReason = null, headDrift = false } = {}) {
+export function evaluateReviewGate({ artifactVerdict = null, artifactReason = null, detOk = false, detReason = null, headDrift = false, deterministicOnly = false } = {}) {
   if (artifactVerdict === 'ACCEPT' && detOk && !headDrift) {
     return { verdict: 'ACCEPT', reason: artifactReason || 'w4_accept' }
   }
   if (!detOk) return { verdict: 'REJECT', reason: detReason || 'deterministic_gate_failed' }
   if (headDrift) return { verdict: 'REJECT', reason: 'unexpected_head_advance_before_review' }
+  if (deterministicOnly) return { verdict: 'ACCEPT', reason: 'deterministic_only_no_sibling_artifact' }
   return { verdict: 'REJECT', reason: 'w4_verdict_reject' }
+}
+
+/** Parse only an explicit standalone `VERDICT: ACCEPT|REJECT` line; ignore tool-call JSON. */
+export function parseSiblingVerdict(stdoutText) {
+  for (const line of String(stdoutText || '').split(/\r?\n/)) {
+    const m = line.trim().match(/^VERDICT:\s*(ACCEPT|REJECT)\b/i)
+    if (m) return m[1].toUpperCase()
+  }
+  return null
+}
+
+/** Bounded, $0 pre-pack injected into the W4 prompt so a file-less CLI can still review. */
+export function buildReviewBrief({ repoDir, baseSha = null, parentFindingsPath = null, det = null, maxBytes = 12000 } = {}) {
+  const range = baseSha || 'HEAD'
+  const diff = spawnSync('git', ['-C', repoDir, 'diff', range], { encoding: 'utf8', timeout: 5000 }).stdout || ''
+  let parentSummary = '(parent findings unavailable)'
+  if (parentFindingsPath && existsSync(parentFindingsPath)) {
+    try {
+      const doc = JSON.parse(readFileSync(parentFindingsPath, 'utf8'))
+      const lines = []
+      for (const key of ['prioritized_work', 'cases', 'findings']) {
+        if (Array.isArray(doc[key]) && doc[key].length) {
+          lines.push(`${key}: ${doc[key].slice(0, 8).map((x) => x.title || x.label || x.id || JSON.stringify(x)).join(' | ')}`)
+        }
+      }
+      parentSummary = lines.join('\n') || '(no prioritized items)'
+    } catch { /* keep default */ }
+  }
+  return [
+    `## Round diff (base ${range})`,
+    '```diff',
+    diff.slice(0, 7000) || '(no tracked changes)',
+    '```',
+    '## Parent findings summary',
+    parentSummary.slice(0, 3000),
+    '## Deterministic gates (pre-computed)',
+    '```json',
+    JSON.stringify(det || {}).slice(0, 1500),
+    '```'
+  ].join('\n').slice(0, maxBytes)
+}
+
+/** Prefer a focused unit test from this round's own changed files. */
+export function pickFocusedTest(files = []) {
+  return (files.find((f) => /\.test\.js$/.test(String(f))) ) || null
 }
 
 export const DEFAULT_HORIZON_MS = 5 * 60 * 60 * 1000
@@ -307,6 +355,7 @@ export function buildSiblingPrompt({
   siblingSlot = null,
   promotedToParentSlot = null,
   demotedFromParentSlot = null,
+  reviewBrief = '',
   parentSibling = null,
   parentSlot = null,
   parentFindingsPath = null,
@@ -349,9 +398,11 @@ export function buildSiblingPrompt({
     return [
       `swarm relay window ${window}/${windows} -> ${sibling} (mode=${mode}, job=review).`,
       roleLine,
-      `Independently cross-review the active diff and parent build findings, verify tests pass, and write VERDICT: ACCEPT or REJECT to ${reportPath}.`,
+      'Independently cross-review the round diff and parent findings injected below, verify tests for the touched files, then reply with exactly one explicit verdict line: VERDICT: ACCEPT or VERDICT: REJECT plus a reason code and cited evidence (file:line).',
+      'This CLI has no file tools: do NOT emit tool-call JSON. Your stdout is authoritative and is captured as the verdict artifact.',
       deadlineLine,
-      budget
+      budget,
+      reviewBrief,
     ].filter(Boolean).join(' ')
   }
   if (activeJob === 'publish') {
@@ -433,14 +484,22 @@ function runChild({ command, args, cwd, env, stallKillSec, windowStartMs, horizo
     }
     const limitMs = limits.length ? Math.min(...limits) : 0
 
-    const child = spawn(command, args, { stdio: ['ignore', 'inherit', 'inherit'], cwd, env, detached: true })
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'inherit'], cwd, env, detached: true })
     let settled = false
     let timer = null
+    let stdoutText = ''
+    // Capture the sibling's stdout (single-shot CLIs print tool-call JSON instead of
+    // writing files), while still streaming it through to the relay log.
+    child.stdout?.on('data', (chunk) => {
+      const text = String(chunk)
+      stdoutText += text
+      try { process.stdout.write(text) } catch { /* log stream closed */ }
+    })
     const finish = (status, signal, error, stallKilled) => {
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
-      resolvePromise({ status, signal, error, stallKilled, elapsedMs: Date.now() - windowStartMs })
+      resolvePromise({ status, signal, error, stallKilled, elapsedMs: Date.now() - windowStartMs, stdout: stdoutText })
     }
     if (limitMs > 0 && child.pid) {
       timer = setTimeout(() => {
@@ -731,6 +790,16 @@ export async function runRelay(argv) {
     const windowStartedAt = new Date().toISOString()
     const windowStartMs = Date.now()
     const deadlineMs = windowStartMs + plan.softWindowSec * 1000
+    // $0 pre-pack for W4: the single-shot review CLI has no file tools, so give it the
+    // actual diff, parent findings summary and deterministic gates inline.
+    const reviewBrief = assignment.job === 'review'
+      ? buildReviewBrief({
+        repoDir: cwd,
+        baseSha: roundBase,
+        parentFindingsPath: assignment.parentFindingsPath,
+        det: deterministicRoundReview({ repoDir: cwd, baseSha: roundBase })
+      })
+      : ''
     const prompt = buildSiblingPrompt({
       mode: plan.mode,
       job: assignment.job,
@@ -745,7 +814,8 @@ export async function runRelay(argv) {
       parentFindingsPath: assignment.parentFindingsPath,
       softWindowSec: plan.softWindowSec,
       reportPath: assignment.findingsPath || assignment.reportPath,
-      deadlineIso: new Date(deadlineMs).toISOString()
+      deadlineIso: new Date(deadlineMs).toISOString(),
+      reviewBrief
     })
 
     const { command, args } = buildSiblingCommand(choice.sibling, { prompt, model: choice.model })
@@ -824,16 +894,33 @@ export async function runRelay(argv) {
 
     // Phase 1 publish gate: W4 leaves a verdict contract, W5 acts on it deterministically.
     if (assignment.job === 'review') {
-      const artifact = readReviewVerdict(findingsPath, { windowStartedAtMs: windowStartMs })
-      const det = deterministicRoundReview({ repoDir: cwd, baseSha: roundBase })
+      const modified = modifiedFilesSince({ repoDir: cwd, baseSha: roundBase })
+      const testFile = pickFocusedTest(modified)
+      const det = deterministicRoundReview({ repoDir: cwd, baseSha: roundBase, testFile })
       const headNow = roundBaseSha(cwd)
       const headDrift = Boolean(roundBase && headNow && headNow !== roundBase)
+      // The review CLI has no file tools; recover its verdict from stdout.
+      const siblingVerdict = parseSiblingVerdict(res.stdout)
+      let artifact = readReviewVerdict(findingsPath, { windowStartedAtMs: windowStartMs })
+      if (siblingVerdict) {
+        protectedWriteFile(findingsPath, `${JSON.stringify({
+          schema: 'review-verdict/v1',
+          windowStartedAtMs: windowStartMs,
+          roundStartHeadSha: roundBase,
+          verdict: siblingVerdict,
+          reason: `w4_sibling_stdout_${siblingVerdict.toLowerCase()}`,
+          source: 'w4_sibling_stdout'
+        }, null, 2)}\n`)
+        artifact = { verdict: siblingVerdict, reason: `w4_sibling_stdout_${siblingVerdict.toLowerCase()}`, source: findingsPath }
+      }
+      const detOk = Boolean(det.ok && !headDrift && modified.length > 0)
       const verdict = evaluateReviewGate({
         artifactVerdict: artifact.verdict,
         artifactReason: artifact.reason,
-        detOk: det.ok,
-        detReason: det.reason,
-        headDrift
+        detOk,
+        detReason: det.reason || (modified.length ? 'deterministic_gate_failed' : 'no_modified_files'),
+        headDrift,
+        deterministicOnly: Boolean(!siblingVerdict && det.ok && !headDrift && modified.length > 0)
       })
       roundVerdicts.set(assignment.round, verdict)
       entry.reviewVerdict = verdict

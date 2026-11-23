@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus, evaluateReviewGate, computeHorizonDeadlineMs, effectiveWindowBudgetMs } from '../../../scripts/swarm-relay.mjs'
+import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus, evaluateReviewGate, computeHorizonDeadlineMs, effectiveWindowBudgetMs, parseSiblingVerdict, buildReviewBrief, pickFocusedTest } from '../../../scripts/swarm-relay.mjs'
 import { computeEvidenceFingerprint, reconcileStaleDiscoveredTasks, parseSeedPayload } from '../../../scripts/swarm-discover.mjs'
 import { buildExecutiveBrief } from '../../../scripts/swarm-brief.mjs'
 import { evaluateOpenCase } from '../../../scripts/swarm-case-solve.mjs'
@@ -405,4 +405,67 @@ test('per-round artifact filenames and run-scoped ring ledger prevent cross-roun
   assert.equal(st.runId, 'run-abc')
   assert.equal(st.generation, 0)
   assert.deepEqual(Object.keys(st.slots), ['sibling1', 'sibling2'])
+})
+
+test('W4 verdict recovery: stdout parser ignores fake tool JSON, gate falls back deterministically', () => {
+  // Single-shot review CLIs print literal tool-call JSON; only an explicit line counts.
+  const noisy = [
+    '{"tool":"read_file","args":{"path":"/tmp/parent-findings.json"}}',
+    'I cannot access the diff.',
+    '{"tool":"protected_write","args":{"path":"/tmp/v.json","content":"VERDICT: ACCEPT"}}',
+    'VERDICT: ACCEPT reason=w4_sibling_stdout_accept'
+  ].join('\n')
+  assert.equal(parseSiblingVerdict(noisy), 'ACCEPT')
+  assert.equal(parseSiblingVerdict('{"tool":"protected_write","args":{"content":"VERDICT: REJECT"}}'), null)
+  assert.equal(parseSiblingVerdict('no verdict here'), null)
+
+  const dir = mkdtempSync(join(tmpdir(), 'relay-brief-'))
+  try {
+    mkdirSync(join(dir, '.git'), { recursive: true })
+    writeFileSync(join(dir, 'a.txt'), 'hello\n')
+    execFileSync('git', ['init', '-q'], { cwd: dir })
+    execFileSync('git', ['add', '-A'], { cwd: dir })
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'base'], { cwd: dir })
+    writeFileSync(join(dir, 'a.txt'), 'changed\n')
+    writeFileSync(join(dir, 'parent-findings.json'), JSON.stringify({ prioritized_work: [{ title: 'N1 open' }] }))
+
+    const brief = buildReviewBrief({
+      repoDir: dir,
+      baseSha: 'HEAD',
+      parentFindingsPath: join(dir, 'parent-findings.json'),
+      det: { ok: true }
+    })
+    assert.match(brief, /## Round diff/)
+    assert.match(brief, /changed/)
+    assert.match(brief, /N1 open/)
+    assert.match(brief, /## Deterministic gates/)
+    assert.ok(brief.length <= 12000)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+
+  assert.equal(pickFocusedTest(['apps/api/test/x.test.js', 'scripts/y.mjs']), 'apps/api/test/x.test.js')
+  assert.equal(pickFocusedTest(['scripts/y.mjs']), null)
+
+  // Fail-closed fallback rules.
+  assert.deepEqual(
+    evaluateReviewGate({ artifactVerdict: null, detOk: true, deterministicOnly: true }),
+    { verdict: 'ACCEPT', reason: 'deterministic_only_no_sibling_artifact' }
+  )
+  assert.deepEqual(
+    evaluateReviewGate({ artifactVerdict: null, detOk: false, detReason: 'unrecoverable_pattern', deterministicOnly: true }),
+    { verdict: 'REJECT', reason: 'unrecoverable_pattern' }
+  )
+  assert.deepEqual(
+    evaluateReviewGate({ artifactVerdict: 'ACCEPT', detOk: false, detReason: 'tests_failed', deterministicOnly: true }),
+    { verdict: 'REJECT', reason: 'tests_failed' }
+  )
+  assert.deepEqual(
+    evaluateReviewGate({ artifactVerdict: 'ACCEPT', detOk: true, headDrift: true, deterministicOnly: true }),
+    { verdict: 'REJECT', reason: 'unexpected_head_advance_before_review' }
+  )
+  assert.deepEqual(
+    evaluateReviewGate({ artifactVerdict: 'ACCEPT', artifactReason: 'w4_sibling_stdout_accept', detOk: true, deterministicOnly: false }),
+    { verdict: 'ACCEPT', reason: 'w4_sibling_stdout_accept' }
+  )
 })
