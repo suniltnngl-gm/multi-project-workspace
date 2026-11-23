@@ -4,8 +4,99 @@
  * Keeps the most recent `keepRecent` turns verbatim and folds all older turns into
  * a single bounded summary record, writing atomically via `protectedWriteFile`.
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { protectedWriteFile } from './mutation-guard.js'
+
+export const DEFAULT_COMPACT_THRESHOLDS = Object.freeze({
+  agyBytes: 120_000,
+  agyLines: 40,
+  jsonlBytes: 64_000,
+  jsonlLines: 12,
+  rotateBytes: 160_000,
+  rotateLines: 40
+})
+
+export function resolveAgyTranscriptPath(sessionId, { homeDir = homedir() } = {}) {
+  if (!sessionId) return null
+  return join(homeDir, '.gemini', 'antigravity-cli', 'brain', String(sessionId), '.system_generated', 'logs', 'transcript.jsonl')
+}
+
+export function inspectFileStats(filePath) {
+  if (!filePath || !existsSync(filePath)) {
+    return { exists: false, bytes: 0, lines: 0, mtimeMs: 0, path: filePath || null }
+  }
+  const st = statSync(filePath)
+  const text = readFileSync(filePath, 'utf8')
+  const lines = text ? text.split(/\r?\n/).filter(Boolean).length : 0
+  return { exists: true, bytes: st.size, lines, mtimeMs: st.mtimeMs, path: filePath }
+}
+
+/**
+ * Zero-LLM policy evaluator for intelligent swarm compaction & session rotation.
+ * - `agy` (resumed): prefixes `/compact ` when transcript exceeds thresholds.
+ * - `local-jsonl`: compacts JSONL deterministically via `compactSessionFile`.
+ * - Other persistent CLIs: rotates to a fresh session (seeded with wakeup/pack) when oversized.
+ */
+export function evaluateSessionCompaction({
+  cli,
+  sessionId = null,
+  transcriptPath = null,
+  homeDir = homedir(),
+  thresholds = DEFAULT_COMPACT_THRESHOLDS
+} = {}) {
+  const t = { ...DEFAULT_COMPACT_THRESHOLDS, ...(thresholds || {}) }
+  if (cli === 'agy') {
+    const target = transcriptPath || resolveAgyTranscriptPath(sessionId, { homeDir })
+    const stats = inspectFileStats(target)
+    if (!stats.exists) return { action: 'none', reason: 'transcript_not_found', ...stats }
+    if (stats.bytes >= t.agyBytes || stats.lines >= t.agyLines) {
+      return { action: 'compact_prefix', reason: stats.bytes >= t.agyBytes ? 'agy_bytes_threshold' : 'agy_lines_threshold', ...stats }
+    }
+    return { action: 'none', reason: 'within_threshold', ...stats }
+  }
+  if (cli === 'local-jsonl') {
+    const stats = inspectFileStats(transcriptPath)
+    if (!stats.exists) return { action: 'none', reason: 'jsonl_not_found', ...stats }
+    if (stats.bytes >= t.jsonlBytes || stats.lines >= t.jsonlLines) {
+      return { action: 'compact_jsonl', reason: stats.bytes >= t.jsonlBytes ? 'jsonl_bytes_threshold' : 'jsonl_lines_threshold', ...stats }
+    }
+    return { action: 'none', reason: 'within_threshold', ...stats }
+  }
+  if (transcriptPath) {
+    const stats = inspectFileStats(transcriptPath)
+    if (!stats.exists) return { action: 'none', reason: 'transcript_not_found', ...stats }
+    if (stats.bytes >= t.rotateBytes || stats.lines >= t.rotateLines) {
+      return { action: 'rotate_session', reason: stats.bytes >= t.rotateBytes ? 'rotate_bytes_threshold' : 'rotate_lines_threshold', ...stats }
+    }
+    return { action: 'none', reason: 'within_threshold', ...stats }
+  }
+  return { action: 'none', reason: 'no_transcript_path', exists: false, bytes: 0, lines: 0, mtimeMs: 0, path: null }
+}
+
+export function applyCompactPrefix(prompt, action) {
+  const text = String(prompt || '')
+  if (action !== 'compact_prefix') return text
+  if (/^\s*\/compact(\s|$)/.test(text)) return text
+  return `/compact ${text}`
+}
+
+export function scanAndCompactLocalSessions(sessionsDir, { keepRecent = 4, maxSummaryChars = 1200, minLines = 12, apply = false } = {}) {
+  if (!sessionsDir || !existsSync(sessionsDir)) return []
+  const files = readdirSync(sessionsDir).filter((f) => f.endsWith('.jsonl')).sort()
+  const results = []
+  for (const name of files) {
+    const filePath = join(sessionsDir, name)
+    const stats = inspectFileStats(filePath)
+    if (stats.lines < minLines) {
+      results.push({ filePath, skipped: true, reason: 'below_min_lines', lines: stats.lines, compacted: false })
+      continue
+    }
+    results.push(compactSessionFile(filePath, { keepRecent, maxSummaryChars, apply }))
+  }
+  return results
+}
 
 export function parseJsonl(text) {
   return String(text || '')

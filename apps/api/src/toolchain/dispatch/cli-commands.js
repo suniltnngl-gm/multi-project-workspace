@@ -44,47 +44,76 @@ export const CLI_COMMAND_SPECS = Object.freeze({
   }
 })
 
+import { applyCompactPrefix, evaluateSessionCompaction } from './session-compactor.js'
+
 const fail = (reason) => ({ ok: false, reason })
 
-export function buildCliCommand({ cli, model, provider = null, sessionId = null, resume = false, prompt, cwd }) {
+export function buildCliCommand({
+  cli,
+  model,
+  provider = null,
+  sessionId = null,
+  resume = false,
+  prompt,
+  cwd,
+  autoCompact = false,
+  transcriptPath = null,
+  compactThresholds = undefined
+}) {
   const spec = CLI_COMMAND_SPECS[cli]
   if (!spec) return fail(`cli_flags_unverified:${cli}`)
   if (!model) return fail('model_required')
   if (typeof prompt !== 'string' || !prompt.trim()) return fail('prompt_required')
   if (prompt.startsWith('-')) return fail('prompt_must_not_start_with_dash')
   if (resume && !sessionId) return fail('resume_requires_session_id')
+
+  let effectivePrompt = prompt
+  let effectiveResume = resume
+  let compaction = null
+  if (autoCompact && resume) {
+    const decision = evaluateSessionCompaction({ cli, sessionId, transcriptPath, thresholds: compactThresholds })
+    if (decision.action === 'compact_prefix') {
+      effectivePrompt = applyCompactPrefix(prompt, decision.action)
+      compaction = { action: decision.action, reason: decision.reason, bytes: decision.bytes, lines: decision.lines }
+    } else if (decision.action === 'rotate_session') {
+      effectiveResume = false
+      compaction = { action: decision.action, reason: decision.reason, bytes: decision.bytes, lines: decision.lines }
+    }
+  }
+
   let argv
   switch (cli) {
     case 'agy':
-      argv = ['--print', prompt, '--model', model, ...(resume ? ['--conversation', sessionId] : [])]
+      argv = ['--print', effectivePrompt, '--model', model, ...(effectiveResume ? ['--conversation', sessionId] : [])]
       break
     case 'opencode':
       if (!provider) return fail('opencode_requires_provider_for_model')
-      argv = ['--standalone', 'run', '--model', `${provider}/${model}`, ...(resume ? ['--session', sessionId] : []), prompt]
+      argv = ['--standalone', 'run', '--model', `${provider}/${model}`, ...(effectiveResume ? ['--session', sessionId] : []), effectivePrompt]
       break
     case 'cline':
-      argv = ['--cwd', cwd, '--json', '--yolo', '--model', model, ...(provider ? ['--provider', provider] : []), ...(resume ? ['--id', sessionId] : []), prompt]
+      argv = ['--cwd', cwd, '--json', '--yolo', '--model', model, ...(provider ? ['--provider', provider] : []), ...(effectiveResume ? ['--id', sessionId] : []), effectivePrompt]
       break
     case 'vibe':
       // `--model` applies to new sessions only; a resumed session keeps its pinned model.
-      argv = ['--workdir', cwd, '--output', 'json', ...(resume ? ['--resume', sessionId] : ['--model', model]), '-p', prompt]
+      argv = ['--workdir', cwd, '--output', 'json', ...(effectiveResume ? ['--resume', sessionId] : ['--model', model]), '-p', effectivePrompt]
       break
     case 'hermes': {
-      const effectiveSession = sessionId || process.env.SWARM_HERMES_SESSION_OVERRIDE || null
-      const shouldResume = Boolean(resume || (!sessionId && process.env.SWARM_HERMES_SESSION_OVERRIDE))
-      argv = ['-z', prompt, '-m', model, ...(provider ? ['--provider', provider] : []), '--in', cwd, ...(shouldResume && effectiveSession ? ['--resume', effectiveSession] : [])]
+      const effectiveSession = effectiveResume ? (sessionId || process.env.SWARM_HERMES_SESSION_OVERRIDE || null) : null
+      const shouldResume = Boolean(effectiveResume || (!resume && !sessionId && process.env.SWARM_HERMES_SESSION_OVERRIDE))
+      const resumeId = effectiveSession || (shouldResume ? process.env.SWARM_HERMES_SESSION_OVERRIDE : null)
+      argv = ['-z', effectivePrompt, '-m', model, ...(provider ? ['--provider', provider] : []), '--in', cwd, ...(shouldResume && resumeId ? ['--resume', resumeId] : [])]
       break
     }
     case 'kilo':
-      argv = ['run', '--format', 'json', '--model', model, ...(resume ? ['--session', sessionId] : []), prompt]
+      argv = ['run', '--format', 'json', '--model', model, ...(effectiveResume ? ['--session', sessionId] : []), effectivePrompt]
       break
     case 'copilot':
-      argv = [...(resume ? [`--resume=${sessionId}`] : []), '-p', prompt]
+      argv = [...(effectiveResume ? [`--resume=${sessionId}`] : []), '-p', effectivePrompt]
       break
     default:
       return fail(`cli_flags_unverified:${cli}`)
   }
-  return { ok: true, bin: spec.bin, argv, prompt }
+  return { ok: true, bin: spec.bin, argv, prompt: effectivePrompt, ...(compaction ? { compaction } : {}) }
 }
 
 /** Fail-closed check of a CLI's own `--help` output for every required flag. */

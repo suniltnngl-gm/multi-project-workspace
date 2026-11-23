@@ -23,6 +23,7 @@ import {
   recordPoolCall,
   writeOvernightReport
 } from '../apps/api/src/toolchain/dispatch/overnight-supervisor.js'
+import { scanAndCompactLocalSessions } from '../apps/api/src/toolchain/dispatch/session-compactor.js'
 
 const argv = process.argv.slice(2)
 if (argv.includes('--help') || argv.includes('-h')) {
@@ -36,6 +37,8 @@ if (argv.includes('--help') || argv.includes('-h')) {
       --case-dir <dir>         Case registry directory for --auto-discover
       --auto-discover          Run swarm-discover --mode rediscover on idle/start
       --lesson-sync            Run swarm-lesson-sync --apply at end of run
+      --auto-compact           Auto-compact oversized local JSONL sessions at end of run
+      --sessions-dir <dir>     Sessions dir for --auto-compact
       --dry-run                Simulate ticks only (default)
       --execute                Run live bounded queue ticks
       --json                   Output JSON summary
@@ -48,12 +51,14 @@ const opts = {
   queueDir: join(homedir(), '.local/state/curl-ai-bridge/queue/active'),
   caseDir: join(homedir(), '.local/state/curl-ai-bridge/queue/cases'),
   registry: join(homedir(), '.local/state/curl-ai-bridge/sessions/swarm-sessions.json'),
+  sessionsDir: join(homedir(), '.local/state/curl-ai-bridge/sessions'),
   maxTicks: 10,
   maxMinutes: 480,
   maxFailures: 3,
   tickIntervalSec: 0,
   autoDiscover: false,
   lessonSync: false,
+  autoCompact: false,
   execute: false,
   json: false
 }
@@ -65,10 +70,12 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--dry-run') opts.execute = false
   else if (a === '--auto-discover') opts.autoDiscover = true
   else if (a === '--lesson-sync') opts.lessonSync = true
+  else if (a === '--auto-compact') opts.autoCompact = true
   else if (a === '--state-dir') opts.stateDir = resolve(argv[++i])
   else if (a === '--queue-dir') opts.queueDir = resolve(argv[++i])
   else if (a === '--case-dir') opts.caseDir = resolve(argv[++i])
   else if (a === '--registry') opts.registry = resolve(argv[++i])
+  else if (a === '--sessions-dir') opts.sessionsDir = resolve(argv[++i])
   else if (a === '--max-ticks') opts.maxTicks = Number(argv[++i]) || 10
   else if (a === '--max-minutes') opts.maxMinutes = Number(argv[++i]) || 480
   else if (a === '--max-failures') opts.maxFailures = Number(argv[++i]) || 3
@@ -160,6 +167,10 @@ if (opts.lessonSync) {
   lessonSyncRan = lres.status === 0
 }
 
+const autoCompactResults = opts.autoCompact
+  ? scanAndCompactLocalSessions(opts.sessionsDir, { apply: opts.execute })
+  : []
+
 const report = {
   ok: true,
   mode: opts.execute ? 'execute' : 'dry-run',
@@ -168,6 +179,7 @@ const report = {
   consecutiveFailures,
   autoDiscover: opts.autoDiscover,
   lessonSyncRan,
+  autoCompact: { enabled: opts.autoCompact, results: autoCompactResults },
   elapsedMs: Date.now() - startedAtMs,
   queueStats: queueStats(opts.queueDir),
   ticks
