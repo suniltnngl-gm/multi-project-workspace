@@ -15,7 +15,9 @@ export const DEFAULT_COMPACT_THRESHOLDS = Object.freeze({
   jsonlBytes: 32_000,
   jsonlLines: 10,
   rotateBytes: 80_000,
-  rotateLines: 20
+  rotateLines: 20,
+  cacheTtlMs: 15 * 60 * 1000,
+  cacheMinBytes: 16_000
 })
 
 export function resolveAgyTranscriptPath(sessionId, { homeDir = homedir() } = {}) {
@@ -44,13 +46,20 @@ export function evaluateSessionCompaction({
   sessionId = null,
   transcriptPath = null,
   homeDir = homedir(),
+  nowMs = Date.now(),
   thresholds = DEFAULT_COMPACT_THRESHOLDS
 } = {}) {
   const t = { ...DEFAULT_COMPACT_THRESHOLDS, ...(thresholds || {}) }
+  const isCacheExpired = (stats) =>
+    t.cacheTtlMs > 0 && stats.mtimeMs > 0 && (nowMs - stats.mtimeMs) >= t.cacheTtlMs && stats.bytes >= t.cacheMinBytes
+
   if (cli === 'agy') {
     const target = transcriptPath || resolveAgyTranscriptPath(sessionId, { homeDir })
     const stats = inspectFileStats(target)
     if (!stats.exists) return { action: 'none', reason: 'transcript_not_found', ...stats }
+    if (isCacheExpired(stats)) {
+      return { action: 'rotate_session', reason: 'cache_ttl_expired', ...stats }
+    }
     if (stats.bytes >= t.agyBytes || stats.lines >= t.agyLines) {
       return { action: 'compact_prefix', reason: stats.bytes >= t.agyBytes ? 'agy_bytes_threshold' : 'agy_lines_threshold', ...stats }
     }
@@ -67,6 +76,9 @@ export function evaluateSessionCompaction({
   if (transcriptPath) {
     const stats = inspectFileStats(transcriptPath)
     if (!stats.exists) return { action: 'none', reason: 'transcript_not_found', ...stats }
+    if (isCacheExpired(stats)) {
+      return { action: 'rotate_session', reason: 'cache_ttl_expired', ...stats }
+    }
     if (stats.bytes >= t.rotateBytes || stats.lines >= t.rotateLines) {
       return { action: 'rotate_session', reason: stats.bytes >= t.rotateBytes ? 'rotate_bytes_threshold' : 'rotate_lines_threshold', ...stats }
     }
