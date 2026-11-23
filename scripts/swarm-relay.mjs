@@ -16,6 +16,10 @@ import { dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import {
+  checkPoolFiveHourAdmission,
+  recordPoolCall
+} from '../apps/api/src/toolchain/dispatch/overnight-supervisor.js'
 
 export const RELAY_MODES = ['discover', 'fix']
 export const DEFAULT_SIBLINGS = ['hermes', 'direct']
@@ -141,6 +145,7 @@ export function buildSiblingCommand(sibling, { prompt }) {
   else if (sibling === 'hermes') base = ['hermes', '-z']
   else if (sibling === 'opencode') base = ['opencode', 'run', '--standalone', '--model', 'opencode/deepseek-v4.1-flash-free']
   else if (sibling === 'direct') base = [process.execPath, resolve(new URL('./swarm-direct.mjs', import.meta.url).pathname), '--provider', 'cloudflare', '--prompt']
+  else if (sibling === 'agy') base = ['agy', '-p']
   else base = [sibling]
 
   if (base[0] === 'opencode') {
@@ -243,7 +248,14 @@ export function runRelay(argv) {
       softWindowSec: plan.softWindowSec,
       reportPath: assignment.findingsPath || assignment.reportPath
     })
-    const { command, args } = buildSiblingCommand(assignment.sibling, { prompt })
+    const stateDir = join(homedir(), '.local/state/curl-ai-bridge/overnight')
+    let activeSibling = assignment.sibling
+    if (activeSibling === 'agy') {
+      const cap = checkPoolFiveHourAdmission(stateDir, 'agy-gemini')
+      if (!cap.admitted) activeSibling = 'hermes'
+      else recordPoolCall(stateDir, { quotaPool: 'agy-gemini', taskId: `relay-w${assignment.window}`, status: 'ok' })
+    }
+    const { command, args } = buildSiblingCommand(activeSibling, { prompt })
     const windowStartedAt = new Date().toISOString()
     const windowStartMs = Date.now()
 

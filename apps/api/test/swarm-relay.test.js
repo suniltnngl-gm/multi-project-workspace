@@ -4,8 +4,17 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { buildRelayPlan } from '../../../scripts/swarm-relay.mjs'
+import { buildRelayPlan, buildSiblingCommand } from '../../../scripts/swarm-relay.mjs'
 import { computeEvidenceFingerprint, reconcileStaleDiscoveredTasks, parseSeedPayload } from '../../../scripts/swarm-discover.mjs'
+
+test('buildSiblingCommand supports agy, hermes, opencode, and direct as multi-CLI relay participants', () => {
+  const agyCmd = buildSiblingCommand('agy', { prompt: 'hello' })
+  assert.equal(agyCmd.command, 'agy')
+  assert.deepEqual(agyCmd.args, ['-p', 'hello'])
+  const hermesCmd = buildSiblingCommand('hermes', { prompt: 'hello' })
+  assert.equal(hermesCmd.command, 'hermes')
+  assert.deepEqual(hermesCmd.args, ['-z', 'hello'])
+})
 
 test('parseSeedPayload converts relay-discover-report/v1 into tasks and multi-option cases', () => {
   const seeds = parseSeedPayload({
