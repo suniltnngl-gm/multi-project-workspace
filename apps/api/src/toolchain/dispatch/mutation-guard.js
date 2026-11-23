@@ -42,7 +42,8 @@ export const DEFAULT_MAX_BACKUP_DIR_BYTES = 5 * 1024 * 1024
 /**
  * Bounded backup retention pruner: keeps at most `maxBackupsPerFile` recent
  * checkpoints per file AND caps total directory usage at `maxTotalBytes`.
- * Always preserves at least the newest 1 backup per file so `undoLastEdit`
+ * Always preserves at least the newest 1 backup per file (unless `maxBackupsPerFile === 0`
+ * is explicitly passed after a git commit/push checkpoint) so `undoLastEdit`
  * can always recover the last-minute edit without wholesale rollback.
  */
 export function pruneBackups(backupDir, {
@@ -76,8 +77,10 @@ export function pruneBackups(backupDir, {
     } catch {}
   }
 
-  // 1. Per-file cap (keep last N backups for each file, min 1)
-  const capPerFile = Math.max(1, Number(maxBackupsPerFile) || DEFAULT_MAX_BACKUPS_PER_FILE)
+  // 1. Per-file cap (allow 0 when explicitly clearing git-tracked file backups post-commit/push; otherwise min 1)
+  const capPerFile = maxBackupsPerFile === 0
+    ? 0
+    : Math.max(1, Number(maxBackupsPerFile) || DEFAULT_MAX_BACKUPS_PER_FILE)
   for (const [base, list] of byPrefix.entries()) {
     if (targetPath && base !== basename(targetPath)) continue
     while (list.length > capPerFile) {
@@ -220,4 +223,60 @@ export function undoLastEdit(targetPath, { backupDir = null } = {}) {
   rmSync(latest, { force: true })
   rmSync(metaPath, { force: true })
   return { ...res, consumedBackup: latest }
+}
+
+/**
+ * Git-checkpoint backup compactor: once changes are staged, committed, or pushed
+ * to git/GitHub, git itself holds the durable history for repo files and the
+ * milestone is checkpointed. This function:
+ *   1. Prunes `.backups/` for the committed/pushed repo files (`keepRepoBackups = 0`
+ *      by default, removing empty `.backups/` directories inside the repo).
+ *   2. Compacts out-of-repo state `.backups/` directories (`stateBackupDirs`) down
+ *      to `keepStateBackups` (default `1` — preserving only the single latest
+ *      last-minute undo checkpoint per state file).
+ */
+export function pruneBackupsAfterGitCheckpoint({
+  committedPaths = [],
+  stateBackupDirs = [],
+  keepRepoBackups = 0,
+  keepStateBackups = 1,
+  maxTotalBytes = DEFAULT_MAX_BACKUP_DIR_BYTES
+} = {}) {
+  let prunedCount = 0
+  let freedBytes = 0
+  const touchedRepoBackupDirs = new Set()
+
+  for (const filePath of committedPaths) {
+    if (!filePath) continue
+    const bdir = join(dirname(filePath), '.backups')
+    if (!existsSync(bdir)) continue
+    touchedRepoBackupDirs.add(bdir)
+    const res = pruneBackups(bdir, {
+      targetPath: filePath,
+      maxBackupsPerFile: keepRepoBackups,
+      maxTotalBytes
+    })
+    prunedCount += res.prunedCount
+    freedBytes += res.freedBytes
+  }
+
+  for (const bdir of touchedRepoBackupDirs) {
+    try {
+      if (existsSync(bdir) && readdirSync(bdir).length === 0) {
+        rmSync(bdir, { recursive: true, force: true })
+      }
+    } catch {}
+  }
+
+  for (const bdir of stateBackupDirs) {
+    if (!bdir || !existsSync(bdir)) continue
+    const res = pruneBackups(bdir, {
+      maxBackupsPerFile: Math.max(1, Number(keepStateBackups) || 1),
+      maxTotalBytes
+    })
+    prunedCount += res.prunedCount
+    freedBytes += res.freedBytes
+  }
+
+  return { ok: true, prunedCount, freedBytes }
 }

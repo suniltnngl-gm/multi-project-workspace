@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -8,7 +8,8 @@ import {
   createRecoveryBackup,
   restoreRecoveryBackup,
   protectedWriteFile,
-  undoLastEdit
+  undoLastEdit,
+  pruneBackupsAfterGitCheckpoint
 } from '../../src/toolchain/dispatch/mutation-guard.js'
 
 test('classifyMutationRisk blocks unrecoverable mutations and allows recoverable commands', () => {
@@ -107,6 +108,42 @@ test('protectedWriteFile enforces bounded recovery size (maxBackupsPerFile & max
     undoLastEdit(fileA, { backupDir: bdir })
     assert.strictEqual(readFileSync(fileA, 'utf8'), 'v5')
     assert.throws(() => undoLastEdit(fileA, { backupDir: bdir }), /no_backup_history/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('pruneBackupsAfterGitCheckpoint clears committed repo file backups and compacts state backups to 1 last-edit undo', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'git-checkpoint-prune-'))
+  try {
+    const repoFile = join(dir, 'repo', 'app.js')
+    const stateFile = join(dir, 'state', 'sessions.json')
+    mkdirSync(join(dir, 'repo'), { recursive: true })
+    mkdirSync(join(dir, 'state'), { recursive: true })
+    writeFileSync(repoFile, 'r0', 'utf8')
+    writeFileSync(stateFile, 's0', 'utf8')
+
+    for (let i = 1; i <= 4; i++) {
+      protectedWriteFile(repoFile, `r${i}`)
+      protectedWriteFile(stateFile, `s${i}`)
+    }
+
+    const res = pruneBackupsAfterGitCheckpoint({
+      committedPaths: [repoFile],
+      stateBackupDirs: [join(dir, 'state', '.backups')],
+      keepRepoBackups: 0,
+      keepStateBackups: 1
+    })
+    assert.strictEqual(res.ok, true)
+    assert.ok(res.prunedCount >= 6)
+
+    // Repo file is now backed by git commit/push -> its local .backups history is cleared
+    assert.throws(() => undoLastEdit(repoFile), /no_backup_history/)
+
+    // State file still retains its 1 newest backup so last-minute edit (s4 -> s3) is recoverable
+    undoLastEdit(stateFile)
+    assert.strictEqual(readFileSync(stateFile, 'utf8'), 's3')
+    assert.throws(() => undoLastEdit(stateFile), /no_backup_history/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

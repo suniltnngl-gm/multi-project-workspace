@@ -13,3 +13,6 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 command -v node >/dev/null 2>&1 || exit 0
 
 node "$ROOT/scripts/workspace-cli.mjs" files scan --quiet >/dev/null 2>&1 || true
+if command -v swarm >/dev/null 2>&1; then
+  swarm prune-backups >/dev/null 2>&1 || true
+fi
