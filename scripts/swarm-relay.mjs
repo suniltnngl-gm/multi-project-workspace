@@ -409,6 +409,8 @@ function parseArgs(argv) {
     subTurns: 1,
     stallKillSec: DEFAULT_STALL_KILL_SEC,
     quotaStatus: null,
+    quotaAware: false,
+    writePlan: null,
     printQuotaStatus: false,
     ringStateDir: DEFAULT_RING_STATE_DIR,
     reportDir: DEFAULT_REPORT_DIR,
@@ -445,6 +447,12 @@ function parseArgs(argv) {
     }
     else if (a === '--ring-state-dir') opts.ringStateDir = argv[++i]
     else if (a === '--report-dir') opts.reportDir = argv[++i]
+    else if (a === '--quota-aware') opts.quotaAware = true
+    else if (a === '--write-plan') {
+      const next = argv[i + 1]
+      if (!next || next.startsWith('--')) opts.writePlan = 'auto'
+      else opts.writePlan = argv[++i]
+    }
     else throw new Error(`unknown argument '${a}' (try --help)`)
   }
   return opts
@@ -467,6 +475,8 @@ No routine hard kill: a window is a cooperative budget; only --stall-kill-sec in
       --max-conserve-windows <n> Cap on CONSERVE windows (default: 1)
       --stall-kill-sec <n>       Opt-in runaway kill in seconds (default 0 = disabled)
       --quota-status <file>      JSON with per-pool weeklyRemainingPct + conservePools
+      --quota-aware              Assert quota-aware admission (enforced during --execute)
+      --write-plan [file]        Persist the schedule/plan JSON (bare: <state>/relay/<ts>-schedule.json)
       --ring-state-dir <dir>     Ring ledger directory
       --report-dir <dir>         Report directory (default: ~/.local/state/curl-ai-bridge/reports)
       --dry-run                  Print plan only (default)
@@ -524,19 +534,40 @@ export async function runRelay(argv) {
   const startedAt = new Date().toISOString()
 
   if (!opts.execute) {
+    // Persist the schedule artifact for cross-session inspection ($0).
+    let schedulePath = null
+    if (opts.writePlan) {
+      schedulePath = opts.writePlan === 'auto'
+        ? join(homedir(), '.local/state/curl-ai-bridge/relay', `${startedAt.replace(/[:.]/g, '-')}-schedule.json`)
+        : resolve(opts.writePlan)
+      mkdirSync(dirname(schedulePath), { recursive: true })
+      protectedWriteFile(schedulePath, `${JSON.stringify({ ok: true, mode: 'dry-run', executed: false, startedAt, quotaAware: Boolean(opts.quotaAware), plan }, null, 2)}\n`)
+      process.stderr.write(`relay: schedule written -> ${schedulePath}\n`)
+    }
     if (opts.json) {
-      process.stdout.write(`${JSON.stringify({ ok: true, mode: 'dry-run', executed: false, startedAt, plan }, null, 2)}\n`)
+      process.stdout.write(`${JSON.stringify({ ok: true, mode: 'dry-run', executed: false, startedAt, quotaAware: Boolean(opts.quotaAware), schedulePath, plan }, null, 2)}\n`)
     } else {
+      let copilotSeen = 0
       const lines = [
-        `relay plan (dry-run): mode=${plan.mode} windows=${plan.windows} rounds=${plan.rounds} siblings=${plan.siblings.join('->')}`,
+        `relay plan (dry-run): mode=${plan.mode} windows=${plan.windows} rounds=${plan.rounds} siblings=${plan.siblings.join('->')}${opts.quotaAware ? ' quotaAware=yes' : ''}`,
         `window=${plan.softWindowSec}s noHardKill=${plan.noHardKill} stallKillSec=${opts.stallKillSec} execution=${plan.execution} report_dir=${plan.reportDir}`,
-        ...plan.assignments.map((a) => `  w${a.window} r${a.round} [${a.job}] ${a.sibling} (${a.pool}) -> ${a.reportPath}`),
+        ...plan.assignments.map((a) => {
+          const tags = []
+          if (a.pool === 'github-copilot') {
+            copilotSeen += 1
+            // Runtime admission caps copilot at 1 call / 5h; later nominal slots are substituted.
+            if (copilotSeen > 1) tags.push('cap-gated <=1 copilot/5h')
+          }
+          if (a.conserve && !opts.allowConserve) tags.push('conserve-excluded')
+          return `  w${a.window} r${a.round} [${a.job}] ${a.sibling} (${a.pool})${tags.length ? ` [${tags.join(', ')}]` : ''} -> ${a.reportPath}`
+        }),
         `summary -> ${plan.summaryReportPath}`,
         'dry-run: no sibling CLIs spawned (pass --execute to run)'
       ]
       process.stdout.write(`${lines.join('\n')}\n`)
     }
-    return { ok: true, mode: 'dry-run', executed: false, plan }
+
+    return { ok: true, mode: 'dry-run', executed: false, plan, schedulePath }
   }
 
   const cwd = resolve(new URL('..', import.meta.url).pathname)

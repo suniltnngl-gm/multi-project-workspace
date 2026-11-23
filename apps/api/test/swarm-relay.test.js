@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus } from '../../../scripts/swarm-relay.mjs'
@@ -309,4 +309,30 @@ test('swarm ask fails closed with exit 1 on missing value or unknown parent-slot
   })
   assert.equal(gateRes.verdict, 'deferred')
   assert.ok(typeof gateRes.nextEligibleAt === 'string' && gateRes.nextEligibleAt.length > 0)
+})
+
+test('swarm-relay --quota-aware --write-plan persists a 5h schedule artifact', () => {
+  const scriptPath = resolve(new URL('../../../scripts/swarm-relay.mjs', import.meta.url).pathname)
+  const dir = mkdtempSync(join(tmpdir(), 'relay-plan-'))
+  try {
+    const planPath = join(dir, 'schedule.json')
+    const out = execFileSync(process.execPath, [scriptPath, '--preset', 'k5-pipeline-ring', '--windows', '60', '--window-sec', '300', '--quota-aware', '--write-plan', planPath, '--dry-run', '--json'], { encoding: 'utf8' })
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.quotaAware, true)
+    assert.equal(parsed.schedulePath, planPath)
+    assert.equal(parsed.plan.windows, 60)
+    assert.equal(parsed.plan.assignments.length, 60)
+    const onDisk = JSON.parse(readFileSync(planPath, 'utf8'))
+    assert.equal(onDisk.plan.assignments.length, 60)
+    // copilot is nominal at rounds 6 and 12; runtime admission caps it to <=1/5h
+    assert.equal(onDisk.plan.assignments.filter((a) => a.pool === 'github-copilot').length, 2)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('swarm-relay dry-run annotates cap-gated copilot windows', () => {
+  const scriptPath = resolve(new URL('../../../scripts/swarm-relay.mjs', import.meta.url).pathname)
+  const out = execFileSync(process.execPath, [scriptPath, '--preset', 'k5-pipeline-ring', '--windows', '60', '--window-sec', '300', '--dry-run'], { encoding: 'utf8' })
+  assert.match(out, /cap-gated <=1 copilot\/5h/)
 })
