@@ -139,12 +139,15 @@ export function buildRelayPlan({
     throw new Error(`invalid mode '${mode}' (expected one of: ${RELAY_MODES.join('|')})`)
   }
   const list = preset ? resolveRing(null, preset) : normalizeSiblings(siblings)
-  const windowCount = positiveInt(windows, DEFAULT_WINDOWS, 'windows')
+  const defaultWin = preset ? list.length : DEFAULT_WINDOWS
+  const windowCount = positiveInt(windows, defaultWin, 'windows')
+  const roundCount = rounds === 'continuous' ? 'continuous' : positiveInt(rounds, DEFAULT_ROUNDS, 'rounds')
+  const totalPlanWindows = roundCount === 'continuous' ? windowCount : windowCount * roundCount
   const softSec = positiveInt(windowSec ?? softWindowSec, DEFAULT_SOFT_WINDOW_SEC, 'windowSec')
   const dir = resolve(expandHome(reportDir))
   const models = modelMap && typeof modelMap === 'object' ? modelMap : {}
 
-  const assignments = Array.from({ length: windowCount }, (_, i) => buildAssignment({
+  const assignments = Array.from({ length: totalPlanWindows }, (_, i) => buildAssignment({
     list, index: i, dir, planMode, softSec, models
   }))
 
@@ -154,7 +157,7 @@ export function buildRelayPlan({
     siblings: list,
     windows: windowCount,
     softWindowSec: softSec,
-    rounds: rounds === 'continuous' ? 'continuous' : positiveInt(rounds, DEFAULT_ROUNDS, 'rounds'),
+    rounds: roundCount,
     preset: preset || null,
     modelMap: models,
     reportDir: dir,
@@ -322,7 +325,7 @@ function parseArgs(argv) {
   const opts = {
     mode: 'discover',
     siblings: DEFAULT_SIBLINGS.join(','),
-    windows: DEFAULT_WINDOWS,
+    windows: null,
     softWindowSec: DEFAULT_SOFT_WINDOW_SEC,
     windowSec: null,
     rounds: String(DEFAULT_ROUNDS),
@@ -332,6 +335,7 @@ function parseArgs(argv) {
     maxConserveWindows: DEFAULT_MAX_CONSERVE_WINDOWS,
     stallKillSec: DEFAULT_STALL_KILL_SEC,
     quotaStatus: null,
+    printQuotaStatus: false,
     ringStateDir: DEFAULT_RING_STATE_DIR,
     reportDir: DEFAULT_REPORT_DIR,
     execute: false,
@@ -355,7 +359,15 @@ function parseArgs(argv) {
     else if (a === '--allow-conserve') opts.allowConserve = true
     else if (a === '--max-conserve-windows') opts.maxConserveWindows = argv[++i]
     else if (a === '--stall-kill-sec') opts.stallKillSec = argv[++i]
-    else if (a === '--quota-status') opts.quotaStatus = argv[++i]
+    else if (a === '--quota-status') {
+      const next = argv[i + 1]
+      if (!next || next.startsWith('--')) {
+        opts.printQuotaStatus = true
+      } else {
+        opts.quotaStatus = argv[++i]
+        opts.printQuotaStatus = true
+      }
+    }
     else if (a === '--ring-state-dir') opts.ringStateDir = argv[++i]
     else if (a === '--report-dir') opts.reportDir = argv[++i]
     else throw new Error(`unknown argument '${a}' (try --help)`)
@@ -395,6 +407,28 @@ export async function runRelay(argv) {
     return { ok: true, help: true }
   }
 
+  const stateDir = join(homedir(), '.local/state/curl-ai-bridge/overnight')
+  if (opts.printQuotaStatus && !opts.execute) {
+    const { quota, conservePools } = readQuotaStatus(opts.quotaStatus)
+    const budgets = loadPoolBudgets({
+      countCalls: (pool) => countPoolCallsInWindow(stateDir, pool),
+      quota,
+      conservePools
+    })
+    if (opts.json) {
+      process.stdout.write(`${JSON.stringify({ ok: true, mode: 'quota-status', budgets }, null, 2)}\n`)
+    } else {
+      const lines = [
+        'swarm relay quota-status (5h window + policy admission):',
+        ...Object.values(budgets).map((b) =>
+          `  ${b.pool}: admitted=${b.admitted} conserve=${b.conserve} calls5h=${b.callsInWindow}/${b.cap ?? 'uncapped'} weekly=${b.weeklyRemainingPct}% reason=${b.reason}`
+        )
+      ]
+      process.stdout.write(`${lines.join('\n')}\n`)
+    }
+    return { ok: true, mode: 'quota-status', budgets }
+  }
+
   const plan = buildRelayPlan({
     mode: opts.mode,
     siblings: opts.siblings,
@@ -424,7 +458,6 @@ export async function runRelay(argv) {
     return { ok: true, mode: 'dry-run', executed: false, plan }
   }
 
-  const stateDir = join(homedir(), '.local/state/curl-ai-bridge/overnight')
   const cwd = resolve(new URL('..', import.meta.url).pathname)
   const { quota, conservePools } = readQuotaStatus(opts.quotaStatus)
   const budgets = loadPoolBudgets({

@@ -28,11 +28,21 @@ import {
 } from './swarm-ring-state.mjs'
 
 const argv = process.argv.slice(2)
+const valueFlags = new Set(['--session', '--mode', '--cli', '--timeout', '--max-matches', '--transcript', '--handoff-dir', '--pool', '--state-dir', '--parent-slot', '--ring-state-dir'])
 const flag = (name, fallback = null) => {
   const i = argv.indexOf(name)
   return i >= 0 && i + 1 < argv.length ? argv[i + 1] : fallback
 }
-const has = (name) => argv.includes(name)
+const has = (name) => {
+  for (let i = 0; i < argv.length; i += 1) {
+    if (valueFlags.has(argv[i])) {
+      i += 1
+      continue
+    }
+    if (argv[i] === name) return true
+  }
+  return false
+}
 
 if (has('--help') || has('-h') || argv.length === 0) {
   console.log(`Usage: swarm ask (--session <id> | --all | --parent-slot <slot>) "<question>" [options]
@@ -65,10 +75,14 @@ const transcriptPath = flag('--transcript', null)
 const handoffDir = flag('--handoff-dir', resolveDefaultHandoffDir())
 
 // Extract positional question (first arg not belonging to a known flag)
-const valueFlags = new Set(['--session', '--mode', '--cli', '--timeout', '--max-matches', '--transcript', '--handoff-dir', '--pool', '--state-dir', '--parent-slot', '--ring-state-dir'])
 const positionals = []
 for (let i = 0; i < argv.length; i += 1) {
   if (valueFlags.has(argv[i])) {
+    const next = argv[i + 1]
+    if (!next || next.startsWith('--')) {
+      console.error(`swarm ask: flag '${argv[i]}' requires a value`)
+      process.exit(1)
+    }
     i += 1
     continue
   }

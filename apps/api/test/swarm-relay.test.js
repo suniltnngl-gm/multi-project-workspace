@@ -158,6 +158,7 @@ test('relay rounds and assignments: round wraps at K and carries model/pool', ()
   assert.equal(wrapped.window, 5)
   assert.equal(wrapped.demotedFromParentSlot, 'parent1')
   assert.equal(wrapped.parentSlot, 'parent4')
+  assert.equal(plan.assignments.length, 8)
 })
 
 test('model map parsing and per-sibling --model wiring', () => {
