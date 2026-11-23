@@ -86,10 +86,14 @@ export function buildCliCommand({
     case 'agy':
       argv = ['--print', effectivePrompt, '--model', model, ...(effectiveResume ? ['--conversation', sessionId] : [])]
       break
-    case 'opencode':
-      if (!provider) return fail('opencode_requires_provider_for_model')
-      argv = ['--standalone', 'run', '--model', `${provider}/${model}`, ...(effectiveResume ? ['--session', sessionId] : []), effectivePrompt]
+    case 'opencode': {
+      const modelSpec = provider
+        ? (model.startsWith(`${provider}/`) ? model : `${provider}/${model}`)
+        : (model.includes('/') ? model : null)
+      if (!modelSpec) return fail('opencode_requires_provider_for_model')
+      argv = ['--standalone', 'run', '--model', modelSpec, ...(effectiveResume ? ['--session', sessionId] : []), effectivePrompt]
       break
+    }
     case 'cline':
       argv = ['--cwd', cwd, '--json', '--yolo', '--model', model, ...(provider ? ['--provider', provider] : []), ...(effectiveResume ? ['--id', sessionId] : []), effectivePrompt]
       break

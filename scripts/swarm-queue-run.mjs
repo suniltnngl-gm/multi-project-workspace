@@ -83,6 +83,7 @@ function runJob({ job, task, ctx }) {
       return resolvePromise({ status: 'skipped', reason: 'publish_requires_operator_authorization' })
     }
     if (opts['dry-run']) args.push('--dry-run')
+    else args.push('--execute')
 
     const child = spawn(process.execPath, args, { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = ''
@@ -145,10 +146,10 @@ async function main() {
   }
 
   const ctx = {
-    cli: opts.cli || task.pinned?.cli || 'agy',
-    model: opts.model || task.pinned?.model || '',
-    provider: opts.provider || task.pinned?.provider || null,
-    prompt: opts.prompt || ''
+    cli: opts.cli || task.pinned?.cli || 'opencode',
+    model: opts.model || task.pinned?.model || 'opencode/deepseek-v4.1-flash-free',
+    provider: opts.provider || task.pinned?.provider || 'opencode',
+    prompt: opts.prompt || task.title || ''
   }
 
   const outcome = await runJob({ job, task, ctx })

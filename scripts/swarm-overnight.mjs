@@ -117,10 +117,11 @@ while (true) {
   let nextTask = selectNextTask(tasks)
   if (!nextTask && opts.autoDiscover) {
     const discoverCli = resolve(new URL('./swarm-discover.mjs', import.meta.url).pathname)
+    const repoDir = resolve(new URL('..', import.meta.url).pathname)
     spawnSync(
       process.execPath,
-      [discoverCli, '--mode', 'rediscover', '--queue-dir', opts.queueDir, '--case-dir', opts.caseDir, ...(opts.execute ? ['--apply'] : ['--dry-run']), '--json'],
-      { cwd: resolve(new URL('..', import.meta.url).pathname), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 }
+      [discoverCli, '--mode', 'rediscover', '--repo', repoDir, '--queue-dir', opts.queueDir, '--case-dir', opts.caseDir, ...(opts.execute ? ['--apply'] : ['--dry-run']), '--json'],
+      { cwd: repoDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 }
     )
     tasks = readQueue(opts.queueDir)
     nextTask = selectNextTask(tasks)
