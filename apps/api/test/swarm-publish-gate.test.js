@@ -37,6 +37,10 @@ test('readReviewVerdict fails closed on missing/malformed and accepts ACCEPT/REJ
     const nested = join(dir, 'nested.json')
     writeFileSync(nested, JSON.stringify({ review: { verdict: 'REJECT', reason: 'w4_reject' } }))
     assert.equal(readReviewVerdict(nested).verdict, 'REJECT')
+
+    // A prior round's artifact (mtime older than this window's start) must fail closed.
+    assert.equal(readReviewVerdict(ok, { windowStartedAtMs: Date.now() + 60_000 }).reason, 'stale_verdict_artifact')
+    assert.equal(readReviewVerdict(ok, { windowStartedAtMs: Date.now() }).verdict, 'ACCEPT')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -62,6 +66,34 @@ test('applyPublishGate ACCEPT checkpoints exactly the round files (push disabled
     assert.ok(res.commitSha)
     assert.doesNotMatch(git(repo, 'status', '--porcelain'), /a\.txt|b\.txt/)
     assert.equal(readFileSync(join(repo, 'a.txt'), 'utf8'), 'v2\n')
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+    rmSync(reports, { recursive: true, force: true })
+    rmSync(backups, { recursive: true, force: true })
+  }
+})
+
+test('applyPublishGate ACCEPT is idempotent when the build window already committed', () => {
+  const repo = initRepo()
+  const reports = mkdtempSync(join(tmpdir(), 'reports-'))
+  const backups = mkdtempSync(join(tmpdir(), 'backups-'))
+  try {
+    const base = git(repo, 'rev-parse', 'HEAD')
+    protectedWriteFile(join(repo, 'a.txt'), 'v2\n')
+    const first = applyPublishGate({
+      verdict: { verdict: 'ACCEPT', reason: 'ok' }, repoDir: repo, baseSha: base,
+      reportDir: reports, sibling: 'hermes', quotaPool: 'nous-hermes-free',
+      taskId: '#t', push: false, backupRoot: backups
+    })
+    assert.equal(first.action, 'checkpoint_pushed')
+
+    const second = applyPublishGate({
+      verdict: { verdict: 'ACCEPT', reason: 'ok' }, repoDir: repo, baseSha: base,
+      reportDir: reports, sibling: 'hermes', quotaPool: 'nous-hermes-free',
+      taskId: '#t', push: false, backupRoot: backups
+    })
+    assert.equal(second.action, 'already_committed')
+    assert.doesNotThrow(() => git(repo, 'status', '--porcelain'))
   } finally {
     rmSync(repo, { recursive: true, force: true })
     rmSync(reports, { recursive: true, force: true })

@@ -721,7 +721,7 @@ export async function runRelay(argv) {
 
     // Phase 1 publish gate: W4 leaves a verdict contract, W5 acts on it deterministically.
     if (assignment.job === 'review') {
-      const artifact = readReviewVerdict(findingsPath)
+      const artifact = readReviewVerdict(findingsPath, { windowStartedAtMs: windowStartMs })
       const det = deterministicRoundReview({ repoDir: cwd, baseSha: roundBase })
       const verdict = artifact.verdict === 'ACCEPT' && det.ok
         ? artifact

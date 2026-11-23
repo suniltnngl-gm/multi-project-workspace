@@ -11,7 +11,7 @@
  * so W5 can never guess.
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'os'
 import { join, resolve } from 'node:path'
 import { evaluateDeterministicDiff } from './swarm-review.mjs'
@@ -47,9 +47,16 @@ export function isBackupArtifact(relPath) {
  * Read the W4 verdict artifact. Fails closed when absent or not one of
  * ACCEPT|REJECT, so a silent/failed review can never reach publish as ACCEPT.
  */
-export function readReviewVerdict(findingsPath) {
+export function readReviewVerdict(findingsPath, { windowStartedAtMs = null } = {}) {
   if (!findingsPath || !existsSync(findingsPath)) {
     return { verdict: 'REJECT', reason: 'missing_verdict_artifact' }
+  }
+  // A prior round's artifact must never authorize this round's publish gate.
+  if (typeof windowStartedAtMs === 'number' && windowStartedAtMs > 0) {
+    const mtimeMs = statSync(findingsPath).mtimeMs
+    if (mtimeMs < windowStartedAtMs - 2000) {
+      return { verdict: 'REJECT', reason: 'stale_verdict_artifact', mtimeMs, windowStartedAtMs }
+    }
   }
   let doc
   try {
@@ -86,6 +93,20 @@ export function deterministicRoundReview({ repoDir, baseSha, testFile = null }) 
   })
 }
 
+/** Files among `files` that still differ from HEAD (i.e. would actually be committed). */
+export function pendingFilesSinceHead({ repoDir, files }) {
+  const list = files.filter(Boolean)
+  if (!list.length) return []
+  const r = spawnSync('git', ['-C', repoDir, 'status', '--porcelain', '--', ...list], { encoding: 'utf8', timeout: 5000 })
+  const out = new Set()
+  for (const line of (r.stdout || '').split(/\r?\n/)) {
+    if (!line.trim()) continue
+    const p = line.slice(3).trim()
+    if (p) out.add(p)
+  }
+  return [...out]
+}
+
 /**
  * Apply the W5 gate. Scoped strictly to the round's modified files; never `git add -A`.
  */
@@ -94,9 +115,13 @@ export function applyPublishGate({ verdict, repoDir, baseSha, reportDir, sibling
 
   if (verdict.verdict === 'ACCEPT') {
     if (!files.length) return { ok: true, action: 'noop_no_changes', files: [] }
+    // Idempotence: never re-commit work already committed/pushed by the build window —
+    // `git commit` on clean files fails and would abort the relay before its summary.
+    const pending = pendingFilesSinceHead({ repoDir, files })
+    if (!pending.length) return { ok: true, action: 'already_committed', files }
     const res = checkpointPassingDiff({
       repoDir,
-      files,
+      files: pending,
       message: `swarm relay: auto-checkpoint accepted round (${sibling || 'unknown'})`,
       taskId,
       category: 'self-improvement',
