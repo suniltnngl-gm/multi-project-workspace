@@ -377,6 +377,14 @@ test('Phase 3 horizon math: rolling pool reset pulls the deadline earlier; drift
     writeFileSync(ledger, '{oops\n')
     assert.equal(computeHorizonDeadlineMs({ relayStartMs: start, ledgerPath: ledger }), start + fiveHours)
 
+    // Uncapped $0 pools must not define a reset boundary...
+    const capped = new Set(['github-copilot', 'agy-gemini'])
+    writeFileSync(ledger, `${JSON.stringify({ quotaPool: 'nous-hermes-free', atMs: start - 60 * 60 * 1000 })}\n`)
+    assert.equal(computeHorizonDeadlineMs({ relayStartMs: start, ledgerPath: ledger, cappedPools: capped }), start + fiveHours)
+    // ...but capped pools (copilot / agy) do.
+    writeFileSync(ledger, `${JSON.stringify({ quotaPool: 'github-copilot', atMs: start - 60 * 60 * 1000 })}\n`)
+    assert.equal(computeHorizonDeadlineMs({ relayStartMs: start, ledgerPath: ledger, cappedPools: capped }), start - 60 * 60 * 1000 + fiveHours)
+
     assert.equal(effectiveWindowBudgetMs({ softWindowSec: 300, windowDriftMs: 0, minSubTurnSec: 30 }), 300000)
     assert.equal(effectiveWindowBudgetMs({ softWindowSec: 300, windowDriftMs: 60000, minSubTurnSec: 30 }), 240000)
     assert.equal(effectiveWindowBudgetMs({ softWindowSec: 300, windowDriftMs: 400000, minSubTurnSec: 30 }), 30000)

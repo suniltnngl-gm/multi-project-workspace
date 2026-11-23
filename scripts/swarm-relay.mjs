@@ -94,15 +94,18 @@ export const DEFAULT_HORIZON_MS = 5 * 60 * 60 * 1000
  * Phase 3 horizon: a hard 5h wall-clock cap, pulled earlier when an active pool
  * call in the rolling 5h ledger implies an imminent reset boundary.
  */
-export function computeHorizonDeadlineMs({ relayStartMs, maxHorizonMs = DEFAULT_HORIZON_MS, ledgerPath = null } = {}) {
+export function computeHorizonDeadlineMs({ relayStartMs, maxHorizonMs = DEFAULT_HORIZON_MS, ledgerPath = null, cappedPools = null } = {}) {
   let deadline = relayStartMs + maxHorizonMs
   if (ledgerPath && existsSync(ledgerPath)) {
     try {
       let earliest = null
       for (const line of readFileSync(ledgerPath, 'utf8').split(/\r?\n/)) {
         if (!line.trim()) continue
-        const at = Number(JSON.parse(line).atMs)
+        const rec = JSON.parse(line)
+        const at = Number(rec.atMs)
         if (!Number.isFinite(at)) continue
+        // Only pools with a real 5h cap define a reset boundary; $0 uncapped pools do not.
+        if (cappedPools && !cappedPools.has(String(rec.quotaPool || ''))) continue
         if (at >= relayStartMs - DEFAULT_HORIZON_MS) earliest = earliest === null ? at : Math.min(earliest, at)
       }
       if (earliest !== null) deadline = Math.min(deadline, earliest + DEFAULT_HORIZON_MS)
@@ -609,13 +612,6 @@ export async function runRelay(argv) {
   const startedAt = new Date().toISOString()
   const relayStartMs = Date.now()
   const minSubTurnSec = positiveInt(opts.minSubTurnSec, 30, 'minSubTurnSec')
-  const horizonDeadlineMs = computeHorizonDeadlineMs({
-    relayStartMs,
-    maxHorizonMs: positiveInt(opts.horizonMs, DEFAULT_HORIZON_MS, 'horizonMs'),
-    ledgerPath: join(stateDir, 'pool-calls-5h.jsonl')
-  })
-  let cumulativeDriftMs = 0
-  let lastWindowDriftMs = 0
 
   if (!opts.execute) {
     // Persist the schedule artifact for cross-session inspection ($0).
@@ -667,6 +663,16 @@ export async function runRelay(argv) {
     quota,
     conservePools
   })
+
+  // Phase 3 horizon: 5h cap, pulled earlier only by pools that actually have a 5h cap.
+  const horizonDeadlineMs = computeHorizonDeadlineMs({
+    relayStartMs,
+    maxHorizonMs: positiveInt(opts.horizonMs, DEFAULT_HORIZON_MS, 'horizonMs'),
+    ledgerPath: join(stateDir, 'pool-calls-5h.jsonl'),
+    cappedPools: new Set(Object.entries(budgets).filter(([, b]) => b.limitKnown && Number.isFinite(b.cap)).map(([k]) => k))
+  })
+  let cumulativeDriftMs = 0
+  let lastWindowDriftMs = 0
 
   // Each invocation gets a fresh, run-scoped ledger: no slot/parent carry-over.
   const runId = startedAt.replace(/[:.]/g, '-')
