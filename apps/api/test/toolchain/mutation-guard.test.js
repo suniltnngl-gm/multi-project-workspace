@@ -87,3 +87,27 @@ test('protectedWriteFile & undoLastEdit roll back ONLY the last edit on one file
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('protectedWriteFile enforces bounded recovery size (maxBackupsPerFile & maxTotalBytes) while preserving last-minute undo', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bounded-recovery-'))
+  try {
+    const fileA = join(dir, 'state.json')
+    const bdir = join(dir, '.backups')
+    writeFileSync(fileA, 'v0', 'utf8')
+
+    for (let i = 1; i <= 8; i++) {
+      protectedWriteFile(fileA, `v${i}`, { backupDir: bdir, maxBackupsPerFile: 3 })
+    }
+
+    // Should retain at most 3 backups (v5, v6, v7) and undo the last edit (v8 -> v7 -> v6)
+    undoLastEdit(fileA, { backupDir: bdir })
+    assert.strictEqual(readFileSync(fileA, 'utf8'), 'v7')
+    undoLastEdit(fileA, { backupDir: bdir })
+    assert.strictEqual(readFileSync(fileA, 'utf8'), 'v6')
+    undoLastEdit(fileA, { backupDir: bdir })
+    assert.strictEqual(readFileSync(fileA, 'utf8'), 'v5')
+    assert.throws(() => undoLastEdit(fileA, { backupDir: bdir }), /no_backup_history/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

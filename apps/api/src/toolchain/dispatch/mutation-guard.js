@@ -36,7 +36,91 @@ export function classifyMutationRisk(commandOrAction) {
 
 let backupSeq = 0
 
-export function createRecoveryBackup(targetPath, { backupDir = null } = {}) {
+export const DEFAULT_MAX_BACKUPS_PER_FILE = 5
+export const DEFAULT_MAX_BACKUP_DIR_BYTES = 5 * 1024 * 1024
+
+/**
+ * Bounded backup retention pruner: keeps at most `maxBackupsPerFile` recent
+ * checkpoints per file AND caps total directory usage at `maxTotalBytes`.
+ * Always preserves at least the newest 1 backup per file so `undoLastEdit`
+ * can always recover the last-minute edit without wholesale rollback.
+ */
+export function pruneBackups(backupDir, {
+  targetPath = null,
+  maxBackupsPerFile = DEFAULT_MAX_BACKUPS_PER_FILE,
+  maxTotalBytes = DEFAULT_MAX_BACKUP_DIR_BYTES
+} = {}) {
+  if (!backupDir || !existsSync(backupDir)) return { prunedCount: 0, freedBytes: 0 }
+  const allBak = readdirSync(backupDir).filter((f) => f.endsWith('.bak')).sort()
+  const byPrefix = new Map()
+  for (const f of allBak) {
+    // Format: <basename>.<iso-stamp>.<seq>.<uuid8>.bak
+    const parts = f.split('.')
+    const base = parts.length >= 5 ? parts.slice(0, -4).join('.') : f
+    if (!byPrefix.has(base)) byPrefix.set(base, [])
+    byPrefix.get(base).push(f)
+  }
+
+  let prunedCount = 0
+  let freedBytes = 0
+  const removeBak = (bakName) => {
+    const bakPath = join(backupDir, bakName)
+    const metaPath = `${bakPath}.meta.json`
+    try {
+      if (existsSync(bakPath)) {
+        freedBytes += readFileSync(bakPath).length
+        rmSync(bakPath, { force: true })
+        prunedCount += 1
+      }
+      if (existsSync(metaPath)) rmSync(metaPath, { force: true })
+    } catch {}
+  }
+
+  // 1. Per-file cap (keep last N backups for each file, min 1)
+  const capPerFile = Math.max(1, Number(maxBackupsPerFile) || DEFAULT_MAX_BACKUPS_PER_FILE)
+  for (const [base, list] of byPrefix.entries()) {
+    if (targetPath && base !== basename(targetPath)) continue
+    while (list.length > capPerFile) {
+      const oldest = list.shift()
+      removeBak(oldest)
+    }
+  }
+
+  // 2. Directory total-bytes cap (evict oldest backups across files while keeping newest 1 per file)
+  if (Number.isFinite(maxTotalBytes) && maxTotalBytes > 0) {
+    const remaining = readdirSync(backupDir).filter((f) => f.endsWith('.bak')).sort()
+    const latestPerBase = new Set()
+    const entries = remaining.map((f) => {
+      const parts = f.split('.')
+      const base = parts.length >= 5 ? parts.slice(0, -4).join('.') : f
+      const p = join(backupDir, f)
+      const bytes = existsSync(p) ? readFileSync(p).length : 0
+      return { f, base, bytes }
+    })
+    for (const e of entries) {
+      // Since entries are sorted oldest->newest, overwriting leaves the newest per base
+    }
+    const newestByBase = new Map()
+    for (const e of entries) newestByBase.set(e.base, e.f)
+    for (const f of newestByBase.values()) latestPerBase.add(f)
+
+    let totalBytes = entries.reduce((acc, e) => acc + e.bytes, 0)
+    for (const e of entries) {
+      if (totalBytes <= maxTotalBytes) break
+      if (latestPerBase.has(e.f)) continue
+      removeBak(e.f)
+      totalBytes -= e.bytes
+    }
+  }
+
+  return { prunedCount, freedBytes }
+}
+
+export function createRecoveryBackup(targetPath, {
+  backupDir = null,
+  maxBackupsPerFile = DEFAULT_MAX_BACKUPS_PER_FILE,
+  maxTotalBytes = DEFAULT_MAX_BACKUP_DIR_BYTES
+} = {}) {
   if (!existsSync(targetPath)) {
     throw new Error(`backup_target_missing:${targetPath}`)
   }
@@ -57,6 +141,8 @@ export function createRecoveryBackup(targetPath, { backupDir = null } = {}) {
     bytes: data.length,
     createdAt: new Date().toISOString()
   }, null, 2), { mode: 0o600 })
+
+  pruneBackups(dir, { targetPath, maxBackupsPerFile, maxTotalBytes })
 
   return { ok: true, targetPath, backupPath, metaPath, sha256: digest, bytes: data.length }
 }
@@ -83,8 +169,14 @@ export function restoreRecoveryBackup(backupPath, targetPath) {
  * Per-file protected write: creates a checksummed single-file checkpoint of the
  * current file contents immediately before atomically writing `nextContent`.
  */
-export function protectedWriteFile(targetPath, nextContent, { backupDir = null } = {}) {
-  const backup = existsSync(targetPath) ? createRecoveryBackup(targetPath, { backupDir }) : null
+export function protectedWriteFile(targetPath, nextContent, {
+  backupDir = null,
+  maxBackupsPerFile = DEFAULT_MAX_BACKUPS_PER_FILE,
+  maxTotalBytes = DEFAULT_MAX_BACKUP_DIR_BYTES
+} = {}) {
+  const backup = existsSync(targetPath)
+    ? createRecoveryBackup(targetPath, { backupDir, maxBackupsPerFile, maxTotalBytes })
+    : null
   mkdirSync(dirname(targetPath), { recursive: true })
   const buf = Buffer.isBuffer(nextContent) ? nextContent : Buffer.from(String(nextContent), 'utf8')
   const postEditSha256 = sha256(buf)

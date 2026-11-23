@@ -20,6 +20,7 @@ import {
   checkPoolFiveHourAdmission,
   recordPoolCall
 } from '../apps/api/src/toolchain/dispatch/overnight-supervisor.js'
+import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
 
 export const RELAY_MODES = ['discover', 'fix']
 export const DEFAULT_SIBLINGS = ['hermes', 'direct']
@@ -201,7 +202,7 @@ export function buildSiblingCommand(sibling, { prompt }) {
 
 function writeReport(path, payload) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
-  writeFileSync(path, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 })
+  protectedWriteFile(path, `${JSON.stringify(payload, null, 2)}\n`)
 }
 
 function parseArgs(argv) {
