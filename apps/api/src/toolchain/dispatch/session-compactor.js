@@ -10,12 +10,12 @@ import { join } from 'node:path'
 import { protectedWriteFile } from './mutation-guard.js'
 
 export const DEFAULT_COMPACT_THRESHOLDS = Object.freeze({
-  agyBytes: 120_000,
-  agyLines: 40,
-  jsonlBytes: 64_000,
-  jsonlLines: 12,
-  rotateBytes: 160_000,
-  rotateLines: 40
+  agyBytes: 60_000,
+  agyLines: 20,
+  jsonlBytes: 32_000,
+  jsonlLines: 10,
+  rotateBytes: 80_000,
+  rotateLines: 20
 })
 
 export function resolveAgyTranscriptPath(sessionId, { homeDir = homedir() } = {}) {
