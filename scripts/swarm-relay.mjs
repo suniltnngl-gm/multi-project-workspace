@@ -145,6 +145,7 @@ export function buildSiblingCommand(sibling, { prompt }) {
   else if (sibling === 'hermes') base = ['hermes', '-z']
   else if (sibling === 'opencode') base = ['opencode', 'run', '--standalone', '--model', 'opencode/deepseek-v4.1-flash-free']
   else if (sibling === 'direct') base = [process.execPath, resolve(new URL('./swarm-direct.mjs', import.meta.url).pathname), '--provider', 'cloudflare', '--prompt']
+  else if (sibling === 'gemini-api') base = ['gemini-api', 'prompt']
   else if (sibling === 'agy') base = ['agy', '-p']
   else base = [sibling]
 

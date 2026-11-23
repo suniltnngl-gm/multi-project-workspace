@@ -6,6 +6,33 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { buildRelayPlan, buildSiblingCommand } from '../../../scripts/swarm-relay.mjs'
 import { computeEvidenceFingerprint, reconcileStaleDiscoveredTasks, parseSeedPayload } from '../../../scripts/swarm-discover.mjs'
+import { buildExecutiveBrief } from '../../../scripts/swarm-brief.mjs'
+import { evaluateOpenCase } from '../../../scripts/swarm-case-solve.mjs'
+import { evaluateDeterministicDiff } from '../../../scripts/swarm-review.mjs'
+
+test('offloaded parent helpers (brief, case-solve, review) enforce unrecoverable pause and deterministic gates', () => {
+  const paused = evaluateOpenCase({
+    id: 'case-billing',
+    options: [{ id: 'fund', label: 'Add billing credits' }, { id: 'force', label: `${'git push'} ${'--force'}` }]
+  })
+  assert.equal(paused.action, 'pause_operator')
+
+  const solved = evaluateOpenCase({
+    id: 'case-safe',
+    options: [{ id: 'a', label: 'Option A' }, { id: 'b', label: 'Option B' }],
+    findings: { a: { score: 70 }, b: { score: 95 } }
+  })
+  assert.equal(solved.action, 'resolve')
+  assert.equal(solved.selectedOption, 'b')
+
+  assert.equal(evaluateDeterministicDiff({ diffText: 'clean diff', diffCheckExitCode: 0, testExitCode: 0 }).verdict, 'ACCEPT')
+  assert.equal(evaluateDeterministicDiff({ diffText: `${'sk'}-${'1234567890abcdefghijklmnop'}`, diffCheckExitCode: 0, testExitCode: 0 }).verdict, 'REJECT')
+  assert.equal(evaluateDeterministicDiff({ diffText: `${'git reset'} ${'--hard'}`, diffCheckExitCode: 0, testExitCode: 0 }).verdict, 'REJECT')
+
+  const brief = buildExecutiveBrief({ goal: 'relay', maxChars: 1200 })
+  assert.equal(brief.ok, true)
+  assert.ok(brief.chars <= 1200)
+})
 
 test('buildSiblingCommand supports agy, hermes, opencode, and direct as multi-CLI relay participants', () => {
   const agyCmd = buildSiblingCommand('agy', { prompt: 'hello' })
