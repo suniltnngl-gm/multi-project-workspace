@@ -4,7 +4,8 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus, evaluateReviewGate, computeHorizonDeadlineMs, effectiveWindowBudgetMs, parseSiblingVerdict, buildReviewBrief, pickFocusedTest } from '../../../scripts/swarm-relay.mjs'
+import { fileURLToPath } from 'node:url'
+import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus, evaluateReviewGate, computeHorizonDeadlineMs, effectiveWindowBudgetMs, parseSiblingVerdict, buildReviewBrief, pickFocusedTest, buildBuildBrief } from '../../../scripts/swarm-relay.mjs'
 import { computeEvidenceFingerprint, reconcileStaleDiscoveredTasks, parseSeedPayload } from '../../../scripts/swarm-discover.mjs'
 import { buildExecutiveBrief } from '../../../scripts/swarm-brief.mjs'
 import { evaluateOpenCase } from '../../../scripts/swarm-case-solve.mjs'
@@ -468,4 +469,27 @@ test('W4 verdict recovery: stdout parser ignores fake tool JSON, gate falls back
     evaluateReviewGate({ artifactVerdict: 'ACCEPT', artifactReason: 'w4_sibling_stdout_accept', detOk: true, deterministicOnly: false }),
     { verdict: 'ACCEPT', reason: 'w4_sibling_stdout_accept' }
   )
+})
+
+test('W3 build brief pins the requested board task and is injected into the build prompt', () => {
+  const repoRoot = resolve(fileURLToPath(new URL('../../../', import.meta.url)))
+  const all = buildBuildBrief({ repoDir: repoRoot })
+  assert.match(all, /## Board target\(s\)/)
+  assert.ok(all.length <= 5000)
+
+  const pinned = buildBuildBrief({ repoDir: repoRoot, taskId: '191' })
+  assert.match(pinned, /#191 /)
+  assert.doesNotMatch(pinned, /#151 /)
+
+  const prompt = buildSiblingPrompt({
+    mode: 'pipeline',
+    job: 'build',
+    window: 3,
+    windows: 5,
+    sibling: 'hermes',
+    reportPath: '/tmp/relay-build-findings.json',
+    buildBrief: pinned
+  })
+  assert.match(prompt, /#191 /)
+  assert.match(prompt, /smallest verified fix set/)
 })

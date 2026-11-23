@@ -136,6 +136,23 @@ export function pickFocusedTest(files = []) {
   return (files.find((f) => /\.test\.js$/.test(String(f))) ) || null
 }
 
+/**
+ * $0 pre-pack for W3/W2: the board's in-progress targets, so a single-shot CLI has a
+ * concrete deliverable instead of guessing. Pass `--task <id>` to pin one target.
+ */
+export function buildBuildBrief({ repoDir, taskId = null, maxBytes = 5000 } = {}) {
+  const out = spawnSync(resolve(repoDir, 'workspace'), ['task', 'list', '--status', 'in_progress'], { encoding: 'utf8', timeout: 10000 })
+  const lines = String(out.stdout || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+  let picked = lines
+  if (taskId) {
+    const needle = String(taskId).replace(/^#/, '')
+    const hit = lines.find((l) => l.includes(`#${needle} `))
+    if (hit) picked = [hit]
+  }
+  const body = picked.slice(0, 3).join('\n') || '(no in-progress board tasks)'
+  return [`## Board target(s) — pick the pinned task or the highest-priority one, implement the smallest verified change, run focused tests`, body].join('\n').slice(0, maxBytes)
+}
+
 export const DEFAULT_HORIZON_MS = 5 * 60 * 60 * 1000
 
 /**
@@ -356,6 +373,7 @@ export function buildSiblingPrompt({
   promotedToParentSlot = null,
   demotedFromParentSlot = null,
   reviewBrief = '',
+  buildBrief = '',
   parentSibling = null,
   parentSlot = null,
   parentFindingsPath = null,
@@ -382,7 +400,8 @@ export function buildSiblingPrompt({
       `Apply the smallest verified fix set for the active case/task, run focused tests, and write a concise JSON report to ${reportPath}.`,
       'Never force-push, never reset --hard, never discard untracked work.',
       deadlineLine,
-      budget
+      budget,
+      buildBrief,
     ].filter(Boolean).join(' ')
   }
   if (activeJob === 'case-solve') {
@@ -815,7 +834,10 @@ export async function runRelay(argv) {
       softWindowSec: plan.softWindowSec,
       reportPath: assignment.findingsPath || assignment.reportPath,
       deadlineIso: new Date(deadlineMs).toISOString(),
-      reviewBrief
+      reviewBrief,
+      buildBrief: assignment.job === 'build' || assignment.job === 'fix'
+        ? buildBuildBrief({ repoDir: cwd, taskId: opts.task })
+        : ''
     })
 
     const { command, args } = buildSiblingCommand(choice.sibling, { prompt, model: choice.model })
