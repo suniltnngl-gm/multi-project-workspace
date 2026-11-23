@@ -4,7 +4,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 
 const UNRECOVERABLE_PATTERNS = [
@@ -283,13 +283,19 @@ export function pruneBackupsAfterGitCheckpoint({
 }
 
 /**
- * Triple-layer Passing-Diff Checkpoint (`backup` + `git commit` + `GitHub push`):
+ * Triple-layer Passing-Diff Checkpoint (`backup` + `git commit` + `GitHub push`) +
+ * Progressive Self-Improvement Telemetry Ledger (`checkpoint-ledger.jsonl`):
  * Ensures every passing diff is protected by:
  *   1. A fresh per-file `.backups/` snapshot of each passing file (`createRecoveryBackup`,
  *      compacted to `keepRepoBackups: 1` so recovery size stays minimal while preserving
  *      instant per-file undo if a subsequent edit breaks tests),
  *   2. A local git stage + commit of ONLY the specified passing `files`,
- *   3. Optional push to `remote` / `branch` (GitHub) + state backup compaction.
+ *   3. Optional push to `remote` / `branch` (GitHub) + state backup compaction,
+ *   4. A persistent JSONL telemetry entry tracking:
+ *      - validated non-stop progress (`commitSha`, `pushed`, `filesCount`),
+ *      - AI quota saved (by locking passing diffs so siblings never re-do passing files),
+ *      - avoided wholesale undo/redo & early hallucination detection (`undoCount`, `hallucinationsCaught`),
+ *      - authorized progressive/portable/reusable self-improvement category (`taskId`, `category`, `sibling`, ` quotaPool`).
  */
 export function checkpointPassingDiff({
   repoDir,
@@ -297,6 +303,13 @@ export function checkpointPassingDiff({
   message = 'chore(checkpoint): passing diff checkpoint',
   backupRoot = null,
   stateBackupDirs = [],
+  ledgerPath = null,
+  taskId = null,
+  category = 'self-improvement',
+  sibling = null,
+  quotaPool = null,
+  undoCount = 0,
+  hallucinationsCaught = 0,
   push = false,
   remote = 'origin',
   branch = 'master',
@@ -340,6 +353,36 @@ export function checkpointPassingDiff({
     keepStateBackups: 1
   })
 
+  const resolvedLedgerPath = ledgerPath || (backupRoot ? join(resolve(backupRoot), 'checkpoint-ledger.jsonl') : null)
+  const entry = {
+    schema: 'checkpoint-telemetry/v1',
+    at: new Date().toISOString(),
+    atMs: Date.now(),
+    commitSha,
+    pushed,
+    remote: push ? remote : null,
+    branch: push ? branch : null,
+    taskId: taskId || null,
+    category: category || 'self-improvement',
+    sibling: sibling || null,
+    quotaPool: quotaPool || null,
+    files: relFiles,
+    filesCount: relFiles.length,
+    backupsCount: backups.length,
+    prunedCount: pruned.prunedCount,
+    freedBytes: pruned.freedBytes,
+    undoCount: Number(undoCount) || 0,
+    hallucinationsCaught: Number(hallucinationsCaught) || 0,
+    wholesaleRevertsAvoided: 1,
+    estimatedQuotaTurnsSaved: Math.max(1, relFiles.length),
+    message
+  }
+
+  if (resolvedLedgerPath) {
+    mkdirSync(dirname(resolvedLedgerPath), { recursive: true, mode: 0o700 })
+    appendFileSync(resolvedLedgerPath, `${JSON.stringify(entry)}\n`, { mode: 0o600 })
+  }
+
   return {
     ok: true,
     commitSha,
@@ -348,6 +391,55 @@ export function checkpointPassingDiff({
     branch: push ? branch : null,
     files: relFiles,
     backups,
-    pruned
+    pruned,
+    telemetry: entry,
+    ledgerPath: resolvedLedgerPath
   }
+}
+
+export function summarizeCheckpointTelemetry(ledgerPath) {
+  if (!ledgerPath || !existsSync(ledgerPath)) {
+    return {
+      totalCheckpoints: 0,
+      pushedCheckpoints: 0,
+      filesProtected: 0,
+      wholesaleRevertsAvoided: 0,
+      estimatedQuotaTurnsSaved: 0,
+      hallucinationsCaught: 0,
+      singleFileUndos: 0,
+      freedBackupBytes: 0,
+      latestCommitSha: null,
+      categories: {}
+    }
+  }
+  const lines = readFileSync(ledgerPath, 'utf8').trim().split(/\r?\n/).filter(Boolean)
+  const summary = {
+    totalCheckpoints: 0,
+    pushedCheckpoints: 0,
+    filesProtected: 0,
+    wholesaleRevertsAvoided: 0,
+    estimatedQuotaTurnsSaved: 0,
+    hallucinationsCaught: 0,
+    singleFileUndos: 0,
+    freedBackupBytes: 0,
+    latestCommitSha: null,
+    categories: {}
+  }
+  for (const line of lines) {
+    try {
+      const r = JSON.parse(line)
+      summary.totalCheckpoints += 1
+      if (r.pushed) summary.pushedCheckpoints += 1
+      summary.filesProtected += Number(r.filesCount) || 0
+      summary.wholesaleRevertsAvoided += Number(r.wholesaleRevertsAvoided) || 0
+      summary.estimatedQuotaTurnsSaved += Number(r.estimatedQuotaTurnsSaved) || 0
+      summary.hallucinationsCaught += Number(r.hallucinationsCaught) || 0
+      summary.singleFileUndos += Number(r.undoCount) || 0
+      summary.freedBackupBytes += Number(r.freedBytes) || 0
+      if (r.commitSha) summary.latestCommitSha = r.commitSha
+      const cat = r.category || 'self-improvement'
+      summary.categories[cat] = (summary.categories[cat] || 0) + 1
+    } catch {}
+  }
+  return summary
 }

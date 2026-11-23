@@ -10,7 +10,8 @@ import {
   protectedWriteFile,
   undoLastEdit,
   pruneBackupsAfterGitCheckpoint,
-  checkpointPassingDiff
+  checkpointPassingDiff,
+  summarizeCheckpointTelemetry
 } from '../../src/toolchain/dispatch/mutation-guard.js'
 
 test('classifyMutationRisk blocks unrecoverable and wholesale-revert mutations and allows recoverable commands', () => {
@@ -171,6 +172,14 @@ test('pruneBackupsAfterGitCheckpoint compacts committed repo & state backups to 
     assert.strictEqual(gitCalls.some((a) => a[0] === 'add'), true)
     assert.strictEqual(gitCalls.some((a) => a[0] === 'commit'), true)
     assert.strictEqual(gitCalls.some((a) => a[0] === 'push'), true)
+
+    const metrics = summarizeCheckpointTelemetry(cp.ledgerPath)
+    assert.strictEqual(metrics.totalCheckpoints, 1)
+    assert.strictEqual(metrics.pushedCheckpoints, 1)
+    assert.strictEqual(metrics.filesProtected, 1)
+    assert.strictEqual(metrics.wholesaleRevertsAvoided, 1)
+    assert.strictEqual(metrics.estimatedQuotaTurnsSaved, 1)
+    assert.strictEqual(metrics.latestCommitSha, 'abc1234')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
