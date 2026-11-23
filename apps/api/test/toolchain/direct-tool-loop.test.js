@@ -10,8 +10,14 @@ test('runDirectToolLoop executes read_file and blocks path traversal & unauthori
   try {
     writeFileSync(join(dir, 'hello.txt'), 'world-123', 'utf8')
 
-    // Blocks path traversal and unauthorized writes
-    assert.throws(() => executeToolCall({ tool: 'read_file', args: { path: '../../etc/passwd' } }, { repoDir: dir }), /path_outside_repo/)
+    // Blocks path traversal and unauthorized writes.
+    // executeToolCall's contract is fail-closed: it returns a structured
+    // {ok:false,error} so runDirectToolLoop can feed TOOL_RESULT back and keep
+    // going. safeResolve still throws internally (direct-tool-loop.js:39);
+    // here we assert the guarded, non-throwing surface the loop consumes.
+    const deniedTraversal = executeToolCall({ tool: 'read_file', args: { path: '../../etc/passwd' } }, { repoDir: dir })
+    assert.strictEqual(deniedTraversal.ok, false)
+    assert.match(deniedTraversal.error, /path_outside_repo/)
     const denied = executeToolCall({ tool: 'protected_write', args: { path: 'hello.txt', content: 'x' } }, { repoDir: dir, allowWrites: false })
     assert.strictEqual(denied.ok, false)
     assert.strictEqual(denied.error, 'writes_disabled_in_read_only_mode')
