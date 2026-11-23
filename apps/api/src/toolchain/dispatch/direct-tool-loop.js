@@ -8,7 +8,8 @@
  * - Writes default to disabled (`allowWrites: false`) and always use `protectedWriteFile`
  */
 import { existsSync, readFileSync } from 'node:fs'
-import { resolve, sep } from 'node:path'
+import { homedir } from 'node:os'
+import { join, resolve, sep } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { protectedWriteFile } from './mutation-guard.js'
 
@@ -20,13 +21,22 @@ const TOOL_SYSTEM_PROMPT = [
   'Otherwise reply directly with your final answer.'
 ].join('\n')
 
-function safeResolve(repoDir, relPath) {
+function safeResolve(repoDir, relPath, { allowStateRead = false } = {}) {
   const root = resolve(repoDir)
   const target = resolve(root, String(relPath || ''))
-  if (target !== root && !target.startsWith(`${root}${sep}`)) {
-    throw new Error(`path_outside_repo:${relPath}`)
+  if (target === root || target.startsWith(`${root}${sep}`)) {
+    return target
   }
-  return target
+  if (allowStateRead) {
+    const stateRoot = resolve(process.env.SWARM_STATE_ROOT || join(homedir(), '.local/state/curl-ai-bridge'))
+    for (const sub of ['reports', 'handoffs', 'relay']) {
+      const allowedDir = resolve(stateRoot, sub)
+      if (target === allowedDir || target.startsWith(`${allowedDir}${sep}`)) {
+        return target
+      }
+    }
+  }
+  throw new Error(`path_outside_repo:${relPath}`)
 }
 
 export function parseToolCall(text) {
@@ -46,7 +56,12 @@ export function parseToolCall(text) {
 
 export function executeToolCall({ tool, args }, { repoDir = process.cwd(), allowWrites = false } = {}) {
   if (tool === 'read_file') {
-    const abs = safeResolve(repoDir, args.path)
+    let abs
+    try {
+      abs = safeResolve(repoDir, args.path, { allowStateRead: true })
+    } catch (err) {
+      return { ok: false, error: err.message }
+    }
     if (!existsSync(abs)) return { ok: false, error: `file_not_found:${args.path}` }
     const content = readFileSync(abs, 'utf8')
     return { ok: true, content: content.slice(0, 4000), truncated: content.length > 4000 }

@@ -471,19 +471,24 @@ export async function runRelay(argv) {
       quota: statusInfo.quota,
       conservePools: statusInfo.conservePools
     })
+    const budgetsWithEligibility = Object.fromEntries(
+      Object.entries(budgets).map(([pool, b]) => [
+        pool,
+        { ...b, eligible: Boolean(b.admitted && (!b.conserve || opts.allowConserve)) }
+      ])
+    )
     if (opts.json) {
-      process.stdout.write(`${JSON.stringify({ ok: true, mode: 'quota-status', source: statusInfo.source || 'sqlite', budgets }, null, 2)}\n`)
+      process.stdout.write(`${JSON.stringify({ ok: true, mode: 'quota-status', source: statusInfo.source || 'sqlite', allowConserve: Boolean(opts.allowConserve), budgets: budgetsWithEligibility }, null, 2)}\n`)
     } else {
       const lines = [
         `swarm relay quota-status (source=${statusInfo.source || 'sqlite'} | 5h window + live weekly/CONSERVE admission):`,
-        ...Object.values(budgets).map((b) => {
-          const effEligible = b.admitted && (!b.conserve || opts.allowConserve)
-          return `  ${b.pool}: eligible=${effEligible} quotaAdmitted=${b.admitted} conserve=${b.conserve} calls5h=${b.callsInWindow}/${b.cap ?? 'uncapped'} weekly=${b.weeklyRemainingPct}% reason=${b.reason}`
-        })
+        ...Object.values(budgetsWithEligibility).map((b) =>
+          `  ${b.pool}: eligible=${b.eligible} quotaAdmitted=${b.admitted} conserve=${b.conserve} calls5h=${b.callsInWindow}/${b.cap ?? 'uncapped'} weekly=${b.weeklyRemainingPct}% reason=${b.reason}`
+        )
       ]
       process.stdout.write(`${lines.join('\n')}\n`)
     }
-    return { ok: true, mode: 'quota-status', source: statusInfo.source || 'sqlite', budgets }
+    return { ok: true, mode: 'quota-status', source: statusInfo.source || 'sqlite', budgets: budgetsWithEligibility }
   }
 
   const plan = buildRelayPlan({
