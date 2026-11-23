@@ -35,13 +35,20 @@ test('offloaded parent helpers (brief, case-solve, review) enforce unrecoverable
   assert.ok(brief.chars <= 1200)
 })
 
-test('buildSiblingCommand supports agy, hermes, opencode, and direct as multi-CLI relay participants', () => {
+test('buildSiblingCommand supports agy, hermes, opencode, direct, and gemini-api as multi-CLI relay participants', () => {
   const agyCmd = buildSiblingCommand('agy', { prompt: 'hello' })
   assert.equal(agyCmd.command, 'agy')
   assert.deepEqual(agyCmd.args, ['-p', 'hello'])
   const hermesCmd = buildSiblingCommand('hermes', { prompt: 'hello' })
   assert.equal(hermesCmd.command, 'hermes')
   assert.deepEqual(hermesCmd.args, ['-z', 'hello'])
+  // #186: gemini-api exposes `generate [prompt]`, not `prompt`; a wrong subcommand
+  // makes the relay window exit non-zero before any sibling runs.
+  const geminiCmd = buildSiblingCommand('gemini-api', { prompt: 'hello' })
+  assert.equal(geminiCmd.command, 'gemini-api')
+  assert.deepEqual(geminiCmd.args, ['generate', 'hello'])
+  const geminiModeled = buildSiblingCommand('gemini-api', { prompt: 'hello', model: 'gemini-flash-latest' })
+  assert.deepEqual(geminiModeled.args, ['generate', '--model', 'gemini-flash-latest', 'hello'])
 })
 
 test('parseSeedPayload converts relay-discover-report/v1 into tasks and multi-option cases', () => {
@@ -170,8 +177,8 @@ test('model map parsing and per-sibling --model wiring', () => {
   assert.deepEqual(withModel.args, ['-z', '--model', 'm/x', 'hi'])
   const agyWithModel = buildSiblingCommand('agy', { prompt: 'hi', model: 'm/y' })
   assert.deepEqual(agyWithModel.args, ['-p', '--model', 'm/y', 'hi'])
-  const geminiNoFlag = buildSiblingCommand('gemini-api', { prompt: 'hi', model: 'm/z' })
-  assert.deepEqual(geminiNoFlag.args, ['prompt', 'hi'])
+  const geminiWithModel = buildSiblingCommand('gemini-api', { prompt: 'hi', model: 'm/z' })
+  assert.deepEqual(geminiWithModel.args, ['generate', '--model', 'm/z', 'hi'])
   const directNoFlag = buildSiblingCommand('direct', { prompt: 'hi', model: 'm/z' })
   assert.equal(directNoFlag.args.includes('--model'), false)
 })

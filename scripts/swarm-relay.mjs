@@ -55,7 +55,7 @@ export const DEFAULT_STALL_KILL_SEC = 0
 export const DEFAULT_REPORT_DIR = join(homedir(), '.local/state/curl-ai-bridge/reports')
 
 /** Sibling CLIs that accept an explicit `--model` flag. */
-const MODEL_FLAG_CLIS = new Set(['hermes', 'opencode', 'agy'])
+const MODEL_FLAG_CLIS = new Set(['hermes', 'opencode', 'agy', 'gemini-api'])
 
 /**
  * Classify one window's outcome. A sibling that exits 0 without writing its findings
@@ -348,7 +348,7 @@ export function buildSiblingCommand(sibling, { prompt, model = null }) {
   else if (sibling === 'direct-vercel') base = [process.execPath, resolve(new URL('./swarm-direct.mjs', import.meta.url).pathname), '--provider', 'vercel', '--prompt']
   else if (sibling === 'local') base = [process.execPath, resolve(new URL('./local-llama-cli.mjs', import.meta.url).pathname), '--model', '1.5b', '--prompt']
   else if (sibling === 'copilot') base = ['copilot', '-p']
-  else if (sibling === 'gemini-api') base = ['gemini-api', 'prompt']
+  else if (sibling === 'gemini-api') base = ['gemini-api', 'generate']
   else if (sibling === 'agy') base = ['agy', '-p']
   else base = [sibling]
 
