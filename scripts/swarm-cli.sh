@@ -124,6 +124,7 @@ case "$cmd" in
       const stateDirs = ["sessions", "lessons", "handoffs", "reports", "relay", "queue/cases", "queue/active"]
         .map(sub => join(stateRoot, sub, ".backups"))
         .filter(d => existsSync(d));
+      const __gatePath = process.env.SWARM_GATE_VERDICT_PATH || null;
       const res = checkpointPassingDiff({
         repoDir: "'"$MPW_DIR"'",
         files,
@@ -134,7 +135,10 @@ case "$cmd" in
         quotaPool,
         backupRoot: join(stateRoot, "repo-checkpoints"),
         stateBackupDirs: stateDirs,
-        push
+        push,
+        gate: __gatePath
+          ? { verdictPath: __gatePath, windowId: process.env.SWARM_WINDOW_ID || null }
+          : null
       });
       console.log(JSON.stringify(res, null, 2));
     ' -- "$@"

@@ -25,7 +25,7 @@ import {
   countPoolCallsInWindow,
   recordPoolCall
 } from '../apps/api/src/toolchain/dispatch/overnight-supervisor.js'
-import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
+import { protectedWriteFile, snapshotRestorePoints } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
 import { applyPublishGate, deterministicRoundReview, modifiedFilesSince, readReviewVerdict, roundBaseSha } from './swarm-publish-gate.mjs'
 import { formatQuotaStatusLine } from './swarm-doctor-quota.mjs'
 import { windowPolicyEnv } from './swarm-window-policy.mjs'
@@ -760,10 +760,19 @@ export async function runRelay(argv) {
   let conserveWindowsUsed = 0
   let roundBase = null
   const roundVerdicts = new Map()
+  const roundVerdictPaths = new Map()
+  let roundPreExisting = []
+  const backupRoot = join(homedir(), '.local/state/curl-ai-bridge/repo-checkpoints')
   const totalWindows = plan.rounds === 'continuous' ? Number.POSITIVE_INFINITY : plan.windows * plan.rounds
 
   for (let index = 0; index < totalWindows; index += 1) {
-    if (index % plan.siblings.length === 0) roundBase = roundBaseSha(cwd)
+    if (index % plan.siblings.length === 0) {
+      roundBase = roundBaseSha(cwd)
+      // Pre-round baseline: snapshot anything already dirty so a later REJECT can restore it,
+      // and remember which files existed before the build window touched them.
+      roundPreExisting = modifiedFilesSince({ repoDir: cwd, baseSha: roundBase })
+      snapshotRestorePoints(roundPreExisting, { repoDir: cwd, backupRoot })
+    }
     const remainingHorizonMs = horizonDeadlineMs - Date.now()
     // Never start a round/window that cannot fit inside the 5h horizon.
     if (index % plan.siblings.length === 0
@@ -840,6 +849,12 @@ export async function runRelay(argv) {
     })
 
     const { command, args } = buildSiblingCommand(choice.sibling, { prompt, model: choice.model })
+    // Defense in depth: a publish sibling that self-invokes `swarm checkpoint` is bound
+    // to this round's ACCEPT artifact; on a REJECT window no path is exported.
+    const roundVerdictPath = roundVerdictPaths.get(assignment.round) || null
+    const gateEnv = assignment.job === 'publish' && roundVerdictPath
+      ? { SWARM_GATE_VERDICT_PATH: roundVerdictPath, SWARM_WINDOW_ID: `r${assignment.round}-w${assignment.window}` }
+      : {}
     const maxSubTurns = positiveInt(opts.subTurns, 1, 'subTurns')
     let res = null
     let subTurnsExecuted = 0
@@ -859,6 +874,7 @@ export async function runRelay(argv) {
         env: {
           ...process.env,
           ...windowPolicyEnv(assignment.job),
+          ...gateEnv,
           SWARM_RELAY_WINDOW: String(assignment.window),
           SWARM_RELAY_MODE: plan.mode,
           SWARM_RELAY_JOB: assignment.job,
@@ -944,10 +960,12 @@ export async function runRelay(argv) {
         deterministicOnly: Boolean(!siblingVerdict && det.ok && !headDrift && modified.length > 0)
       })
       roundVerdicts.set(assignment.round, verdict)
+      roundVerdictPaths.set(assignment.round, artifact.source || null)
       entry.reviewVerdict = verdict
     }
     if (assignment.job === 'publish') {
       const verdict = roundVerdicts.get(assignment.round) || { verdict: 'REJECT', reason: 'missing_verdict_artifact' }
+      const verdictArtifactPath = roundVerdictPaths.get(assignment.round) || null
       const gate = applyPublishGate({
         verdict,
         repoDir: cwd,
@@ -955,15 +973,29 @@ export async function runRelay(argv) {
         reportDir: plan.reportDir,
         sibling: choice.sibling,
         quotaPool: choice.pool,
-        taskId: opts.task || null
+        taskId: opts.task || null,
+        backupRoot,
+        preExisting: roundPreExisting,
+        verdictArtifactPath,
+        windowId: `r${assignment.round}-w${assignment.window}`,
+        gateSource: verdict.reason || null
       })
       entry.publishGate = {
         verdict: verdict.verdict,
         reason: verdict.reason,
         action: gate.action,
+        ok: gate.ok !== false,
         files: gate.files,
         commitSha: gate.commitSha || null,
+        gate: gate.gate || null,
+        remaining: gate.remaining || [],
         replanPath: gate.replanPath || null
+      }
+      // Fail loudly: never relay into the next round with unreviewed dirty files.
+      if (gate.ok === false) {
+        stopReason = 'publish_cleanup_failed'
+        writeReport(plan, stateDir, entry)
+        break
       }
     }
 
@@ -991,7 +1023,7 @@ export async function runRelay(argv) {
       const fbRes = await runChild({
         command: fbCmd.command, args: fbCmd.args, cwd, stallKillSec: opts.stallKillSec, windowStartMs: fbStartMs,
         horizonDeadlineMs: opts.clampToHorizon ? horizonDeadlineMs : null,
-        env: { ...process.env, ...windowPolicyEnv(assignment.job), SWARM_RELAY_WINDOW: String(assignment.window), SWARM_RELAY_MODE: plan.mode, SWARM_RELAY_FALLBACK_FROM: choice.sibling }
+        env: { ...process.env, ...windowPolicyEnv(assignment.job), ...gateEnv, SWARM_RELAY_WINDOW: String(assignment.window), SWARM_RELAY_MODE: plan.mode, SWARM_RELAY_FALLBACK_FROM: choice.sibling }
       })
       const fbCode = typeof fbRes.status === 'number' ? fbRes.status : null
       // Account the call against the pool that actually ran, and attribute the slot to it.

@@ -314,12 +314,32 @@ export function checkpointPassingDiff({
   push = false,
   remote = 'origin',
   branch = 'master',
-  runGit = null
+  runGit = null,
+  gate = null
 } = {}) {
   if (!repoDir) throw new Error('repoDir_required')
   const root = resolve(repoDir)
   const relFiles = files.map((f) => String(f).trim()).filter(Boolean)
   if (!relFiles.length) throw new Error('checkpoint_files_required')
+
+  // GOV-1 provenance: an optional ACCEPT verdict artifact must exist and be fresh
+  // before any commit. Blocks sibling self-publish outside the relay's gate.
+  let gateInfo = null
+  if (gate && gate.verdictPath) {
+    let doc = null
+    try { doc = JSON.parse(readFileSync(gate.verdictPath, 'utf8')) } catch { doc = null }
+    const started = Number(doc && doc.windowStartedAtMs)
+    const maxAge = Number(gate.maxAgeMs) > 0 ? Number(gate.maxAgeMs) : 1800000
+    if (!doc || doc.verdict !== 'ACCEPT') throw new Error(`checkpoint_blocked_gate_verdict:not_accept:${gate.verdictPath}`)
+    if (!Number.isFinite(started) || Date.now() - started > maxAge) throw new Error(`checkpoint_blocked_gate_verdict:stale:${gate.verdictPath}`)
+    gateInfo = {
+      windowId: gate.windowId || null,
+      verdictArtifactPath: gate.verdictPath,
+      verdict: doc.verdict,
+      gateSource: gate.gateSource || doc.source || null,
+      windowStartedAtMs: started
+    }
+  }
 
   const absFiles = relFiles.map((f) => resolve(root, f))
   const backups = []
@@ -376,7 +396,11 @@ export function checkpointPassingDiff({
     hallucinationsCaught: Number(hallucinationsCaught) || 0,
     wholesaleRevertsAvoided: 1,
     estimatedQuotaTurnsSaved: Math.max(1, relFiles.length),
-    message
+    message,
+    windowId: gateInfo ? gateInfo.windowId : null,
+    verdictArtifactPath: gateInfo ? gateInfo.verdictArtifactPath : null,
+    verdict: gateInfo ? gateInfo.verdict : null,
+    gateSource: gateInfo ? gateInfo.gateSource : null
   }
 
   if (resolvedLedgerPath) {
@@ -394,8 +418,27 @@ export function checkpointPassingDiff({
     backups,
     pruned,
     telemetry: entry,
-    ledgerPath: resolvedLedgerPath
+    ledgerPath: resolvedLedgerPath,
+    gate: gateInfo
   }
+}
+
+/**
+ * Restore points for files a build window may edit. `undoLastEdit` can only restore
+ * files that have a `.backups/` snapshot, so snapshot pre-existing tracked files
+ * before W3 instead of discovering the gap at REJECT time.
+ */
+export function snapshotRestorePoints(files = [], { repoDir = null, backupRoot = null } = {}) {
+  const root = resolve(repoDir || process.cwd())
+  const bdir = backupRoot ? join(resolve(backupRoot), '.backups') : null
+  const out = []
+  for (const rel of files) {
+    const abs = resolve(root, String(rel))
+    if (!existsSync(abs)) continue
+    const bak = createRecoveryBackup(abs, { backupDir: bdir, maxBackupsPerFile: 1 })
+    out.push({ file: String(rel), backupPath: bak.backupPath, sha256: bak.sha256 })
+  }
+  return out
 }
 
 export function summarizeCheckpointTelemetry(ledgerPath) {

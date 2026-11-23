@@ -1,11 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyPublishGate, modifiedFilesSince, readReviewVerdict } from '../../../scripts/swarm-publish-gate.mjs'
-import { protectedWriteFile } from '../src/toolchain/dispatch/mutation-guard.js'
+import { applyPublishGate, modifiedFilesSince, readReviewVerdict, rejectRoundCleanup } from '../../../scripts/swarm-publish-gate.mjs'
+import { protectedWriteFile, snapshotRestorePoints } from '../src/toolchain/dispatch/mutation-guard.js'
 
 const git = (repo, ...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim()
 
@@ -118,5 +118,64 @@ test('applyPublishGate REJECT undoes only the last edit per file and writes repl
   } finally {
     rmSync(repo, { recursive: true, force: true })
     rmSync(reports, { recursive: true, force: true })
+  }
+})
+
+test('rejectRoundCleanup restores pre-round edits and removes round-created untracked files', () => {
+  const repo = initRepo()
+  const state = mkdtempSync(join(tmpdir(), 'pubgate-state-'))
+  try {
+    writeFileSync(join(repo, 'existing.txt'), 'base\n')
+    git(repo, 'add', '-A')
+    git(repo, 'commit', '-qm', 'base')
+    // Pre-round baseline: snapshot the file that already existed.
+    assert.equal(snapshotRestorePoints(['existing.txt'], { repoDir: repo, backupRoot: state }).length, 1)
+
+    // Build window dirties the existing file and creates a brand-new untracked one.
+    writeFileSync(join(repo, 'existing.txt'), 'dirty\n')
+    writeFileSync(join(repo, 'new-file.mjs'), 'x\n')
+
+    const res = rejectRoundCleanup({ repoDir: repo, baseSha: 'HEAD', preExisting: ['existing.txt'], backupRoot: state })
+    assert.equal(res.ok, true)
+    assert.deepEqual(res.undone, ['existing.txt'])
+    assert.deepEqual(res.removed, ['new-file.mjs'])
+    assert.deepEqual(res.failed, [])
+    assert.deepEqual(res.remaining, [])
+    assert.equal(readFileSync(join(repo, 'existing.txt'), 'utf8'), 'base\n')
+    assert.equal(existsSync(join(repo, 'new-file.mjs')), false)
+
+    // Unprotected new file with no snapshot still fails closed (never silently continues).
+    writeFileSync(join(repo, 'orphan.txt'), 'y\n')
+    const blocked = rejectRoundCleanup({ repoDir: repo, baseSha: 'HEAD', preExisting: [] })
+    assert.equal(blocked.removed.includes('orphan.txt'), true)
+    assert.equal(blocked.ok, true)
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+    rmSync(state, { recursive: true, force: true })
+  }
+})
+
+test('applyPublishGate REJECT reports ok:false when cleanup cannot restore state', () => {
+  const repo = initRepo()
+  const reportDir = mkdtempSync(join(tmpdir(), 'pubgate-report-'))
+  try {
+    writeFileSync(join(repo, 'a.txt'), 'base\n')
+    git(repo, 'add', '-A')
+    git(repo, 'commit', '-qm', 'base')
+    // Dirty an existing file with NO restore point anywhere -> undo must fail loudly.
+    writeFileSync(join(repo, 'a.txt'), 'dirty\n')
+    const gate = applyPublishGate({
+      verdict: { verdict: 'REJECT', reason: 'w4_verdict_reject' },
+      repoDir: repo,
+      baseSha: 'HEAD',
+      reportDir,
+      push: false
+    })
+    assert.equal(gate.ok, false)
+    assert.equal(gate.action, 'reject_cleanup_incomplete')
+    assert.ok(Array.isArray(gate.remaining) && gate.remaining.includes('a.txt'))
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+    rmSync(reportDir, { recursive: true, force: true })
   }
 })

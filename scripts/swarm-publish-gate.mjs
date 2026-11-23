@@ -11,7 +11,7 @@
  * so W5 can never guess.
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { homedir } from 'os'
 import { join, resolve } from 'node:path'
 import { evaluateDeterministicDiff } from './swarm-review.mjs'
@@ -110,7 +110,61 @@ export function pendingFilesSinceHead({ repoDir, files }) {
 /**
  * Apply the W5 gate. Scoped strictly to the round's modified files; never `git add -A`.
  */
-export function applyPublishGate({ verdict, repoDir, baseSha, reportDir, sibling = null, quotaPool = null, taskId = null, push = true, backupRoot = null }) {
+/**
+ * REJECT cleanup that actually restores state:
+ *  - files that existed before the round -> `undoLastEdit` (restore the pre-round snapshot)
+ *  - files newly created during the round -> removed outright
+ * Fails closed: any file still dirty vs `baseSha`, or any failed undo/remove,
+ * yields ok:false so the relay halts instead of relaying on with unreviewed edits.
+ */
+export function rejectRoundCleanup({ repoDir, baseSha, preExisting = [], backupRoot = null } = {}) {
+  const dirty = modifiedFilesSince({ repoDir, baseSha })
+  const known = new Set((preExisting || []).map(String))
+  const bdir = backupRoot ? join(resolve(backupRoot), '.backups') : null
+  const created = []
+  const edited = []
+  const left = []
+  const undone = []
+  const removed = []
+  const failed = []
+
+  const isTrackedAtBase = (rel) => spawnSync('git', ['-C', repoDir, 'ls-files', '--error-unmatch', '--', String(rel)], { encoding: 'utf8', timeout: 5000 }).status === 0
+
+  for (const rel of dirty) {
+    if (isTrackedAtBase(rel)) { edited.push(rel); continue }
+    // Untracked but already present before the round: not this round's artifact.
+    if (known.has(rel)) { left.push(rel); continue }
+    created.push(rel)
+  }
+
+  for (const rel of created) {
+    try {
+      rmSync(resolve(repoDir, rel), { force: true })
+      removed.push(rel)
+    } catch (err) {
+      failed.push({ file: rel, error: String(err && err.message || err) })
+    }
+  }
+  for (const rel of edited) {
+    const abs = resolve(repoDir, rel)
+    try {
+      try {
+        undoLastEdit(abs)
+      } catch (repoLocalErr) {
+        if (!bdir) throw repoLocalErr
+        undoLastEdit(abs, { backupDir: bdir })
+      }
+      undone.push(rel)
+    } catch (err) {
+      failed.push({ file: rel, error: String(err && err.message || err) })
+    }
+  }
+  const allow = new Set(left)
+  const remaining = modifiedFilesSince({ repoDir, baseSha }).filter((f) => !allow.has(f))
+  return { ok: failed.length === 0 && remaining.length === 0, undone, removed, left, failed, remaining }
+}
+
+export function applyPublishGate({ verdict, repoDir, baseSha, reportDir, sibling = null, quotaPool = null, taskId = null, push = true, backupRoot = null, preExisting = [], verdictArtifactPath = null, windowId = null, gateSource = null }) {
   const files = modifiedFilesSince({ repoDir, baseSha })
 
   if (verdict.verdict === 'ACCEPT') {
@@ -128,29 +182,31 @@ export function applyPublishGate({ verdict, repoDir, baseSha, reportDir, sibling
       sibling,
       quotaPool,
       backupRoot: backupRoot || join(homedir(), '.local/state/curl-ai-bridge/repo-checkpoints'),
-      push
+      push,
+      // Provenance: only an ACCEPT artifact from this round authorizes the commit.
+      gate: (verdictArtifactPath || verdict.source)
+        ? { verdictPath: verdictArtifactPath || verdict.source, windowId, gateSource: gateSource || verdict.reason || null }
+        : null
     })
-    return { ok: true, action: 'checkpoint_pushed', files, commitSha: res.commitSha }
+    return { ok: true, action: 'checkpoint_pushed', files, commitSha: res.commitSha, gate: res.gate }
   }
 
-  // REJECT: undo only the last edit on each modified file; block wholesale reverts.
-  const undone = []
-  for (const rel of files) {
-    try {
-      undoLastEdit(resolve(repoDir, rel))
-      undone.push({ file: rel, ok: true })
-    } catch (err) {
-      undone.push({ file: rel, ok: false, error: String(err && err.message || err) })
-    }
-  }
+  // REJECT: restore the pre-round baseline; block wholesale reverts.
+  const cleanup = rejectRoundCleanup({ repoDir, baseSha, preExisting, backupRoot })
   const replanPath = join(reportDir, `replan-${Date.now()}.json`)
   protectedWriteFile(replanPath, `${JSON.stringify({
     schema: 'relay-replan/v1',
     verdict: verdict.verdict,
     reason: verdict.reason,
     baseSha,
-    files: undone,
+    files: { undone: cleanup.undone, removed: cleanup.removed, failed: cleanup.failed },
     generatedAt: new Date().toISOString()
   }, null, 2)}\n`)
-  return { ok: true, action: 'undone_single_file', files: undone, replanPath }
+  return {
+    ok: cleanup.ok,
+    action: cleanup.ok ? 'undone_single_file' : 'reject_cleanup_incomplete',
+    files: { undone: cleanup.undone, removed: cleanup.removed, failed: cleanup.failed },
+    remaining: cleanup.remaining,
+    replanPath
+  }
 }

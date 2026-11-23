@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,6 +12,7 @@ import {
   undoLastEdit,
   pruneBackupsAfterGitCheckpoint,
   checkpointPassingDiff,
+  snapshotRestorePoints,
   summarizeCheckpointTelemetry
 } from '../../src/toolchain/dispatch/mutation-guard.js'
 
@@ -182,5 +184,56 @@ test('pruneBackupsAfterGitCheckpoint compacts committed repo & state backups to 
     assert.strictEqual(metrics.latestCommitSha, 'abc1234')
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('checkpointPassingDiff enforces fresh ACCEPT gate provenance; snapshotRestorePoints seeds undo', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mg-gate-'))
+  const state = mkdtempSync(join(tmpdir(), 'mg-state-'))
+  try {
+    const git = (...a) => execFileSync('git', ['-C', dir, ...a], { encoding: 'utf8' }).trim()
+    git('init', '-q')
+    git('config', 'user.email', 't@t')
+    git('config', 'user.name', 't')
+    writeFileSync(join(dir, 'a.txt'), 'base\n')
+    git('add', '-A')
+    git('commit', '-qm', 'base')
+
+    assert.equal(snapshotRestorePoints(['a.txt'], { repoDir: dir, backupRoot: state }).length, 1)
+    writeFileSync(join(dir, 'a.txt'), 'changed\n')
+
+    // REJECT artifact -> fail closed, no commit.
+    writeFileSync(join(state, 'reject.json'), JSON.stringify({ schema: 'review-verdict/v1', windowStartedAtMs: Date.now(), verdict: 'REJECT' }))
+    assert.throws(
+      () => checkpointPassingDiff({ repoDir: dir, files: ['a.txt'], backupRoot: state, ledgerPath: join(state, 'ledger.jsonl'), gate: { verdictPath: join(state, 'reject.json') } }),
+      /checkpoint_blocked_gate_verdict:not_accept/
+    )
+
+    // Stale ACCEPT -> fail closed.
+    writeFileSync(join(state, 'stale.json'), JSON.stringify({ verdict: 'ACCEPT', windowStartedAtMs: Date.now() - 3600 * 1000 }))
+    assert.throws(
+      () => checkpointPassingDiff({ repoDir: dir, files: ['a.txt'], backupRoot: state, ledgerPath: join(state, 'ledger.jsonl'), gate: { verdictPath: join(state, 'stale.json') } }),
+      /checkpoint_blocked_gate_verdict:stale/
+    )
+
+    // Fresh ACCEPT -> commits and records provenance atomically in the ledger.
+    writeFileSync(join(state, 'ok.json'), JSON.stringify({ schema: 'review-verdict/v1', windowStartedAtMs: Date.now(), verdict: 'ACCEPT', source: 'w4_sibling_stdout' }))
+    const res = checkpointPassingDiff({
+      repoDir: dir,
+      files: ['a.txt'],
+      backupRoot: state,
+      ledgerPath: join(state, 'ledger.jsonl'),
+      push: false,
+      gate: { verdictPath: join(state, 'ok.json'), windowId: 'r1-w5', gateSource: 'w4_sibling_stdout_accept' }
+    })
+    assert.equal(res.gate.verdict, 'ACCEPT')
+    assert.equal(res.gate.windowId, 'r1-w5')
+    const lastLine = readFileSync(join(state, 'ledger.jsonl'), 'utf8').trim().split('\n').pop()
+    assert.equal(JSON.parse(lastLine).windowId, 'r1-w5')
+    assert.equal(JSON.parse(lastLine).verdict, 'ACCEPT')
+    assert.equal(JSON.parse(lastLine).gateSource, 'w4_sibling_stdout_accept')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(state, { recursive: true, force: true })
   }
 })
