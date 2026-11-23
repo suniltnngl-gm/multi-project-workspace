@@ -87,6 +87,46 @@ export function writeHandoffCard(handoffDir, sessionId, cardContent) {
   return { ok: true, filePath, sessionId: safeId, backupPath: written.backupPath }
 }
 
+/**
+ * Retire a session cleanly: writes its handoff card and records it in retired-sessions.json
+ * so new sessions start from the handoff card and only query the old session via `swarm ask`.
+ */
+export function retireSession({
+  handoffDir = resolveDefaultHandoffDir(),
+  sessionId,
+  headSha = 'unknown',
+  completed = [],
+  openTasks = [],
+  keyDecisions = [],
+  nextSteps = [],
+  reason = 'manual_retire'
+} = {}) {
+  const safeId = sanitizeSessionId(sessionId)
+  const card = buildHandoffCard({ sessionId: safeId, headSha, completed, openTasks, keyDecisions, nextSteps })
+  const handoff = writeHandoffCard(handoffDir, safeId, card)
+
+  const ledgerPath = join(handoffDir, 'retired-sessions.json')
+  let ledger = { retired: [] }
+  if (existsSync(ledgerPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      if (Array.isArray(parsed?.retired)) ledger = parsed
+    } catch {
+      // reset malformed ledger
+    }
+  }
+  const entry = {
+    sessionId: safeId,
+    retiredAt: new Date().toISOString(),
+    reason,
+    headSha,
+    handoffFile: handoff.filePath
+  }
+  ledger.retired = [...ledger.retired.filter((r) => r.sessionId !== safeId), entry]
+  protectedWriteFile(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`)
+  return { ok: true, sessionId: safeId, handoffFile: handoff.filePath, ledgerPath, retiredCount: ledger.retired.length }
+}
+
 export function readLatestHandoff(handoffDir, { sessionId = null } = {}) {
   if (!handoffDir || !existsSync(handoffDir)) {
     return { exists: false, filePath: null, sessionId: null, content: '', mtimeMs: 0 }

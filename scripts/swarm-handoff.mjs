@@ -10,6 +10,7 @@ import {
   buildHandoffCard,
   readLatestHandoff,
   resolveDefaultHandoffDir,
+  retireSession,
   writeHandoffCard
 } from '../apps/api/src/toolchain/dispatch/session-handoff.js'
 
@@ -29,6 +30,8 @@ Options:
   --decisions "<a; b>"     Semicolon-separated key decisions
   --next "<a; b>"          Semicolon-separated next steps
   --read                   Read latest (or --from) handoff card instead of writing
+  --retire                 Retire session (writes handoff card + records in retired-sessions.json)
+  --reason <text>          Retirement reason (default: manual_retire)
   --handoff-dir <dir>      Override handoff directory
   --json                   Output JSON`)
   process.exit(0)
@@ -80,9 +83,30 @@ function detectOpenQueueItems() {
 
 const sessionId = flag('--from', `session-${new Date().toISOString().replace(/[:.]/g, '-')}`)
 const openTasks = flag('--open', null) || detectOpenQueueItems()
+const headSha = detectHeadSha()
+
+if (has('--retire')) {
+  const retired = retireSession({
+    handoffDir,
+    sessionId,
+    headSha,
+    completed: flag('--completed', ''),
+    openTasks,
+    keyDecisions: flag('--decisions', ''),
+    nextSteps: flag('--next', ''),
+    reason: flag('--reason', 'manual_retire')
+  })
+  if (has('--json')) {
+    console.log(JSON.stringify(retired, null, 2))
+  } else {
+    console.log(`swarm retire: retired ${retired.sessionId} -> ${retired.handoffFile} (total retired: ${retired.retiredCount})`)
+  }
+  process.exit(0)
+}
+
 const card = buildHandoffCard({
   sessionId,
-  headSha: detectHeadSha(),
+  headSha,
   completed: flag('--completed', ''),
   openTasks,
   keyDecisions: flag('--decisions', ''),

@@ -8,6 +8,7 @@ import {
   buildHandoffCard,
   writeHandoffCard,
   readLatestHandoff,
+  retireSession,
   grepSessionTranscript,
   buildReadOnlyAskCommand
 } from '../src/toolchain/dispatch/session-handoff.js'
@@ -111,6 +112,26 @@ test('evaluateSessionCompaction triggers rotate_session on cache_ttl_expired', (
     const decision = evaluateSessionCompaction({ cli: 'agy', transcriptPath: tp, nowMs: futureNow })
     assert.equal(decision.action, 'rotate_session')
     assert.equal(decision.reason, 'cache_ttl_expired')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('retireSession writes handoff card and records retired-sessions.json', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'retire-test-'))
+  try {
+    const res = retireSession({
+      handoffDir: dir,
+      sessionId: 'e4748928-5f30-471c-b6ee-4cf3ba073164',
+      headSha: 'f3de9d4',
+      completed: ['Shipped swarm handoff/ask'],
+      reason: 'oversized_14mb'
+    })
+    assert.equal(res.ok, true)
+    assert.equal(res.retiredCount, 1)
+    const card = readLatestHandoff(dir, { sessionId: 'e4748928-5f30-471c-b6ee-4cf3ba073164' })
+    assert.equal(card.exists, true)
+    assert.match(card.content, /Shipped swarm handoff\/ask/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
