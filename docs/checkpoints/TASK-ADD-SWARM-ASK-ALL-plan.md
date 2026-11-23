@@ -1,11 +1,10 @@
 # TASK-ADD-SWARM-ASK-ALL (`MPW` Task `#177`) — Implementation Plan
 
 - **Task:** `task-add-swarm-ask-all` (queue) / MPW Task `#177` — Zero-LLM cross-session fan-out query CLI
-- **Plan Version:** `swarm-plan-v1` (draft, not yet reviewed)
+- **Plan Version:** `swarm-plan-v1` (implemented & shipped in `ffd41d6`; task `#177` closed `done` at `f15eae6`)
 - **Date:** `2026-11-23`
-- **Pre-State Anchors:**
-  - `MPW` branch `master`, `HEAD` = `1906c26bbdff73b667d394c6927b316d9f991dca`
-  - Pre-existing dirty (treat as read-only, do not touch): `apps/api/src/toolchain/dispatch/cli-commands.js`, `scripts/swarm-overnight.mjs`, `scripts/swarm-queue-run.mjs`
+- **Pre-State / Post-State Anchors:**
+  - Drafted at `1906c26`; pre-existing dirty files landed in `f5d81b1`; implementation shipped in `ffd41d6` (`HEAD` `f15eae6+`, clean tree).
 - **Scope:** `multi-project-workspace` only. No `curl-ai-bridge`, no DB/SQLite mutation, no network in default mode.
 - **Budget:** `$0.00` default (`--mode grep`). `--mode llm` is explicitly opt-in, capped, and quota-gated.
 

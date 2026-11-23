@@ -29,6 +29,42 @@ function safeGit(repoDir, args) {
   }
 }
 
+export function parseSeedPayload(parsed) {
+  if (Array.isArray(parsed)) return parsed
+  if (Array.isArray(parsed?.tasks)) return parsed.tasks
+  // Support relay-discover-report/v1 (prioritized_work + multi_option_cases)
+  const items = []
+  if (Array.isArray(parsed?.prioritized_work)) {
+    for (const w of parsed.prioritized_work) {
+      if (!w?.id) continue
+      items.push({
+        taskId: String(w.id).toLowerCase(),
+        summary: w.title || w.summary || w.id,
+        priority: w.priority || 'P2',
+        costTier: w.costTier || 'daily',
+        source: 'relay_discover',
+        options: Array.isArray(w.options) && w.options.length > 1
+          ? w.options.map((o, idx) => (typeof o === 'object' && o ? o : { id: `opt-${idx + 1}`, label: String(o) }))
+          : []
+      })
+    }
+  }
+  if (Array.isArray(parsed?.multi_option_cases)) {
+    for (const c of parsed.multi_option_cases) {
+      if (!c?.id) continue
+      items.push({
+        taskId: String(c.id).toLowerCase(),
+        summary: c.title || c.id,
+        priority: c.priority || 'P2',
+        costTier: c.costTier || 'local',
+        source: 'relay_discover_case',
+        options: Array.isArray(c.options) ? c.options : []
+      })
+    }
+  }
+  return items
+}
+
 export function discoverCandidates({ repoDir = process.cwd(), seedTasks = [], maxTodos = 5 } = {}) {
   const root = resolve(repoDir)
   const candidates = []
@@ -227,7 +263,7 @@ if (isMain) {
   let seedTasks = []
   if (opts.seedJson && existsSync(opts.seedJson)) {
     const parsed = JSON.parse(readFileSync(opts.seedJson, 'utf8'))
-    seedTasks = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.tasks) ? parsed.tasks : [])
+    seedTasks = parseSeedPayload(parsed)
   }
 
   const candidates = discoverCandidates({ repoDir: opts.repoDir, seedTasks })

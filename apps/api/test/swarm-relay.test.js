@@ -5,7 +5,20 @@ import { mkdtempSync, writeFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { buildRelayPlan } from '../../../scripts/swarm-relay.mjs'
-import { computeEvidenceFingerprint, reconcileStaleDiscoveredTasks } from '../../../scripts/swarm-discover.mjs'
+import { computeEvidenceFingerprint, reconcileStaleDiscoveredTasks, parseSeedPayload } from '../../../scripts/swarm-discover.mjs'
+
+test('parseSeedPayload converts relay-discover-report/v1 into tasks and multi-option cases', () => {
+  const seeds = parseSeedPayload({
+    schema: 'relay-discover-report/v1',
+    prioritized_work: [{ id: 'W7', priority: 'P2', title: 'Refresh anchor', options: ['refresh'] }],
+    multi_option_cases: [{ id: 'CASE-E', title: 'Relay rotation', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }]
+  })
+  assert.equal(seeds.length, 2)
+  assert.equal(seeds[0].taskId, 'w7')
+  assert.equal(seeds[0].options.length, 0)
+  assert.equal(seeds[1].taskId, 'case-e')
+  assert.equal(seeds[1].options.length, 2)
+})
 
 test('computeEvidenceFingerprint is deterministic and reconcileStaleDiscoveredTasks archives stale disc-* tasks', () => {
   const fp1 = computeEvidenceFingerprint({ source: 'git_diff', summary: 'dirty 2 files', headSha: 'abc1234' })
