@@ -24,6 +24,7 @@ import {
   DEFAULT_JOB_TIMEOUT_MS
 } from '../apps/api/src/toolchain/dispatch/job-queue.js'
 import { evaluateFiveHourCap } from '../apps/api/src/toolchain/dispatch/burn-rate-pacer.js'
+import { createLeaseStore } from '../apps/api/src/toolchain/dispatch/lease-store.js'
 
 const argv = process.argv.slice(2)
 const opts = {}
@@ -85,10 +86,21 @@ function runJob({ job, task, ctx }) {
     if (opts['dry-run']) args.push('--dry-run')
     else args.push('--execute')
 
-    const child = spawn(process.execPath, args, { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(process.execPath, args, {
+      cwd: process.cwd(),
+      detached: true, // own process group, so a timeout can reap the whole CLI tree
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
     let stdout = ''
     let stderr = ''
     let settled = false
+    let timedOut = false
+    const jobTimeoutMs = job.timeoutMs || DEFAULT_JOB_TIMEOUT_MS[job.type] || 180000
+    const killTree = (signal) => {
+      if (!child.pid) return
+      try { process.kill(-child.pid, signal); return } catch {}
+      try { child.kill(signal) } catch {}
+    }
     const finish = (status, reason) => {
       if (settled) return
       settled = true
@@ -96,14 +108,23 @@ function runJob({ job, task, ctx }) {
       resolvePromise({ status, result: { stdout: stdout.slice(-4000), stderr: stderr.slice(-2000) }, reason })
     }
     const timer = setTimeout(() => {
-      try { child.kill('SIGTERM') } catch {}
-      setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, 5000)
-      finish('failed', `job_timeout:${job.timeoutMs}`)
-    }, job.timeoutMs || DEFAULT_JOB_TIMEOUT_MS[job.type] || 180000)
+      timedOut = true
+      killTree('SIGTERM')
+      const hardKill = setTimeout(() => killTree('SIGKILL'), 5000)
+      const giveUp = setTimeout(() => {
+        clearTimeout(hardKill)
+        finish('failed', `job_timeout:${jobTimeoutMs}`)
+      }, 6000)
+      child.once('close', () => {
+        clearTimeout(hardKill)
+        clearTimeout(giveUp)
+      })
+    }, jobTimeoutMs)
     child.stdout.on('data', (c) => { stdout += c })
     child.stderr.on('data', (c) => { stderr += c })
     child.on('error', (err) => finish('failed', `spawn_error:${err.message}`))
     child.on('close', (code) => {
+      if (timedOut) return finish('failed', `job_timeout:${jobTimeoutMs}`)
       if (code === 0) return finish('done', null)
       if (code === 3) return finish('failed', 'job_deferred')
       if (code === 2) return finish('failed', 'job_blocked')
@@ -113,6 +134,13 @@ function runJob({ job, task, ctx }) {
 }
 
 async function main() {
+  // Reap runs/slots left behind by dead pids before starting a new bounded job.
+  const leaseStateDir = opts['state-dir'] ? resolve(opts['state-dir']) : queueDir
+  try {
+    createLeaseStore({ stateDir: leaseStateDir }).reap()
+  } catch (err) {
+    process.stderr.write(`swarm-queue-run: reap warn: ${err?.message || err}\n`)
+  }
   const tasks = readQueue(queueDir)
   const lastUsedByPool = {}
   for (const t of tasks) {

@@ -13,6 +13,10 @@ import {
   buildReadOnlyAskCommand
 } from '../src/toolchain/dispatch/session-handoff.js'
 import { evaluateSessionCompaction } from '../src/toolchain/dispatch/session-compactor.js'
+import {
+  recordPoolCall,
+  checkPoolFiveHourAdmission
+} from '../src/toolchain/dispatch/overnight-supervisor.js'
 
 test('buildHandoffCard stays within 30 lines and includes required sections', () => {
   const card = buildHandoffCard({
@@ -132,6 +136,22 @@ test('retireSession writes handoff card and records retired-sessions.json', () =
     const card = readLatestHandoff(dir, { sessionId: 'e4748928-5f30-471c-b6ee-4cf3ba073164' })
     assert.equal(card.exists, true)
     assert.match(card.content, /Shipped swarm handoff\/ask/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('recordPoolCall increments checkPoolFiveHourAdmission for the swarm-ask pool', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pool-call-test-'))
+  try {
+    const before = checkPoolFiveHourAdmission(dir, 'agy-gemini')
+    assert.equal(before.callsInWindow, 0)
+
+    recordPoolCall(dir, { quotaPool: 'agy-gemini', source: 'swarm-ask', sessionId: 'test' })
+
+    const after = checkPoolFiveHourAdmission(dir, 'agy-gemini')
+    assert.equal(after.callsInWindow, 1)
+    assert.equal(after.admitted, true)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
