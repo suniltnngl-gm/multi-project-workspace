@@ -11,6 +11,7 @@
  *
  * Defaults to --dry-run (safe simulation, zero LLM spawns). Pass --execute for live ticks.
  */
+import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -24,6 +25,8 @@ import {
   writeOvernightReport
 } from '../apps/api/src/toolchain/dispatch/overnight-supervisor.js'
 import { scanAndCompactLocalSessions } from '../apps/api/src/toolchain/dispatch/session-compactor.js'
+import { createLeaseStore } from '../apps/api/src/toolchain/dispatch/lease-store.js'
+import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
 
 const argv = process.argv.slice(2)
 if (argv.includes('--help') || argv.includes('-h')) {
@@ -57,8 +60,9 @@ const opts = {
   maxFailures: 3,
   tickIntervalSec: 0,
   autoDiscover: false,
-  lessonSync: false,
+  lessonSync: true,
   autoCompact: true,
+  selfImprove: true,
   execute: false,
   json: false
 }
@@ -70,8 +74,11 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--dry-run') opts.execute = false
   else if (a === '--auto-discover') opts.autoDiscover = true
   else if (a === '--lesson-sync') opts.lessonSync = true
+  else if (a === '--no-lesson-sync') opts.lessonSync = false
   else if (a === '--auto-compact') opts.autoCompact = true
   else if (a === '--no-auto-compact') opts.autoCompact = false
+  else if (a === '--self-improve') opts.selfImprove = true
+  else if (a === '--no-self-improve') opts.selfImprove = false
   else if (a === '--state-dir') opts.stateDir = resolve(argv[++i])
   else if (a === '--queue-dir') opts.queueDir = resolve(argv[++i])
   else if (a === '--case-dir') opts.caseDir = resolve(argv[++i])
@@ -88,6 +95,24 @@ const maxDurationMs = opts.maxMinutes * 60 * 1000
 const ticks = []
 let consecutiveFailures = 0
 let stopReason = 'completed'
+const repoDir = resolve(new URL('..', import.meta.url).pathname)
+const reapedEntries = []
+
+try {
+  createLeaseStore({ stateDir: opts.queueDir }).reap()
+} catch {}
+
+function reconcileStaleTasks() {
+  const dirtyPath = join(opts.queueDir, 'disc-dirty-tracked.json')
+  if (!existsSync(dirtyPath)) return
+  const diff = spawnSync('git', ['-C', repoDir, 'diff', '--name-only'], { encoding: 'utf8', timeout: 5000 })
+  if (diff.status === 0 && !String(diff.stdout || '').trim()) {
+    const archiveDir = join(opts.queueDir, '..', 'archive')
+    mkdirSync(archiveDir, { recursive: true })
+    renameSync(dirtyPath, join(archiveDir, 'disc-dirty-tracked.json'))
+    reapedEntries.push('disc-dirty-tracked')
+  }
+}
 
 while (true) {
   const guard = evaluateOvernightGuard({
@@ -113,6 +138,7 @@ while (true) {
     continue
   }
 
+  reconcileStaleTasks()
   let tasks = readQueue(opts.queueDir)
   let nextTask = selectNextTask(tasks)
   if (!nextTask && opts.autoDiscover) {
@@ -173,6 +199,28 @@ const autoCompactResults = opts.autoCompact
   ? scanAndCompactLocalSessions(opts.sessionsDir, { apply: opts.execute })
   : []
 
+const selfImproveLessons = []
+if (opts.selfImprove) {
+  const failedTicks = ticks.filter((t) => t.status === 'failed' || t.status === 'deferred_5h_cap')
+  if (failedTicks.length > 0 && opts.execute) {
+    const lessonPath = join(opts.stateDir, '..', 'lessons', 'lesson-register.json')
+    try {
+      const reg = existsSync(lessonPath) ? JSON.parse(readFileSync(lessonPath, 'utf8')) : { lessons: {} }
+      if (!reg.lessons || typeof reg.lessons !== 'object' || Array.isArray(reg.lessons)) reg.lessons = {}
+      for (const ft of failedTicks) {
+        const lid = `LES-SELF-IMPROVE-${String(ft.taskId || ft.status).toUpperCase().replace(/[^A-Z0-9_-]/g, '-')}`
+        reg.lessons[lid] = {
+          id: lid,
+          rule: `Auto-captured from overnight tick #${ft.tick} (${ft.status}, pool=${ft.pool || 'none'}, exit=${ft.exitCode ?? 'n/a'}): inspect job timeout/provider or rotate pool before retry.`,
+          updatedAt: new Date().toISOString()
+        }
+        selfImproveLessons.push(lid)
+      }
+      protectedWriteFile(lessonPath, `${JSON.stringify(reg, null, 2)}\n`)
+    } catch {}
+  }
+}
+
 const report = {
   ok: true,
   mode: opts.execute ? 'execute' : 'dry-run',
@@ -182,6 +230,7 @@ const report = {
   autoDiscover: opts.autoDiscover,
   lessonSyncRan,
   autoCompact: { enabled: opts.autoCompact, results: autoCompactResults },
+  selfImprove: { enabled: opts.selfImprove, staleArchived: reapedEntries, lessonsRecorded: selfImproveLessons },
   elapsedMs: Date.now() - startedAtMs,
   queueStats: queueStats(opts.queueDir),
   ticks

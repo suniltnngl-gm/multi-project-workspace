@@ -137,7 +137,9 @@ export function buildSiblingCommand(sibling, { prompt }) {
   const override = process.env[envBinName(sibling)]
   let base
   if (override && override.trim()) base = override.trim().split(/\s+/)
-  else if (sibling === 'opencode') base = ['opencode', 'run', '--standalone']
+  else if (sibling === 'hermes') base = ['hermes', '-z']
+  else if (sibling === 'opencode') base = ['opencode', 'run', '--standalone', '--model', 'opencode/deepseek-v4.1-flash-free']
+  else if (sibling === 'direct') base = [process.execPath, resolve(new URL('./swarm-direct.mjs', import.meta.url).pathname), '--provider', 'cloudflare', '--prompt']
   else base = [sibling]
 
   if (base[0] === 'opencode') {
@@ -276,11 +278,34 @@ export function runRelay(argv) {
       // Missing CLI: keep relaying so the remaining siblings still run.
       continue
     }
-    if (exitCode !== 0) stopReason = 'sibling_failed'
+    if (exitCode !== 0) {
+      // Self-healing failover: retry once with an alternate $0 sibling (hermes or direct)
+      const fallbackSibling = assignment.sibling === 'hermes' ? 'direct' : 'hermes'
+      const fbCmd = buildSiblingCommand(fallbackSibling, { prompt })
+      const fbStartMs = Date.now()
+      const fbRes = spawnSync(fbCmd.command, fbCmd.args, {
+        stdio: 'inherit',
+        cwd: resolve(new URL('..', import.meta.url).pathname),
+        env: { ...process.env, SWARM_RELAY_WINDOW: String(assignment.window), SWARM_RELAY_MODE: plan.mode, SWARM_RELAY_FALLBACK_FROM: assignment.sibling }
+      })
+      const fbCode = typeof fbRes.status === 'number' ? fbRes.status : null
+      entry.failover = {
+        fallbackSibling,
+        elapsedMs: Date.now() - fbStartMs,
+        exitCode: fbCode,
+        status: !fbRes.error && fbCode === 0 ? 'ok' : 'failed'
+      }
+      if (entry.failover.status === 'ok') {
+        entry.status = 'ok_after_failover'
+        writeReport(assignment.reportPath, { ...entry, mode: plan.mode, noHardKill: true })
+        continue
+      }
+      stopReason = 'sibling_failed'
+    }
   }
 
   const summary = {
-    ok: windows.every((w) => w.status === 'ok'),
+    ok: windows.every((w) => w.status === 'ok' || w.status === 'ok_after_failover'),
     mode: 'execute',
     executed: true,
     relayMode: plan.mode,
