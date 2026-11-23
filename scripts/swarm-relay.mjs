@@ -2,7 +2,7 @@
 /**
  * SWARM RELAY — graceful multi-sibling relay runner.
  *
- * Alternates sibling CLIs (default: hermes -> opencode) across N soft windows.
+ * Alternates sibling CLIs (default: hermes -> direct) across N soft windows.
  * Each sibling runs to completion on its own: there is NO hard kill and NO
  * wall-clock timeout. `--soft-window-sec` is advisory only — once a sibling
  * exceeds it we record `softWindowExceeded` and keep waiting, so in-flight
@@ -190,7 +190,7 @@ Graceful multi-sibling relay: alternates sibling CLIs across soft windows.
 No hard kill and no timeout — each sibling finishes on its own.
 
       --mode <discover|fix>      Relay intent (default: discover)
-      --siblings <csv>           Sibling CLIs to alternate (default: hermes,opencode)
+      --siblings <csv>           Sibling CLIs to alternate (default: hermes,direct)
       --windows <n>              Number of relay windows (default: 3)
       --soft-window-sec <n>      Advisory per-window budget in seconds (default: 300)
       --report-dir <dir>         Report directory (default: ~/.local/state/curl-ai-bridge/reports)
