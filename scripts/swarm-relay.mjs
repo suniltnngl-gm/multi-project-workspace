@@ -27,6 +27,7 @@ import {
 } from '../apps/api/src/toolchain/dispatch/overnight-supervisor.js'
 import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
 import { applyPublishGate, deterministicRoundReview, modifiedFilesSince, readReviewVerdict, roundBaseSha } from './swarm-publish-gate.mjs'
+import { formatQuotaStatusLine } from './swarm-doctor-quota.mjs'
 import { windowPolicyEnv } from './swarm-window-policy.mjs'
 import {
   PIPELINE_JOBS,
@@ -667,9 +668,7 @@ export async function runRelay(argv) {
     } else {
       const lines = [
         `swarm relay quota-status (source=${statusInfo.source || 'sqlite'} | 5h window + live weekly/CONSERVE admission):`,
-        ...Object.values(budgetsWithEligibility).map((b) =>
-          `  ${b.pool}: eligible=${b.eligible} quotaAdmitted=${b.admitted} conserve=${b.conserve} calls5h=${b.callsInWindow}/${b.cap ?? 'uncapped'} weekly=${b.weeklyRemainingPct}% reason=${b.reason}`
-        )
+        ...Object.values(budgetsWithEligibility).map((b) => formatQuotaStatusLine(b))
       ]
       process.stdout.write(`${lines.join('\n')}\n`)
     }

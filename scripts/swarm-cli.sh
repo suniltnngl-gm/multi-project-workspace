@@ -167,6 +167,8 @@ case "$cmd" in
     ;;
   doctor)
     "$0" status
+    # Resolve the script path before any cd: callers may invoke `swarm` from any cwd.
+    SWARM_CLI_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
     node -e '
       const fs = require("fs"), path = require("path");
       const root = process.env.SWARM_STATE_ROOT || path.join(process.env.HOME, ".local/state/curl-ai-bridge");
@@ -191,6 +193,9 @@ case "$cmd" in
         console.log(`checkpoints: total=${lines.length} pushed=${pushed} filesProtected=${files} quotaTurnsSaved=${saved}`);
       }
     '
+    # Relay quota admission ($0): same budget math as `swarm relay quota-status`,
+    # so the doctor cannot drift from what the relay will actually admit.
+    (cd "$SWARM_CLI_DIR/.." && node scripts/swarm-doctor-quota.mjs) || echo "relay_quota: unavailable (quota store unreadable)"
     timeout 5 git -C "$MPW_DIR" fetch --quiet origin 2>/dev/null || true
     AHEAD_BEHIND=$(git -C "$MPW_DIR" rev-list --left-right --count HEAD...@{u} 2>/dev/null || echo "0 0")
     AHEAD=$(echo "$AHEAD_BEHIND" | awk '{print $1}')
