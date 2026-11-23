@@ -26,6 +26,7 @@ import {
   recordPoolCall
 } from '../apps/api/src/toolchain/dispatch/overnight-supervisor.js'
 import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
+import { applyPublishGate, deterministicRoundReview, readReviewVerdict, roundBaseSha } from './swarm-publish-gate.mjs'
 import {
   PIPELINE_JOBS,
   RING_PRESETS,
@@ -312,7 +313,7 @@ export function buildSiblingPrompt({
     return [
       `swarm relay window ${window}/${windows} -> ${sibling} (mode=${mode}, job=publish).`,
       roleLine,
-      `Consolidate verified passing diffs from the round, prepare the triple-layer checkpoint summary, and write the publish report to ${reportPath}.`,
+      `Consolidate the round result and write the publish report to ${reportPath}. The relay enforces the gate automatically: ACCEPT runs swarm checkpoint --push scoped to this round's modified files; REJECT undoes only those files' last edit and emits replan guidance.`,
       deadlineLine,
       budget
     ].filter(Boolean).join(' ')
@@ -411,6 +412,7 @@ function parseArgs(argv) {
     quotaStatus: null,
     quotaAware: false,
     writePlan: null,
+    task: null,
     printQuotaStatus: false,
     ringStateDir: DEFAULT_RING_STATE_DIR,
     reportDir: DEFAULT_REPORT_DIR,
@@ -448,6 +450,7 @@ function parseArgs(argv) {
     else if (a === '--ring-state-dir') opts.ringStateDir = argv[++i]
     else if (a === '--report-dir') opts.reportDir = argv[++i]
     else if (a === '--quota-aware') opts.quotaAware = true
+    else if (a === '--task') opts.task = argv[++i]
     else if (a === '--write-plan') {
       const next = argv[i + 1]
       if (!next || next.startsWith('--')) opts.writePlan = 'auto'
@@ -476,6 +479,7 @@ No routine hard kill: a window is a cooperative budget; only --stall-kill-sec in
       --stall-kill-sec <n>       Opt-in runaway kill in seconds (default 0 = disabled)
       --quota-status <file>      JSON with per-pool weeklyRemainingPct + conservePools
       --quota-aware              Assert quota-aware admission (enforced during --execute)
+      --task <id>                Board task id passed to the publish gate's checkpoint
       --write-plan [file]        Persist the schedule/plan JSON (bare: <state>/relay/<ts>-schedule.json)
       --ring-state-dir <dir>     Ring ledger directory
       --report-dir <dir>         Report directory (default: ~/.local/state/curl-ai-bridge/reports)
@@ -592,9 +596,12 @@ export async function runRelay(argv) {
   const windows = []
   let stopReason = 'completed'
   let conserveWindowsUsed = Number(priorState?.conserveWindowsUsed || 0) || 0
+  let roundBase = null
+  const roundVerdicts = new Map()
   const totalWindows = plan.rounds === 'continuous' ? Number.POSITIVE_INFINITY : plan.windows * plan.rounds
 
   for (let index = 0; index < totalWindows; index += 1) {
+    if (index % plan.siblings.length === 0) roundBase = roundBaseSha(cwd)
     if (existsSync(plan.killSwitchFile)) {
       stopReason = 'kill_switch_armed'
       break
@@ -711,6 +718,37 @@ export async function runRelay(argv) {
 
     windows.push(entry)
     writeReport(assignment.reportPath, { ...entry, mode: plan.mode, noHardKill: true })
+
+    // Phase 1 publish gate: W4 leaves a verdict contract, W5 acts on it deterministically.
+    if (assignment.job === 'review') {
+      const artifact = readReviewVerdict(findingsPath)
+      const det = deterministicRoundReview({ repoDir: cwd, baseSha: roundBase })
+      const verdict = artifact.verdict === 'ACCEPT' && det.ok
+        ? artifact
+        : { verdict: 'REJECT', reason: !det.ok ? det.reason : 'w4_verdict_reject' }
+      roundVerdicts.set(assignment.round, verdict)
+      entry.reviewVerdict = verdict
+    }
+    if (assignment.job === 'publish') {
+      const verdict = roundVerdicts.get(assignment.round) || { verdict: 'REJECT', reason: 'missing_verdict_artifact' }
+      const gate = applyPublishGate({
+        verdict,
+        repoDir: cwd,
+        baseSha: roundBase,
+        reportDir: plan.reportDir,
+        sibling: choice.sibling,
+        quotaPool: choice.pool,
+        taskId: opts.task || null
+      })
+      entry.publishGate = {
+        verdict: verdict.verdict,
+        reason: verdict.reason,
+        action: gate.action,
+        files: gate.files,
+        commitSha: gate.commitSha || null,
+        replanPath: gate.replanPath || null
+      }
+    }
 
     // Quota ledger: one call against the pool actually used.
     if (choice.pool) {
