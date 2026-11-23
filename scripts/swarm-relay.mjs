@@ -27,9 +27,11 @@ import {
 } from '../apps/api/src/toolchain/dispatch/overnight-supervisor.js'
 import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
 import {
+  PIPELINE_JOBS,
   RING_PRESETS,
   loadPoolBudgets,
   poolForSibling,
+  readLiveSqliteQuota,
   resolveRing,
   selectSlot
 } from './swarm-quota-ring.mjs'
@@ -41,7 +43,7 @@ import {
   writeRingState
 } from './swarm-ring-state.mjs'
 
-export const RELAY_MODES = ['discover', 'fix']
+export const RELAY_MODES = ['discover', 'fix', 'pipeline', 'case-solve', 'build', 'review', 'publish']
 export const DEFAULT_SIBLINGS = ['hermes', 'direct']
 export const DEFAULT_WINDOWS = 3
 export const DEFAULT_SOFT_WINDOW_SEC = 300
@@ -108,16 +110,21 @@ export function parseModelMap(value) {
   return map
 }
 
-/** Parse an optional quota-status JSON file (`{ pools: { pool: { weeklyRemainingPct } }, conservePools: [] }`). */
-function readQuotaStatus(path) {
-  if (!path) return { quota: {}, conservePools: [] }
+/**
+ * Parse an optional quota-status JSON file (`{ pools: { pool: { weeklyRemainingPct } }, conservePools: [] }`)
+ * OR load live weeklyRemainingPct and conservePools directly from the workspace SQLite `ai_quota` store.
+ */
+export function readQuotaStatus(path) {
+  if (!path) {
+    return readLiveSqliteQuota()
+  }
   const parsed = JSON.parse(readFileSync(path, 'utf8'))
   const pools = parsed?.pools && typeof parsed.pools === 'object' ? parsed.pools : {}
   const quota = {}
   for (const [pool, v] of Object.entries(pools)) {
     quota[pool] = { weeklyRemainingPct: Number(v?.weeklyRemainingPct ?? 100) }
   }
-  return { quota, conservePools: Array.isArray(parsed?.conservePools) ? [...parsed.conservePools] : [] }
+  return { ok: true, source: 'file', quota, conservePools: Array.isArray(parsed?.conservePools) ? [...parsed.conservePools] : [] }
 }
 
 /**
@@ -126,7 +133,7 @@ function readQuotaStatus(path) {
 export function buildRelayPlan({
   mode = 'discover',
   siblings = DEFAULT_SIBLINGS,
-  windows = DEFAULT_WINDOWS,
+  windows = null,
   softWindowSec = DEFAULT_SOFT_WINDOW_SEC,
   windowSec = null,
   rounds = DEFAULT_ROUNDS,
@@ -134,7 +141,9 @@ export function buildRelayPlan({
   modelMap = {},
   reportDir = DEFAULT_REPORT_DIR
 } = {}) {
-  const planMode = String(mode ?? 'discover').trim().toLowerCase()
+  const planMode = (preset === 'k5-pipeline-ring' && (!mode || mode === 'discover'))
+    ? 'pipeline'
+    : String(mode ?? 'discover').trim().toLowerCase()
   if (!RELAY_MODES.includes(planMode)) {
     throw new Error(`invalid mode '${mode}' (expected one of: ${RELAY_MODES.join('|')})`)
   }
@@ -173,15 +182,26 @@ export function buildRelayPlan({
 }
 
 /** One window's assignment. `index` is zero-based across the whole run (rounds included). */
-export function buildAssignment({ list, index, dir, planMode, softSec, models = {} }) {
+export function buildAssignment({ list, index, dir, planMode, softSec, models = {}, allowConserve = false }) {
   const window = index + 1
   const idx = index % list.length
-  const sibling = list[idx]
+  const round = Math.floor(index / list.length) + 1
+  const rawSibling = list[idx]
+  const sibling = rawSibling === 'guest'
+    ? (round % 6 === 0 ? 'copilot' : (allowConserve ? 'agy' : 'local'))
+    : rawSibling
+  const job = planMode === 'pipeline'
+    ? PIPELINE_JOBS[idx % PIPELINE_JOBS.length]
+    : planMode
   const siblingSlot = `sibling${idx + 1}`
   const promotedToParentSlot = `parent${idx + 1}`
   const hasParent = index > 0
   const prevIdx = hasParent ? (index - 1) % list.length : null
-  const parentSibling = hasParent ? list[prevIdx] : null
+  const prevRound = hasParent ? Math.floor((index - 1) / list.length) + 1 : null
+  const rawParentSibling = hasParent ? list[prevIdx] : null
+  const parentSibling = rawParentSibling === 'guest'
+    ? (prevRound % 6 === 0 ? 'copilot' : (allowConserve ? 'agy' : 'local'))
+    : rawParentSibling
   const parentSlot = hasParent ? `parent${prevIdx + 1}` : null
   const parentWindow = hasParent ? index : null
   const parentFindingsPath = hasParent
@@ -192,8 +212,10 @@ export function buildAssignment({ list, index, dir, planMode, softSec, models = 
   return {
     window,
     index,
-    round: Math.floor(index / list.length) + 1,
+    round,
     sibling,
+    rosterSlot: rawSibling,
+    job,
     role: 'sibling',
     siblingSlot,
     promotedToParentSlot,
@@ -202,7 +224,7 @@ export function buildAssignment({ list, index, dir, planMode, softSec, models = 
     parentSlot,
     parentWindow,
     parentFindingsPath,
-    model: models[sibling] || null,
+    model: models[sibling] || models[rawSibling] || null,
     pool: poolForSibling(sibling),
     softWindowSec: softSec,
     hardKill: false,
@@ -213,6 +235,7 @@ export function buildAssignment({ list, index, dir, planMode, softSec, models = 
 
 export function buildSiblingPrompt({
   mode,
+  job = null,
   window,
   windows,
   sibling,
@@ -226,20 +249,21 @@ export function buildSiblingPrompt({
   reportPath,
   deadlineIso = null
 }) {
+  const activeJob = job || (mode === 'pipeline' ? 'discover' : mode)
   const budget = `Soft window budget ${softWindowSec}s (advisory only — do not self-kill; finish gracefully).`
   const deadlineLine = deadlineIso
     ? `Window deadline ${deadlineIso} (cooperative budget: finish before it; the relay stops admitting new sub-turns once the budget is spent).`
     : ''
   const roleLine = [
-    siblingSlot ? `Role: ${siblingSlot}${demotedFromParentSlot ? ` (demoted from ${demotedFromParentSlot} in round-robin ring)` : ''}.` : '',
+    siblingSlot ? `Role: ${siblingSlot} [job=${activeJob}]${demotedFromParentSlot ? ` (demoted from ${demotedFromParentSlot} in round-robin ring)` : ''}.` : '',
     parentSibling
       ? `Active Parent: ${parentSlot} (${parentSibling}) — read parent findings at ${parentFindingsPath} and query via "swarm ask --parent-slot ${parentSlot} <question>" if clarity is needed.`
       : 'Active Parent: none (bootstrap window 1).',
     promotedToParentSlot ? `On completion, you are promoted to ${promotedToParentSlot} for the next sibling.` : ''
   ].filter(Boolean).join(' ')
-  if (mode === 'fix') {
+  if (activeJob === 'fix' || activeJob === 'build') {
     return [
-      `swarm relay window ${window}/${windows} -> ${sibling} (mode=fix).`,
+      `swarm relay window ${window}/${windows} -> ${sibling} (mode=${mode}, job=${activeJob}).`,
       roleLine,
       `Apply the smallest verified fix set for the active case/task, run focused tests, and write a concise JSON report to ${reportPath}.`,
       'Never force-push, never reset --hard, never discard untracked work.',
@@ -247,8 +271,35 @@ export function buildSiblingPrompt({
       budget
     ].filter(Boolean).join(' ')
   }
+  if (activeJob === 'case-solve') {
+    return [
+      `swarm relay window ${window}/${windows} -> ${sibling} (mode=${mode}, job=case-solve).`,
+      roleLine,
+      `Triage and score open multi-option cases from parent findings, pause only on unrecoverable options, and write a JSON report to ${reportPath}.`,
+      deadlineLine,
+      budget
+    ].filter(Boolean).join(' ')
+  }
+  if (activeJob === 'review') {
+    return [
+      `swarm relay window ${window}/${windows} -> ${sibling} (mode=${mode}, job=review).`,
+      roleLine,
+      `Independently cross-review the active diff and parent build findings, verify tests pass, and write VERDICT: ACCEPT or REJECT to ${reportPath}.`,
+      deadlineLine,
+      budget
+    ].filter(Boolean).join(' ')
+  }
+  if (activeJob === 'publish') {
+    return [
+      `swarm relay window ${window}/${windows} -> ${sibling} (mode=${mode}, job=publish).`,
+      roleLine,
+      `Consolidate verified passing diffs from the round, prepare the triple-layer checkpoint summary, and write the publish report to ${reportPath}.`,
+      deadlineLine,
+      budget
+    ].filter(Boolean).join(' ')
+  }
   return [
-    `swarm relay window ${window}/${windows} -> ${sibling} (mode=discover).`,
+    `swarm relay window ${window}/${windows} -> ${sibling} (mode=${mode}, job=${activeJob}).`,
     roleLine,
     `Discover prioritized work and multi-option cases, then write a concise JSON report to ${reportPath}.`,
     'Read-only exploration only: propose options, do not mutate the working tree.',
@@ -274,6 +325,9 @@ export function buildSiblingCommand(sibling, { prompt, model = null }) {
   else if (sibling === 'hermes') base = ['hermes', '-z']
   else if (sibling === 'opencode') base = ['opencode', 'run', '--standalone', '--model', 'opencode/deepseek-v4.1-flash-free']
   else if (sibling === 'direct') base = [process.execPath, resolve(new URL('./swarm-direct.mjs', import.meta.url).pathname), '--provider', 'cloudflare', '--prompt']
+  else if (sibling === 'direct-vercel') base = [process.execPath, resolve(new URL('./swarm-direct.mjs', import.meta.url).pathname), '--provider', 'vercel', '--prompt']
+  else if (sibling === 'local') base = [process.execPath, resolve(new URL('./local-llama-cli.mjs', import.meta.url).pathname), '--model', '1.5b', '--prompt']
+  else if (sibling === 'copilot') base = ['copilot', '-p']
   else if (sibling === 'gemini-api') base = ['gemini-api', 'prompt']
   else if (sibling === 'agy') base = ['agy', '-p']
   else base = [sibling]
@@ -333,6 +387,7 @@ function parseArgs(argv) {
     modelMap: null,
     allowConserve: false,
     maxConserveWindows: DEFAULT_MAX_CONSERVE_WINDOWS,
+    subTurns: 1,
     stallKillSec: DEFAULT_STALL_KILL_SEC,
     quotaStatus: null,
     printQuotaStatus: false,
@@ -358,6 +413,7 @@ function parseArgs(argv) {
     else if (a === '--model-map') opts.modelMap = argv[++i]
     else if (a === '--allow-conserve') opts.allowConserve = true
     else if (a === '--max-conserve-windows') opts.maxConserveWindows = argv[++i]
+    else if (a === '--sub-turns') opts.subTurns = argv[++i]
     else if (a === '--stall-kill-sec') opts.stallKillSec = argv[++i]
     else if (a === '--quota-status') {
       const next = argv[i + 1]
@@ -409,24 +465,24 @@ export async function runRelay(argv) {
 
   const stateDir = join(homedir(), '.local/state/curl-ai-bridge/overnight')
   if (opts.printQuotaStatus && !opts.execute) {
-    const { quota, conservePools } = readQuotaStatus(opts.quotaStatus)
+    const statusInfo = readQuotaStatus(opts.quotaStatus)
     const budgets = loadPoolBudgets({
       countCalls: (pool) => countPoolCallsInWindow(stateDir, pool),
-      quota,
-      conservePools
+      quota: statusInfo.quota,
+      conservePools: statusInfo.conservePools
     })
     if (opts.json) {
-      process.stdout.write(`${JSON.stringify({ ok: true, mode: 'quota-status', budgets }, null, 2)}\n`)
+      process.stdout.write(`${JSON.stringify({ ok: true, mode: 'quota-status', source: statusInfo.source || 'sqlite', budgets }, null, 2)}\n`)
     } else {
       const lines = [
-        'swarm relay quota-status (5h window + policy admission):',
+        `swarm relay quota-status (source=${statusInfo.source || 'sqlite'} | 5h window + live weekly/CONSERVE admission):`,
         ...Object.values(budgets).map((b) =>
           `  ${b.pool}: admitted=${b.admitted} conserve=${b.conserve} calls5h=${b.callsInWindow}/${b.cap ?? 'uncapped'} weekly=${b.weeklyRemainingPct}% reason=${b.reason}`
         )
       ]
       process.stdout.write(`${lines.join('\n')}\n`)
     }
-    return { ok: true, mode: 'quota-status', budgets }
+    return { ok: true, mode: 'quota-status', source: statusInfo.source || 'sqlite', budgets }
   }
 
   const plan = buildRelayPlan({
@@ -449,7 +505,7 @@ export async function runRelay(argv) {
       const lines = [
         `relay plan (dry-run): mode=${plan.mode} windows=${plan.windows} rounds=${plan.rounds} siblings=${plan.siblings.join('->')}`,
         `window=${plan.softWindowSec}s noHardKill=${plan.noHardKill} stallKillSec=${opts.stallKillSec} execution=${plan.execution} report_dir=${plan.reportDir}`,
-        ...plan.assignments.map((a) => `  w${a.window} r${a.round} ${a.sibling} (${a.pool}) -> ${a.reportPath}`),
+        ...plan.assignments.map((a) => `  w${a.window} r${a.round} [${a.job}] ${a.sibling} (${a.pool}) -> ${a.reportPath}`),
         `summary -> ${plan.summaryReportPath}`,
         'dry-run: no sibling CLIs spawned (pass --execute to run)'
       ]
@@ -484,11 +540,12 @@ export async function runRelay(argv) {
 
     const assignment = buildAssignment({
       list: plan.siblings, index, dir: plan.reportDir, planMode: plan.mode,
-      softSec: plan.softWindowSec, models: plan.modelMap
+      softSec: plan.softWindowSec, models: plan.modelMap, allowConserve: opts.allowConserve
     })
     const choice = selectSlot({
       ring: plan.siblings,
       windowIndex: index,
+      round: assignment.round,
       budgets,
       modelMap: plan.modelMap,
       allowConserve: opts.allowConserve,
@@ -499,15 +556,18 @@ export async function runRelay(argv) {
     if (!choice.admitted) {
       windows.push({
         window: assignment.window, round: assignment.round, sibling: assignment.sibling,
-        status: 'deferred_quota', reason: choice.reason, elapsedMs: 0, hardKilled: false
+        job: assignment.job, status: 'deferred_quota', reason: choice.reason, elapsedMs: 0, hardKilled: false
       })
       stopReason = 'quota_exhausted'
       break
     }
 
-    const deadlineMs = Date.now() + plan.softWindowSec * 1000
+    const windowStartedAt = new Date().toISOString()
+    const windowStartMs = Date.now()
+    const deadlineMs = windowStartMs + plan.softWindowSec * 1000
     const prompt = buildSiblingPrompt({
       mode: plan.mode,
+      job: assignment.job,
       window: assignment.window,
       windows: totalWindows === Number.POSITIVE_INFINITY ? 'continuous' : totalWindows,
       sibling: choice.sibling,
@@ -523,27 +583,41 @@ export async function runRelay(argv) {
     })
 
     const { command, args } = buildSiblingCommand(choice.sibling, { prompt, model: choice.model })
-    const windowStartedAt = new Date().toISOString()
-    const windowStartMs = Date.now()
-    const res = await runChild({
-      command, args, cwd, stallKillSec: opts.stallKillSec, windowStartMs,
-      env: {
-        ...process.env,
-        SWARM_RELAY_WINDOW: String(assignment.window),
-        SWARM_RELAY_MODE: plan.mode,
-        SWARM_RELAY_WINDOW_INDEX: String(index),
-        SWARM_RELAY_ROUND: String(assignment.round),
-        SWARM_RELAY_SLOT: assignment.siblingSlot,
-        SWARM_RELAY_PARENT_SLOT: assignment.parentSlot || '',
-        SWARM_RELAY_WINDOW_SEC: String(plan.softWindowSec),
-        SWARM_RELAY_DEADLINE_AT: new Date(deadlineMs).toISOString()
+    const maxSubTurns = positiveInt(opts.subTurns, 1, 'subTurns')
+    let res = null
+    let subTurnsExecuted = 0
+    let subTurnsStoppedByBudget = false
+    for (let subTurn = 1; subTurn <= maxSubTurns; subTurn += 1) {
+      if (subTurn > 1 && Date.now() - windowStartMs >= plan.softWindowSec * 1000) {
+        subTurnsStoppedByBudget = true
+        break
       }
-    })
+      subTurnsExecuted += 1
+      res = await runChild({
+        command, args, cwd, stallKillSec: opts.stallKillSec, windowStartMs,
+        env: {
+          ...process.env,
+          SWARM_RELAY_WINDOW: String(assignment.window),
+          SWARM_RELAY_MODE: plan.mode,
+          SWARM_RELAY_JOB: assignment.job,
+          SWARM_RELAY_WINDOW_INDEX: String(index),
+          SWARM_RELAY_ROUND: String(assignment.round),
+          SWARM_RELAY_SLOT: assignment.siblingSlot,
+          SWARM_RELAY_PARENT_SLOT: assignment.parentSlot || '',
+          SWARM_RELAY_WINDOW_SEC: String(plan.softWindowSec),
+          SWARM_RELAY_DEADLINE_AT: new Date(deadlineMs).toISOString(),
+          SWARM_WINDOW_DEADLINE_MS: String(deadlineMs),
+          SWARM_RELAY_SUB_TURN: String(subTurn)
+        }
+      })
+      if (res.error || res.status !== 0) break
+    }
 
     const exitCode = typeof res.status === 'number' ? res.status : null
     const entry = {
       window: assignment.window,
       round: assignment.round,
+      job: assignment.job,
       sibling: choice.sibling,
       pool: choice.pool,
       model: choice.model,
@@ -555,6 +629,8 @@ export async function runRelay(argv) {
       elapsedMs: res.elapsedMs,
       windowSec: plan.softWindowSec,
       softWindowExceeded: res.elapsedMs > plan.softWindowSec * 1000,
+      subTurnsExecuted,
+      subTurnsStoppedByBudget,
       hardKilled: res.stallKilled === true,
       exitCode,
       signal: res.signal || null,

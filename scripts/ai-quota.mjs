@@ -5,6 +5,8 @@
 // Relevant Files: scripts/ai-quota.mjs, scripts/workspace-cli.mjs, apps/api/src/modelBudget.js, apps/api/src/modelRegistry.js, apps/api/src/providerQuota.js, .env.example
 // Important Context: User file. Implements ./workspace ai quota [status|sync|recommend].
 // Work State: Completed: Initial implementation of 5-hour + weekly quota inspection and calibration CLI; Active: None; Blocked: None; Next Move: Maintain as needed.
+import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createDatabase } from '../apps/api/src/database.js'
 import { collectSyncAuditWarnings, createModelBudget } from '../apps/api/src/modelBudget.js'
 import {
@@ -562,9 +564,12 @@ function main() {
   }
 }
 
-try {
-  main()
-} catch (error) {
-  console.error(error.message)
-  process.exitCode = 1
+const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+if (isMain) {
+  try {
+    main()
+  } catch (error) {
+    console.error(error.message)
+    process.exitCode = 1
+  }
 }
