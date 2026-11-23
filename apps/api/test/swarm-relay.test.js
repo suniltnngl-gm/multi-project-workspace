@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus, evaluateReviewGate } from '../../../scripts/swarm-relay.mjs'
+import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus, evaluateReviewGate, computeHorizonDeadlineMs, effectiveWindowBudgetMs } from '../../../scripts/swarm-relay.mjs'
 import { computeEvidenceFingerprint, reconcileStaleDiscoveredTasks, parseSeedPayload } from '../../../scripts/swarm-discover.mjs'
 import { buildExecutiveBrief } from '../../../scripts/swarm-brief.mjs'
 import { evaluateOpenCase } from '../../../scripts/swarm-case-solve.mjs'
@@ -361,4 +361,26 @@ test('evaluateReviewGate requires artifact ACCEPT + clean deterministic gates + 
   assert.equal(evaluateReviewGate({ artifactVerdict: 'REJECT', detOk: true, headDrift: false }).reason, 'w4_verdict_reject')
   assert.equal(evaluateReviewGate({ artifactVerdict: 'ACCEPT', detOk: false, detReason: 'unit_tests_failed', headDrift: false }).reason, 'unit_tests_failed')
   assert.equal(evaluateReviewGate({ artifactVerdict: 'ACCEPT', detOk: true, headDrift: true }).reason, 'unexpected_head_advance_before_review')
+})
+
+test('Phase 3 horizon math: rolling pool reset pulls the deadline earlier; drift tightens the window budget', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'horizon-'))
+  try {
+    const start = Date.now()
+    const fiveHours = 5 * 60 * 60 * 1000
+    assert.equal(computeHorizonDeadlineMs({ relayStartMs: start }), start + fiveHours)
+
+    const ledger = join(dir, 'pool-calls-5h.jsonl')
+    writeFileSync(ledger, `${JSON.stringify({ atMs: start - 60 * 60 * 1000 })}\n`)
+    assert.equal(computeHorizonDeadlineMs({ relayStartMs: start, ledgerPath: ledger }), start - 60 * 60 * 1000 + fiveHours)
+
+    writeFileSync(ledger, '{oops\n')
+    assert.equal(computeHorizonDeadlineMs({ relayStartMs: start, ledgerPath: ledger }), start + fiveHours)
+
+    assert.equal(effectiveWindowBudgetMs({ softWindowSec: 300, windowDriftMs: 0, minSubTurnSec: 30 }), 300000)
+    assert.equal(effectiveWindowBudgetMs({ softWindowSec: 300, windowDriftMs: 60000, minSubTurnSec: 30 }), 240000)
+    assert.equal(effectiveWindowBudgetMs({ softWindowSec: 300, windowDriftMs: 400000, minSubTurnSec: 30 }), 30000)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

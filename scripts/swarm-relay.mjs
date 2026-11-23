@@ -89,6 +89,35 @@ export function evaluateReviewGate({ artifactVerdict = null, artifactReason = nu
   return { verdict: 'REJECT', reason: 'w4_verdict_reject' }
 }
 
+export const DEFAULT_HORIZON_MS = 5 * 60 * 60 * 1000
+
+/**
+ * Phase 3 horizon: a hard 5h wall-clock cap, pulled earlier when an active pool
+ * call in the rolling 5h ledger implies an imminent reset boundary.
+ */
+export function computeHorizonDeadlineMs({ relayStartMs, maxHorizonMs = DEFAULT_HORIZON_MS, ledgerPath = null } = {}) {
+  let deadline = relayStartMs + maxHorizonMs
+  if (ledgerPath && existsSync(ledgerPath)) {
+    try {
+      let earliest = null
+      for (const line of readFileSync(ledgerPath, 'utf8').split(/\r?\n/)) {
+        if (!line.trim()) continue
+        const at = Number(JSON.parse(line).atMs)
+        if (!Number.isFinite(at)) continue
+        if (at >= relayStartMs - DEFAULT_HORIZON_MS) earliest = earliest === null ? at : Math.min(earliest, at)
+      }
+      if (earliest !== null) deadline = Math.min(deadline, earliest + DEFAULT_HORIZON_MS)
+    } catch { /* malformed ledger: keep the plain horizon */ }
+  }
+  return deadline
+}
+
+/** Advisory window budget for the next window after a drift overrun. */
+export function effectiveWindowBudgetMs({ softWindowSec, windowDriftMs = 0, minSubTurnSec = 30 } = {}) {
+  const base = Math.max(0, softWindowSec * 1000 - Math.max(0, windowDriftMs))
+  return Math.max(minSubTurnSec * 1000, base)
+}
+
 const SIBLING_TOKEN = /^[a-z0-9][a-z0-9._-]*$/
 
 function expandHome(p) {
@@ -427,6 +456,9 @@ function parseArgs(argv) {
     quotaAware: false,
     writePlan: null,
     task: null,
+    horizonMs: null,
+    allowPartialRound: false,
+    minSubTurnSec: 30,
     printQuotaStatus: false,
     ringStateDir: DEFAULT_RING_STATE_DIR,
     reportDir: DEFAULT_REPORT_DIR,
@@ -465,6 +497,9 @@ function parseArgs(argv) {
     else if (a === '--report-dir') opts.reportDir = argv[++i]
     else if (a === '--quota-aware') opts.quotaAware = true
     else if (a === '--task') opts.task = argv[++i]
+    else if (a === '--horizon-ms') opts.horizonMs = argv[++i]
+    else if (a === '--allow-partial-round') opts.allowPartialRound = true
+    else if (a === '--min-sub-turn-sec') opts.minSubTurnSec = argv[++i]
     else if (a === '--write-plan') {
       const next = argv[i + 1]
       if (!next || next.startsWith('--')) opts.writePlan = 'auto'
@@ -494,6 +529,9 @@ No routine hard kill: a window is a cooperative budget; only --stall-kill-sec in
       --quota-status <file>      JSON with per-pool weeklyRemainingPct + conservePools
       --quota-aware              Assert quota-aware admission (enforced during --execute)
       --task <id>                Board task id passed to the publish gate's checkpoint
+      --horizon-ms <n>           Wall-clock horizon (default 18000000 = 5h); the earliest active pool-call reset pulls it earlier
+      --allow-partial-round      Allow starting a round that cannot finish inside the horizon
+      --min-sub-turn-sec <n>     Floor for a window's advisory budget after drift (default 30)
       --write-plan [file]        Persist the schedule/plan JSON (bare: <state>/relay/<ts>-schedule.json)
       --ring-state-dir <dir>     Ring ledger directory
       --report-dir <dir>         Report directory (default: ~/.local/state/curl-ai-bridge/reports)
@@ -550,6 +588,15 @@ export async function runRelay(argv) {
     reportDir: opts.reportDir
   })
   const startedAt = new Date().toISOString()
+  const relayStartMs = Date.now()
+  const minSubTurnSec = positiveInt(opts.minSubTurnSec, 30, 'minSubTurnSec')
+  const horizonDeadlineMs = computeHorizonDeadlineMs({
+    relayStartMs,
+    maxHorizonMs: positiveInt(opts.horizonMs, DEFAULT_HORIZON_MS, 'horizonMs'),
+    ledgerPath: join(stateDir, 'pool-calls-5h.jsonl')
+  })
+  let cumulativeDriftMs = 0
+  let lastWindowDriftMs = 0
 
   if (!opts.execute) {
     // Persist the schedule artifact for cross-session inspection ($0).
@@ -616,6 +663,18 @@ export async function runRelay(argv) {
 
   for (let index = 0; index < totalWindows; index += 1) {
     if (index % plan.siblings.length === 0) roundBase = roundBaseSha(cwd)
+    const remainingHorizonMs = horizonDeadlineMs - Date.now()
+    // Never start a round/window that cannot fit inside the 5h horizon.
+    if (index % plan.siblings.length === 0
+        && remainingHorizonMs < plan.siblings.length * plan.softWindowSec * 1000
+        && !opts.allowPartialRound) {
+      stopReason = 'five_hour_horizon_reached'
+      break
+    }
+    if (remainingHorizonMs < plan.softWindowSec * 1000) {
+      stopReason = 'five_hour_horizon_reached'
+      break
+    }
     if (existsSync(plan.killSwitchFile)) {
       stopReason = 'kill_switch_armed'
       break
@@ -671,9 +730,12 @@ export async function runRelay(argv) {
     let subTurnsExecuted = 0
     let subTurnsStoppedByBudget = false
     for (let subTurn = 1; subTurn <= maxSubTurns; subTurn += 1) {
-      if (subTurn > 1 && Date.now() - windowStartMs >= plan.softWindowSec * 1000) {
-        subTurnsStoppedByBudget = true
-        break
+      if (subTurn > 1) {
+        const windowBudgetMs = effectiveWindowBudgetMs({ softWindowSec: plan.softWindowSec, windowDriftMs: lastWindowDriftMs, minSubTurnSec })
+        if (Date.now() - windowStartMs >= windowBudgetMs || horizonDeadlineMs - Date.now() <= 0) {
+          subTurnsStoppedByBudget = true
+          break
+        }
       }
       subTurnsExecuted += 1
       res = await runChild({
@@ -771,6 +833,11 @@ export async function runRelay(argv) {
       }
     }
 
+    // Phase 3 drift accounting: charge overruns to subsequent windows' advisory budget.
+    const windowDriftMs = Math.max(0, (res.elapsedMs || 0) - plan.softWindowSec * 1000)
+    cumulativeDriftMs += windowDriftMs
+    lastWindowDriftMs = windowDriftMs
+
     // Quota ledger: one call against the pool actually used.
     if (choice.pool) {
       recordPoolCall(stateDir, { quotaPool: choice.pool, taskId: `relay-w${assignment.window}`, status: entry.status === 'ok' ? 'ok' : `exit_${exitCode ?? 'null'}` })
@@ -805,8 +872,13 @@ export async function runRelay(argv) {
     }
   }
 
+  const roundsCompleted = new Set(windows.map((w) => w.round)).size
   ringState.finishedAt = new Date().toISOString()
   ringState.stopReason = stopReason
+  ringState.relayStartMs = relayStartMs
+  ringState.horizonDeadlineMs = horizonDeadlineMs
+  ringState.cumulativeDriftMs = cumulativeDriftMs
+  ringState.roundsCompleted = roundsCompleted
   writeRingState(opts.ringStateDir, ringState)
 
   const summary = {
@@ -815,6 +887,10 @@ export async function runRelay(argv) {
     executed: true,
     relayMode: plan.mode,
     stopReason,
+    relayStartMs,
+    horizonDeadlineMs,
+    cumulativeDriftMs,
+    roundsCompleted,
     noHardKill: true,
     startedAt,
     finishedAt: new Date().toISOString(),
