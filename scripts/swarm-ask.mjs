@@ -10,6 +10,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
   buildReadOnlyAskCommand,
+  grepAllSessionTranscripts,
   grepSessionTranscript,
   resolveDefaultHandoffDir
 } from '../apps/api/src/toolchain/dispatch/session-handoff.js'
@@ -26,9 +27,10 @@ const flag = (name, fallback = null) => {
 const has = (name) => argv.includes(name)
 
 if (has('--help') || has('-h') || argv.length === 0) {
-  console.log(`Usage: swarm ask --session <id> "<question>" [options]
+  console.log(`Usage: swarm ask (--session <id> | --all) "<question>" [options]
 Options:
-  --session <id>           Target session/conversation ID (required)
+  --session <id>           Target session/conversation ID
+  --all                    Search across ALL handoff cards and AGY transcripts ($0 grep)
   --mode <grep|llm>        Query mode: grep ($0 default) or llm (bounded READ-ONLY headless)
   --cli <agy>              CLI backend for --mode llm (default: agy)
   --timeout <sec>          Timeout in seconds for --mode llm (default: 120)
@@ -60,10 +62,24 @@ for (let i = 0; i < argv.length; i += 1) {
   positionals.push(argv[i])
 }
 const question = positionals.join(' ').trim()
+const searchAll = has('--all')
 
-if (!sessionId || !question) {
-  console.error('swarm ask: --session <id> and "<question>" are required')
+if ((!sessionId && !searchAll) || !question) {
+  console.error('swarm ask: (--session <id> or --all) and "<question>" are required')
   process.exit(1)
+}
+
+if (searchAll) {
+  const res = grepAllSessionTranscripts({ query: question, handoffDir, maxMatches })
+  if (has('--json')) {
+    console.log(JSON.stringify(res, null, 2))
+  } else {
+    console.log(`swarm ask [grep-all]: scanned=${res.sessionsScanned}/${res.totalSessions} matches=${res.matchCount}`)
+    for (const m of res.matches) {
+      console.log(`  [${String(m.sessionId).slice(0, 8)} ${m.source}:${m.line}] ${m.snippet}`)
+    }
+  }
+  process.exit(0)
 }
 
 if (mode === 'grep') {

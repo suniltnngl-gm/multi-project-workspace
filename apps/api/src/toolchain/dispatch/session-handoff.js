@@ -246,6 +246,64 @@ export function grepSessionTranscript({
 }
 
 /**
+ * Tier 1 zero-LLM grep across ALL handoff cards and AGY session transcripts (newest-first).
+ */
+export function grepAllSessionTranscripts({
+  query,
+  handoffDir = resolveDefaultHandoffDir(),
+  homeDir = homedir(),
+  maxMatches = 12,
+  maxCharsPerMatch = 220
+} = {}) {
+  const candidates = new Map()
+  if (handoffDir && existsSync(handoffDir)) {
+    for (const f of readdirSync(handoffDir).filter((x) => x.endsWith('.md'))) {
+      const id = f.replace(/\.md$/, '')
+      const st = statSync(join(handoffDir, f))
+      candidates.set(id, Math.max(candidates.get(id) || 0, st.mtimeMs))
+    }
+  }
+  const brainDir = join(homeDir, '.gemini', 'antigravity-cli', 'brain')
+  if (existsSync(brainDir)) {
+    for (const id of readdirSync(brainDir)) {
+      const tp = resolveAgyTranscriptPath(id, { homeDir })
+      if (tp && existsSync(tp)) {
+        const st = statSync(tp)
+        candidates.set(id, Math.max(candidates.get(id) || 0, st.mtimeMs))
+      }
+    }
+  }
+  const sortedIds = [...candidates.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id)
+  const matches = []
+  let sessionsScanned = 0
+  for (const sessionId of sortedIds) {
+    if (matches.length >= maxMatches) break
+    sessionsScanned += 1
+    const res = grepSessionTranscript({
+      sessionId,
+      query,
+      handoffDir,
+      homeDir,
+      maxMatches: Math.min(3, maxMatches - matches.length),
+      maxCharsPerMatch
+    })
+    for (const m of res.matches) {
+      matches.push({ sessionId, ...m })
+      if (matches.length >= maxMatches) break
+    }
+  }
+  return {
+    ok: true,
+    mode: 'grep-all',
+    query,
+    sessionsScanned,
+    totalSessions: sortedIds.length,
+    matchCount: matches.length,
+    matches
+  }
+}
+
+/**
  * Tier 2 bounded read-only headless LLM query command builder.
  */
 export function buildReadOnlyAskCommand({

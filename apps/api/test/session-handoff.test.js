@@ -10,6 +10,7 @@ import {
   readLatestHandoff,
   retireSession,
   grepSessionTranscript,
+  grepAllSessionTranscripts,
   buildReadOnlyAskCommand
 } from '../src/toolchain/dispatch/session-handoff.js'
 import { evaluateSessionCompaction } from '../src/toolchain/dispatch/session-compactor.js'
@@ -136,6 +137,21 @@ test('retireSession writes handoff card and records retired-sessions.json', () =
     const card = readLatestHandoff(dir, { sessionId: 'e4748928-5f30-471c-b6ee-4cf3ba073164' })
     assert.equal(card.exists, true)
     assert.match(card.content, /Shipped swarm handoff\/ask/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('grepAllSessionTranscripts searches across multiple handoff cards newest-first', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'grep-all-test-'))
+  try {
+    const handoffDir = join(dir, 'handoffs')
+    writeHandoffCard(handoffDir, 'sess-1', buildHandoffCard({ sessionId: 'sess-1', keyDecisions: ['Alpha cache policy'] }))
+    writeHandoffCard(handoffDir, 'sess-2', buildHandoffCard({ sessionId: 'sess-2', keyDecisions: ['Beta cache policy'] }))
+    const res = grepAllSessionTranscripts({ query: 'cache policy', handoffDir, homeDir: dir, maxMatches: 5 })
+    assert.equal(res.ok, true)
+    assert.equal(res.mode, 'grep-all')
+    assert.equal(res.matchCount, 2)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
