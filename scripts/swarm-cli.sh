@@ -98,6 +98,13 @@ case "$cmd" in
       import { existsSync } from "node:fs";
       import { join } from "node:path";
       import { checkpointPassingDiff } from "'"$MPW_DIR"'/apps/api/src/toolchain/dispatch/mutation-guard.js";
+      import { checkpointAllowed } from "'"$MPW_DIR"'/scripts/swarm-window-policy.mjs";
+      const __policy = checkpointAllowed(process.env);
+      if (!__policy.ok) {
+        const __job = process.env.SWARM_WINDOW_JOB || "(unset)";
+        process.stderr.write(`swarm: ${__policy.reason} (SWARM_WINDOW_JOB=${__job})\n`);
+        process.exit(2);
+      }
       const argv = process.argv.slice(1);
       const flag = (n, fb) => { const i = argv.indexOf(n); return i >= 0 && i + 1 < argv.length ? argv[i + 1] : fb; };
       const msg = flag("-m", flag("--message", "chore(checkpoint): passing diff checkpoint"));

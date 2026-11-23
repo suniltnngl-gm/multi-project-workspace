@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus } from '../../../scripts/swarm-relay.mjs'
+import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus, evaluateReviewGate } from '../../../scripts/swarm-relay.mjs'
 import { computeEvidenceFingerprint, reconcileStaleDiscoveredTasks, parseSeedPayload } from '../../../scripts/swarm-discover.mjs'
 import { buildExecutiveBrief } from '../../../scripts/swarm-brief.mjs'
 import { evaluateOpenCase } from '../../../scripts/swarm-case-solve.mjs'
@@ -354,4 +354,11 @@ test('swarm-relay dry-run annotates cap-gated copilot windows', () => {
   const scriptPath = resolve(new URL('../../../scripts/swarm-relay.mjs', import.meta.url).pathname)
   const out = execFileSync(process.execPath, [scriptPath, '--preset', 'k5-pipeline-ring', '--windows', '60', '--window-sec', '300', '--dry-run'], { encoding: 'utf8' })
   assert.match(out, /cap-gated <=1 copilot\/5h/)
+})
+
+test('evaluateReviewGate requires artifact ACCEPT + clean deterministic gates + no head drift', () => {
+  assert.equal(evaluateReviewGate({ artifactVerdict: 'ACCEPT', detOk: true, headDrift: false }).verdict, 'ACCEPT')
+  assert.equal(evaluateReviewGate({ artifactVerdict: 'REJECT', detOk: true, headDrift: false }).reason, 'w4_verdict_reject')
+  assert.equal(evaluateReviewGate({ artifactVerdict: 'ACCEPT', detOk: false, detReason: 'unit_tests_failed', headDrift: false }).reason, 'unit_tests_failed')
+  assert.equal(evaluateReviewGate({ artifactVerdict: 'ACCEPT', detOk: true, headDrift: true }).reason, 'unexpected_head_advance_before_review')
 })

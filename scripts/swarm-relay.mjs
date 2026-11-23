@@ -27,6 +27,7 @@ import {
 } from '../apps/api/src/toolchain/dispatch/overnight-supervisor.js'
 import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
 import { applyPublishGate, deterministicRoundReview, readReviewVerdict, roundBaseSha } from './swarm-publish-gate.mjs'
+import { windowPolicyEnv } from './swarm-window-policy.mjs'
 import {
   PIPELINE_JOBS,
   RING_PRESETS,
@@ -73,6 +74,19 @@ export function resolveWindowStatus({ error = null, stallKilled = false, exitCod
 /** Statuses that count as a successful relay window for the summary verdict. */
 export function isSuccessfulWindowStatus(status) {
   return status === 'ok' || status === 'ok_no_findings' || status === 'ok_after_failover'
+}
+
+/**
+ * GOV-1 review gate: an ACCEPT requires a valid W4 artifact AND clean deterministic
+ * gates AND no unreviewed head advance since the round base.
+ */
+export function evaluateReviewGate({ artifactVerdict = null, artifactReason = null, detOk = false, detReason = null, headDrift = false } = {}) {
+  if (artifactVerdict === 'ACCEPT' && detOk && !headDrift) {
+    return { verdict: 'ACCEPT', reason: artifactReason || 'w4_accept' }
+  }
+  if (!detOk) return { verdict: 'REJECT', reason: detReason || 'deterministic_gate_failed' }
+  if (headDrift) return { verdict: 'REJECT', reason: 'unexpected_head_advance_before_review' }
+  return { verdict: 'REJECT', reason: 'w4_verdict_reject' }
 }
 
 const SIBLING_TOKEN = /^[a-z0-9][a-z0-9._-]*$/
@@ -666,6 +680,7 @@ export async function runRelay(argv) {
         command, args, cwd, stallKillSec: opts.stallKillSec, windowStartMs,
         env: {
           ...process.env,
+          ...windowPolicyEnv(assignment.job),
           SWARM_RELAY_WINDOW: String(assignment.window),
           SWARM_RELAY_MODE: plan.mode,
           SWARM_RELAY_JOB: assignment.job,
@@ -723,9 +738,15 @@ export async function runRelay(argv) {
     if (assignment.job === 'review') {
       const artifact = readReviewVerdict(findingsPath, { windowStartedAtMs: windowStartMs })
       const det = deterministicRoundReview({ repoDir: cwd, baseSha: roundBase })
-      const verdict = artifact.verdict === 'ACCEPT' && det.ok
-        ? artifact
-        : { verdict: 'REJECT', reason: !det.ok ? det.reason : 'w4_verdict_reject' }
+      const headNow = roundBaseSha(cwd)
+      const headDrift = Boolean(roundBase && headNow && headNow !== roundBase)
+      const verdict = evaluateReviewGate({
+        artifactVerdict: artifact.verdict,
+        artifactReason: artifact.reason,
+        detOk: det.ok,
+        detReason: det.reason,
+        headDrift
+      })
       roundVerdicts.set(assignment.round, verdict)
       entry.reviewVerdict = verdict
     }
