@@ -1,0 +1,23 @@
+Session: local-b33a3f5d60ed2a118ac9949fedede8bad83d7a3072985662a3dd40f19f2801f5
+Read-only review complete (no files touched, no SQLite, HEAD 9a10f56 confirmed).
+
+CAB CI Resilience Design study — Draft PR #47
+
+1. Current split: ci.yml = quality gate (ubuntu-latest, Node 18/20/22 matrix; steps: node --check all .mjs, mcp.json/plugin.json JSON parse, credential git-grep scan, node scripts/test-all.mjs). linux-self-hosted-smoke.yml = proof-of-execution on [self-hosted, Linux, X64] (identity/env probe, CAB + public MPW checkout, setup-node 22, utility check, platform assertion, MPW npm ci, test-all with MPW_ROOT). Note the asymmetry: the smoke job omits the three static/syntax/JSON/credential steps, so it is evidence of runtime correctness, not a full ci.yml substitute.
+
+2. Trigger-scope gap (finding): smoke.yml fires only on push to test/ubuntu-self-hosted-runner-smoke; it has no pull_request trigger. PR #47 was validated only because its HEAD happened to be pushed there. Any other PR gets zero self-hosted signal. Add pull_request (optionally workflow_run off ci.yml, though that never starts under the billing block).
+
+3. Node 18/20/22 preservation: setup-node 22 is the only pinned version on self-hosted; test-all spawns children via process.execPath (scripts/test-all.mjs:57), so a matrix propagates correctly to every test. Design: add node-version [18, 20, 22] to a self-hosted job and run the exact ci.yml five steps per version. Compatibility risk is unverified, not assumed: node:test (17 files), structuredClone (Node 17+), and crypto/fetch usage must actually pass on 18 and 20 before they count as covered; keep the MPW/G13 path on 22 or matrix it separately once proven.
+
+4. Required-check policy for PR #47: the three ci.yml jobs are unprovisionable under a private-repo spending limit (fail before step 1), so keeping them required blocks all merges. Treat "Linux Self-Hosted Runner Smoke Test" (49/49 + G13 4/4) plus Amazon Q review as the interim required gate for this PR; leave ci.yml non-blocking while the restriction stands; restore Node 18/20/22 as required the moment billing/runners return. Record the restoration as an explicit follow-up, not a silent drift.
+
+5. Cover the static-gap now: port ci.yml's syntax check, JSON validation, and credential scan into the self-hosted job (cheap, no network) so the interim gate equals the hosted gate except for the runner OS/version axis.
+
+6. Offline-runner recovery: single self-hosted label = single point of failure. If the runner is offline, fall back to a documented maintainer-local run (node scripts/test-all.mjs plus the three ci.yml steps, using MPW_ROOT or the bridge fallback) with results posted to the PR as the gate; do not merge on stale green. Cache the MPW clone and npm ci where possible (network dependency), pin the runner image, and keep the fallback attestation in writing so coverage is auditable, not implicit.
+
+Bottom line: #47 is safely mergeable on self-hosted Node 22 + Amazon Q evidence; the real debt is the absent 18/20/22 self-hosted matrix, the missing pull_request trigger, and the still-required-but-unrunnable hosted checks.
+
+session_id: local-b33a3f5d60ed2a118ac9949fedede8bad83d7a3072985662a3dd40f19f2801f5
+
+Resume this session with:
+  hermes --resume local-b33a3f5d60ed2a118ac9949fedede8bad83d7a3072985662a3dd40f19f2801f5

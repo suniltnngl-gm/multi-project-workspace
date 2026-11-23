@@ -1,0 +1,2 @@
+error: Our servers are experiencing high traffic right now, please try again in a minute. (UNAVAILABLE (code 503): No capacity available for model gpt-oss-120b-medium on the server)
+AGY_ERROR: {"short_error":"UNAVAILABLE (code 503): No capacity available for model gpt-oss-120b-medium on the server","status":"UNAVAILABLE","error_code":503,"code_kind":"http","retryable":true,"error_id":"b4a69d2f-659d-428a-bb10-09c5d4e34670-5-2010"}
