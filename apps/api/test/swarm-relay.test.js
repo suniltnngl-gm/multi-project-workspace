@@ -52,6 +52,37 @@ test('buildSiblingCommand supports agy, hermes, opencode, direct, and gemini-api
   assert.deepEqual(geminiModeled.args, ['generate', '--model', 'gemini-flash-latest', 'hello'])
 })
 
+test('buildSiblingCommand wires cline, vibe and codex with measured headless argv (#205)', () => {
+  // Shapes verified live on 2026-11-24 (sibling-validation matrix + targeted probes):
+  //   cline  -> --cwd <dir> --json --plan           (read-only) / --yolo (write windows)
+  //   vibe   -> --workdir <dir> --output json --agent ask -p   (read-only) / --trust (write)
+  //   codex  -> exec --sandbox read-only [-m <model>]          (never bare `codex <prompt>`)
+  const cwd = '/tmp/relay-wiring'
+  const cline = buildSiblingCommand('cline', { prompt: 'hello', cwd })
+  assert.equal(cline.command, 'cline')
+  assert.deepEqual(cline.args, ['--cwd', cwd, '--json', '--plan', 'hello'])
+  const clineWrite = buildSiblingCommand('cline', { prompt: 'hello', cwd, readOnly: false })
+  assert.deepEqual(clineWrite.args, ['--cwd', cwd, '--json', '--yolo', 'hello'])
+
+  const vibe = buildSiblingCommand('vibe', { prompt: 'hello', cwd })
+  assert.equal(vibe.command, 'vibe')
+  assert.deepEqual(vibe.args, ['--workdir', cwd, '--output', 'json', '--agent', 'ask', '-p', 'hello'])
+  const vibeWrite = buildSiblingCommand('vibe', { prompt: 'hello', cwd, readOnly: false })
+  assert.deepEqual(vibeWrite.args, ['--workdir', cwd, '--output', 'json', '--trust', '-p', 'hello'])
+
+  const codex = buildSiblingCommand('codex', { prompt: 'hello' })
+  assert.equal(codex.command, 'codex')
+  assert.deepEqual(codex.args, ['exec', '--sandbox', 'read-only', 'hello'])
+  const codexModeled = buildSiblingCommand('codex', { prompt: 'hello', model: 'gpt-5-codex' })
+  assert.deepEqual(codexModeled.args, ['exec', '--sandbox', 'read-only', '-m', 'gpt-5-codex', 'hello'])
+  const codexWrite = buildSiblingCommand('codex', { prompt: 'hello', readOnly: false })
+  assert.deepEqual(codexWrite.args, ['exec', 'hello'])
+
+  // llm7 stays unwired: swarm-direct rejects the provider, so the bare fallback is wrong there.
+  const unknown = buildSiblingCommand('llm7', { prompt: 'hello' })
+  assert.deepEqual(unknown.args, ['hello'])
+})
+
 test('parseSeedPayload converts relay-discover-report/v1 into tasks and multi-option cases', () => {
   const seeds = parseSeedPayload({
     schema: 'relay-discover-report/v1',

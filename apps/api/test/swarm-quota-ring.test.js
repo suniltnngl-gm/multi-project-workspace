@@ -245,6 +245,30 @@ test('gemini-api rotation persists across restarts so windows spread instead of 
   }
 })
 
+test('cline/vibe/codex pools are registered and admitted deterministically (#205)', () => {
+  // Registration is what makes loadPoolBudgets / selectSlot see these siblings and
+  // recordPoolCall attribute their 5h calls (sibling-validation matrix, 2026-11-24).
+  assert.equal(poolForSibling('cline'), 'cline-free')
+  assert.equal(poolForSibling('vibe'), 'mistral-vibe')
+  assert.equal(poolForSibling('codex'), 'codex-exec')
+
+  const budgets = loadPoolBudgets({ countCalls: () => 0, quota: {}, conservePools: [] })
+  for (const pool of ['cline-free', 'mistral-vibe', 'codex-exec']) {
+    assert.ok(budgets[pool], `missing budget row for ${pool}`)
+    assert.equal(budgets[pool].eligible, true)
+    assert.equal(budgets[pool].conserve, false)
+    assert.equal(budgets[pool].cap, null)
+    assert.equal(budgets[pool].reason, 'admitted')
+  }
+
+  const ring = ['hermes', 'cline', 'vibe', 'codex']
+  const a = selectSlot({ ring, windowIndex: 1, budgets })
+  const b = selectSlot({ ring, windowIndex: 1, budgets })
+  assert.deepEqual(a, b)
+  assert.equal(a.sibling, 'cline')
+  assert.equal(a.pool, 'cline-free')
+})
+
 test('conservePools/POOL_POLICY admission stays deterministic while gemini-api rotation advances', () => {
   const ring = ['hermes', 'gemini-api', 'agy']
   const budgets = loadPoolBudgets({

@@ -41,7 +41,10 @@ export const DEFAULT_SIBLING_POOL = Object.freeze({
   agy: 'agy-gemini',
   copilot: 'github-copilot',
   local: 'local-llama-cpp',
-  guest: 'github-copilot'
+  guest: 'github-copilot',
+  cline: 'cline-free',
+  vibe: 'mistral-vibe',
+  codex: 'codex-exec'
 })
 
 /**
@@ -58,7 +61,12 @@ export const POOL_POLICY = Object.freeze({
   'gemini-api-key': { cap5h: null, limitKnown: true, dailyLimit: 50 },
   'opencode-tidepool-free': { cap5h: null, limitKnown: true, dailyLimit: 100 },
   'nous-hermes-free': { cap5h: null, limitKnown: false },
-  'local-llama-cpp': { cap5h: null, limitKnown: false }
+  'local-llama-cpp': { cap5h: null, limitKnown: false },
+  // Added in #205 after live headless validation (sibling-validation matrix, 2026-11-24):
+  // each CLI's own provider quota is not surfaced by our tooling, so no artificial cap.
+  'cline-free': { cap5h: null, limitKnown: false },
+  'mistral-vibe': { cap5h: null, limitKnown: false },
+  'codex-exec': { cap5h: null, limitKnown: false }
 })
 
 /**

@@ -57,7 +57,7 @@ export const DEFAULT_STALL_KILL_SEC = 0
 export const DEFAULT_REPORT_DIR = join(homedir(), '.local/state/curl-ai-bridge/reports')
 
 /** Sibling CLIs that accept an explicit `--model` flag. */
-const MODEL_FLAG_CLIS = new Set(['hermes', 'opencode', 'agy', 'gemini-api'])
+const MODEL_FLAG_CLIS = new Set(['hermes', 'opencode', 'agy', 'gemini-api', 'codex'])
 
 /**
  * Classify one window's outcome. A sibling that exits 0 without writing its findings
@@ -453,10 +453,18 @@ function envBinName(sibling) {
  * Resolve the argv for a sibling CLI. `opencode` is pinned to `run --standalone`
  * (never `serve`, per workspace hard rules). Unknown siblings fall back to a
  * same-named binary. Override with SWARM_RELAY_<SIBLING>_BIN.
- * `model` is appended only for CLIs that accept `--model`.
+ *
+ * `cline`/`vibe`/`codex` use the headless shapes measured live on 2026-11-24
+ * (#205): a bare `vibe <prompt>` / `codex <prompt>` starts an interactive UI and
+ * hangs the window, and cline defaults to yolo auto-approve, so read-only jobs
+ * must ask for plan/ask/read-only explicitly. `model` is appended only for CLIs
+ * that accept it (and codex spells it `-m`).
  */
-export function buildSiblingCommand(sibling, { prompt, model = null }) {
+const MODEL_FLAG = Object.freeze({ __default: '--model', codex: '-m' })
+
+export function buildSiblingCommand(sibling, { prompt, model = null, cwd = null, readOnly = true } = {}) {
   const override = process.env[envBinName(sibling)]
+  const workdir = cwd || process.cwd()
   let base
   if (override && override.trim()) base = override.trim().split(/\s+/)
   else if (sibling === 'hermes') base = ['hermes', '-z']
@@ -467,6 +475,9 @@ export function buildSiblingCommand(sibling, { prompt, model = null }) {
   else if (sibling === 'copilot') base = ['copilot', '-p']
   else if (sibling === 'gemini-api') base = ['gemini-api', 'generate']
   else if (sibling === 'agy') base = ['agy', '-p']
+  else if (sibling === 'cline') base = ['cline', '--cwd', workdir, '--json', ...(readOnly ? ['--plan'] : ['--yolo'])]
+  else if (sibling === 'vibe') base = ['vibe', '--workdir', workdir, '--output', 'json', ...(readOnly ? ['--agent', 'ask'] : ['--trust']), '-p']
+  else if (sibling === 'codex') base = ['codex', 'exec', ...(readOnly ? ['--sandbox', 'read-only'] : [])]
   else base = [sibling]
 
   if (base[0] === 'opencode') {
@@ -476,7 +487,7 @@ export function buildSiblingCommand(sibling, { prompt, model = null }) {
     base = base.filter((token) => token !== 'serve')
   }
   const args = [...base.slice(1)]
-  if (model && MODEL_FLAG_CLIS.has(sibling)) args.push('--model', String(model))
+  if (model && MODEL_FLAG_CLIS.has(sibling)) args.push(MODEL_FLAG[sibling] || MODEL_FLAG.__default, String(model))
   args.push(prompt)
   return { command: base[0], args }
 }
@@ -858,7 +869,10 @@ export async function runRelay(argv) {
         : ''
     })
 
-    const { command, args } = buildSiblingCommand(choice.sibling, { prompt, model: choice.model })
+    // Read-only jobs (discover/review) must get the headless read-only flag set;
+    // build/fix/publish windows opt into the CLI's write mode explicitly (#205).
+    const readOnlyWindow = assignment.job === 'discover' || assignment.job === 'review'
+    const { command, args } = buildSiblingCommand(choice.sibling, { prompt, model: choice.model, cwd, readOnly: readOnlyWindow })
     // Defense in depth: a publish sibling that self-invokes `swarm checkpoint` is bound
     // to this round's ACCEPT artifact; on a REJECT window no path is exported.
     const roundVerdictPath = roundVerdictPaths.get(assignment.round) || null
