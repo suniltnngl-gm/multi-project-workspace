@@ -1,7 +1,17 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { buildRelayPlan } from '../../../scripts/swarm-relay.mjs'
 import { loadPoolBudgets, selectSlot, evaluateCopilotMonthly, resolveRing, poolForSibling, readLiveSqliteQuota, guestFallbackCandidates } from '../../../scripts/swarm-quota-ring.mjs'
+import {
+  GEMINI_API_ROTATION_MODELS,
+  advanceGeminiApiRotation,
+  alternateModelForPrimary,
+  primaryModelAtIndex,
+  readRotationState
+} from '../../../scripts/swarm-gemini-rotation.mjs'
 
 test('loadPoolBudgets excludes capped, weekly-exhausted and unknown-limit pools honestly', () => {
   const budgets = loadPoolBudgets({
@@ -186,4 +196,89 @@ test('readLiveSqliteQuota loads live weeklyRemainingPct and conservePools from w
   // agy-gemini is ~16.65% weekly and aheadOfPace -> conserve=true
   assert.ok(budgets['agy-gemini'].weeklyRemainingPct < 50)
   assert.equal(budgets['agy-gemini'].conserve, true)
+})
+
+test('gemini-api rotation roster is the four-model Free-tier cycle with a deterministic single alternate', () => {
+  assert.deepEqual([...GEMINI_API_ROTATION_MODELS], [
+    'gemini-3.8-flash',
+    'gemini-2.5-flash',
+    'gemini-3.5-flash-lite',
+    'gemma-4-31b-it'
+  ])
+  const seq = Array.from({ length: 6 }, (_, i) => primaryModelAtIndex(i))
+  assert.deepEqual(seq, [
+    'gemini-3.8-flash',
+    'gemini-2.5-flash',
+    'gemini-3.5-flash-lite',
+    'gemma-4-31b-it',
+    'gemini-3.8-flash',
+    'gemini-2.5-flash'
+  ])
+  assert.equal(alternateModelForPrimary('gemini-3.8-flash'), 'gemini-2.5-flash')
+  assert.equal(alternateModelForPrimary('gemini-3.5-flash-lite'), 'gemma-4-31b-it')
+  // The single retry wraps around the roster; it never repeats the failed primary.
+  assert.equal(alternateModelForPrimary('gemma-4-31b-it'), 'gemini-3.8-flash')
+})
+
+test('gemini-api rotation persists across restarts so windows spread instead of piling on model #1', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gemini-rotation-'))
+  try {
+    const picks = []
+    for (let i = 0; i < 4; i += 1) picks.push(advanceGeminiApiRotation(dir).primaryModel)
+    assert.deepEqual(picks, [
+      'gemini-3.8-flash',
+      'gemini-2.5-flash',
+      'gemini-3.5-flash-lite',
+      'gemma-4-31b-it'
+    ])
+    const state = readRotationState(dir)
+    assert.equal(state.schema, 'gemini-model-rotation/v1')
+    assert.equal(state.counter, 4)
+    // A fresh process (restart) continues from the persisted counter...
+    assert.equal(advanceGeminiApiRotation(dir).primaryModel, 'gemini-3.8-flash')
+    // ...and a corrupt/missing ledger fails open to a fresh start, never throwing.
+    writeFileSync(join(dir, 'gemini-model-rotation.json'), '{oops\n')
+    assert.equal(readRotationState(dir), null)
+    assert.equal(advanceGeminiApiRotation(dir).primaryModel, 'gemini-3.8-flash')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('conservePools/POOL_POLICY admission stays deterministic while gemini-api rotation advances', () => {
+  const ring = ['hermes', 'gemini-api', 'agy']
+  const budgets = loadPoolBudgets({
+    countCalls: (pool) => (pool === 'github-copilot' ? 1 : 0),
+    quota: { 'agy-claude-gpt': { weeklyRemainingPct: 0 }, 'gemini-api-key': { weeklyRemainingPct: 100 } },
+    conservePools: ['agy-gemini']
+  })
+  assert.equal(budgets['agy-gemini'].conserve, true)
+  assert.equal(budgets['github-copilot'].cap, 1)
+
+  // Relay composition: admission first, then rotation for whichever gemini-api window
+  // is actually admitted (the counter advances once per admitted gemini-api window).
+  const compose = (startCounter) => {
+    let rotation = startCounter
+    return [0, 1, 2].map((windowIndex) => {
+      const choice = selectSlot({ ring, windowIndex, budgets })
+      if (!choice.admitted) return { sibling: choice.sibling, model: null, reason: choice.reason }
+      if (choice.sibling !== 'gemini-api') return { sibling: choice.sibling, model: null, reason: choice.reason }
+      const model = primaryModelAtIndex(rotation)
+      rotation += 1
+      return { sibling: 'gemini-api', model, reason: choice.reason }
+    })
+  }
+
+  const runA = compose(0)
+  const runB = compose(0)
+  assert.deepEqual(runA, runB)
+  // agy is CONSERVE-excluded (no --allow-conserve): W3 substitutes the next admitted sibling.
+  assert.deepEqual(runA.map((a) => a.sibling), ['hermes', 'gemini-api', 'hermes'])
+  assert.equal(runA[2].reason, 'substitute_for:agy')
+
+  // Rotation offset shifts only the gemini-api models; admission itself is unchanged.
+  const shifted = compose(1)
+  assert.deepEqual(shifted.map((a) => a.sibling), runA.map((a) => a.sibling))
+  assert.equal(runA[1].model, 'gemini-3.8-flash')
+  assert.equal(shifted[1].model, 'gemini-2.5-flash')
 })

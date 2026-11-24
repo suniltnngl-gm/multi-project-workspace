@@ -493,3 +493,266 @@ test('W3 build brief pins the requested board task and is injected into the buil
   assert.match(prompt, /#191 /)
   assert.match(prompt, /smallest verified fix set/)
 })
+
+// --- gemini-api 1-hop model rotation (#203) ------------------------------------------
+
+function writeFakeGeminiApi(binPath) {
+  writeFileSync(binPath, [
+    'import { appendFileSync, mkdirSync, writeFileSync } from "node:fs"',
+    'import { dirname } from "node:path"',
+    'const args = process.argv.slice(2)',
+    'const mi = args.indexOf("--model")',
+    'const model = mi >= 0 ? args[mi + 1] : null',
+    'appendFileSync(process.env.FAKE_GEMINI_LOG, `${JSON.stringify({ model })}\\n`)',
+    'const mode = process.env.FAKE_GEMINI_MODE || "ok"',
+    'const fail = mode === "fail_always" || (mode === "fail_primary_only" && model === process.env.FAKE_GEMINI_PRIMARY)',
+    'if (!fail && process.env.FAKE_WRITE_FINDINGS === "1") {',
+    '  const prompt = args[args.length - 1] || ""',
+    '  const m = prompt.match(/(\\/([^\\s"]+)-findings\\.json)/)',
+    '  if (m) { mkdirSync(dirname(m[1]), { recursive: true }); writeFileSync(m[1], "{}\\n") }',
+    '}',
+    'process.exit(fail ? 1 : 0)'
+  ].join('\n'))
+}
+
+function writeFakeHermes(binPath) {
+  writeFileSync(binPath, [
+    'import { mkdirSync, writeFileSync } from "node:fs"',
+    'import { dirname } from "node:path"',
+    'const prompt = process.argv[process.argv.length - 1] || ""',
+    'if (process.env.FAKE_WRITE_FINDINGS === "1") {',
+    '  const m = prompt.match(/(\\/([^\\s"]+)-findings\\.json)/)',
+    '  if (m) { mkdirSync(dirname(m[1]), { recursive: true }); writeFileSync(m[1], "{}\\\\n") }',
+    '}',
+    'process.exit(0)'
+  ].join('\n'))
+}
+
+function readLedgerRows(home) {
+  const file = join(home, '.local/state/curl-ai-bridge/overnight/pool-calls-5h.jsonl')
+  if (!existsSync(file)) return []
+  return readFileSync(file, 'utf8').trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
+}
+
+function runRelayExecute({ scriptPath, home, reports, ring, siblings, windows, extraEnv = {}, quotaStatus = null }) {
+  const args = [
+    '--mode', 'discover',
+    '--siblings', siblings.join(','),
+    '--windows', String(windows),
+    '--execute',
+    '--report-dir', reports,
+    '--ring-state-dir', ring,
+    '--json'
+  ]
+  if (quotaStatus) args.push('--quota-status', quotaStatus)
+  return JSON.parse(execFileSync(process.execPath, [scriptPath, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, HOME: home, ...extraEnv }
+  }))
+}
+
+test('execute: gemini-api primary failure retries exactly one rotated alternate and records telemetry in report + ledger', () => {
+  const root = mkdtempSync(join(tmpdir(), 'relay-gemini-retry-'))
+  const scriptPath = resolve(new URL('../../../scripts/swarm-relay.mjs', import.meta.url).pathname)
+  try {
+    const home = join(root, 'home')
+    const reports = join(root, 'reports')
+    const ring = join(root, 'ring')
+    mkdirSync(home, { recursive: true })
+    const geminiBin = join(root, 'fake-gemini.mjs')
+    const hermesBin = join(root, 'fake-hermes.mjs')
+    writeFakeGeminiApi(geminiBin)
+    writeFakeHermes(hermesBin)
+    const log = join(root, 'gemini-calls.jsonl')
+    const quota = join(root, 'quota.json')
+    writeFileSync(quota, JSON.stringify({ pools: {}, conservePools: [] }))
+
+    const out = runRelayExecute({
+      scriptPath, home, reports, ring, siblings: ['gemini-api'], windows: 1, quotaStatus: quota,
+      extraEnv: {
+        SWARM_RELAY_GEMINI_API_BIN: `${process.execPath} ${geminiBin}`,
+        SWARM_RELAY_HERMES_BIN: `${process.execPath} ${hermesBin}`,
+        FAKE_GEMINI_LOG: log,
+        FAKE_GEMINI_MODE: 'fail_primary_only',
+        FAKE_GEMINI_PRIMARY: 'gemini-3.8-flash',
+        FAKE_WRITE_FINDINGS: '1'
+      }
+    })
+
+    assert.equal(out.ok, true)
+    const w = out.windows[0]
+    assert.equal(w.sibling, 'gemini-api')
+    assert.equal(w.primaryModel, 'gemini-3.8-flash')
+    assert.equal(w.answeredModel, 'gemini-2.5-flash')
+    assert.equal(w.status, 'ok_after_model_retry')
+    assert.deepEqual(w.attemptedModels.map((a) => a.model), ['gemini-3.8-flash', 'gemini-2.5-flash'])
+    assert.equal(w.attemptedModels[0].status, 'exit_1')
+    assert.equal(w.attemptedModels[0].exitCode, 1)
+    assert.equal(w.attemptedModels[1].status, 'ok')
+
+    // Exactly two gemini-api calls (primary + one alternate); no hermes failover.
+    const calls = readFileSync(log, 'utf8').trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
+    assert.deepEqual(calls.map((c) => c.model), ['gemini-3.8-flash', 'gemini-2.5-flash'])
+
+    // Ledger: one row per real CLI call, cumulative telemetry on each row.
+    const ledger = readLedgerRows(home)
+    assert.equal(ledger.length, 2)
+    assert.equal(ledger[0].quotaPool, 'gemini-api-key')
+    assert.equal(ledger[0].status, 'exit_1')
+    assert.equal(ledger[0].primaryModel, 'gemini-3.8-flash')
+    assert.equal(ledger[0].answeredModel, null)
+    assert.equal(ledger[0].attemptedModels.length, 1)
+    assert.equal(ledger[1].status, 'ok')
+    assert.equal(ledger[1].answeredModel, 'gemini-2.5-flash')
+    assert.equal(ledger[1].attemptedModels.length, 2)
+
+    // Window report carries the same telemetry.
+    const report = JSON.parse(readFileSync(join(reports, 'relay-discover-r1-w1-gemini-api.json'), 'utf8'))
+    assert.equal(report.primaryModel, 'gemini-3.8-flash')
+    assert.equal(report.answeredModel, 'gemini-2.5-flash')
+    assert.equal(report.attemptedModels.length, 2)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('execute: gemini-api primary + alternate both failing fails over to hermes without a dead window', () => {
+  const root = mkdtempSync(join(tmpdir(), 'relay-gemini-failover-'))
+  const scriptPath = resolve(new URL('../../../scripts/swarm-relay.mjs', import.meta.url).pathname)
+  try {
+    const home = join(root, 'home')
+    const reports = join(root, 'reports')
+    const ring = join(root, 'ring')
+    mkdirSync(home, { recursive: true })
+    const geminiBin = join(root, 'fake-gemini.mjs')
+    const hermesBin = join(root, 'fake-hermes.mjs')
+    writeFakeGeminiApi(geminiBin)
+    writeFakeHermes(hermesBin)
+    const log = join(root, 'gemini-calls.jsonl')
+    const quota = join(root, 'quota.json')
+    writeFileSync(quota, JSON.stringify({ pools: {}, conservePools: [] }))
+
+    const out = runRelayExecute({
+      scriptPath, home, reports, ring, siblings: ['gemini-api'], windows: 1, quotaStatus: quota,
+      extraEnv: {
+        SWARM_RELAY_GEMINI_API_BIN: `${process.execPath} ${geminiBin}`,
+        SWARM_RELAY_HERMES_BIN: `${process.execPath} ${hermesBin}`,
+        FAKE_GEMINI_LOG: log,
+        FAKE_GEMINI_MODE: 'fail_always',
+        FAKE_WRITE_FINDINGS: '1'
+      }
+    })
+
+    // Window is not dead: hermes answers, the run completes successfully.
+    assert.equal(out.ok, true)
+    assert.equal(out.stopReason, 'completed')
+    const w = out.windows[0]
+    assert.equal(w.status, 'ok_after_failover')
+    assert.equal(w.failover.fallbackSibling, 'hermes')
+    assert.equal(w.failover.status, 'ok')
+    assert.equal(w.answeredModel, null)
+    assert.deepEqual(w.attemptedModels.map((a) => a.model), ['gemini-3.8-flash', 'gemini-2.5-flash'])
+    assert.equal(w.attemptedModels[0].status, 'exit_1')
+    assert.equal(w.attemptedModels[1].status, 'exit_1')
+
+    const ledger = readLedgerRows(home)
+    assert.equal(ledger.length, 3)
+    assert.equal(ledger[0].quotaPool, 'gemini-api-key')
+    assert.equal(ledger[0].status, 'exit_1')
+    assert.equal(ledger[1].quotaPool, 'gemini-api-key')
+    assert.equal(ledger[1].status, 'exit_1')
+    assert.equal(ledger[1].primaryModel, 'gemini-3.8-flash')
+    assert.equal(ledger[1].answeredModel, null)
+    assert.equal(ledger[2].quotaPool, 'nous-hermes-free')
+    assert.equal(ledger[2].status, 'ok')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('execute: gemini-api rotation continues across relay restarts instead of piling onto model #1', () => {
+  const root = mkdtempSync(join(tmpdir(), 'relay-gemini-restart-'))
+  const scriptPath = resolve(new URL('../../../scripts/swarm-relay.mjs', import.meta.url).pathname)
+  try {
+    const home = join(root, 'home')
+    const reports = join(root, 'reports')
+    const ring = join(root, 'ring')
+    mkdirSync(home, { recursive: true })
+    const geminiBin = join(root, 'fake-gemini.mjs')
+    writeFakeGeminiApi(geminiBin)
+    const log = join(root, 'gemini-calls.jsonl')
+    const quota = join(root, 'quota.json')
+    writeFileSync(quota, JSON.stringify({ pools: {}, conservePools: [] }))
+    const env = {
+      SWARM_RELAY_GEMINI_API_BIN: `${process.execPath} ${geminiBin}`,
+      FAKE_GEMINI_LOG: log,
+      FAKE_GEMINI_MODE: 'ok',
+      FAKE_WRITE_FINDINGS: '1'
+    }
+
+    // Run A (fresh rotation state): primaries #0 and #1.
+    const runA = runRelayExecute({ scriptPath, home, reports, ring, siblings: ['gemini-api'], windows: 2, extraEnv: env, quotaStatus: quota })
+    assert.deepEqual(runA.windows.map((w) => w.primaryModel), ['gemini-3.8-flash', 'gemini-2.5-flash'])
+
+    // Run B is a separate process reading the same durable rotation state: #2 and #3.
+    const runB = runRelayExecute({ scriptPath, home, reports, ring, siblings: ['gemini-api'], windows: 2, extraEnv: env, quotaStatus: quota })
+    assert.deepEqual(runB.windows.map((w) => w.primaryModel), ['gemini-3.5-flash-lite', 'gemma-4-31b-it'])
+    assert.deepEqual(runB.windows.map((w) => w.answeredModel), ['gemini-3.5-flash-lite', 'gemma-4-31b-it'])
+
+    const rotation = JSON.parse(readFileSync(join(home, '.local/state/curl-ai-bridge/overnight/gemini-model-rotation.json'), 'utf8'))
+    assert.equal(rotation.counter, 4)
+
+    const calls = readFileSync(log, 'utf8').trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
+    assert.deepEqual(calls.map((c) => c.model), [
+      'gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-3.5-flash-lite', 'gemma-4-31b-it'
+    ])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('execute: CONSERVE admission substitutes deterministically while admitted gemini-api windows still rotate', () => {
+  const root = mkdtempSync(join(tmpdir(), 'relay-gemini-conserve-'))
+  const scriptPath = resolve(new URL('../../../scripts/swarm-relay.mjs', import.meta.url).pathname)
+  try {
+    const home = join(root, 'home')
+    const reports = join(root, 'reports')
+    const ring = join(root, 'ring')
+    mkdirSync(home, { recursive: true })
+    const geminiBin = join(root, 'fake-gemini.mjs')
+    const hermesBin = join(root, 'fake-hermes.mjs')
+    writeFakeGeminiApi(geminiBin)
+    writeFakeHermes(hermesBin)
+    const quota = join(root, 'quota.json')
+    writeFileSync(quota, JSON.stringify({
+      pools: {
+        'agy-gemini': { weeklyRemainingPct: 60 },
+        'nous-hermes-free': { weeklyRemainingPct: 100 },
+        'gemini-api-key': { weeklyRemainingPct: 100 }
+      },
+      conservePools: ['agy-gemini']
+    }))
+    const env = {
+      SWARM_RELAY_GEMINI_API_BIN: `${process.execPath} ${geminiBin}`,
+      SWARM_RELAY_HERMES_BIN: `${process.execPath} ${hermesBin}`,
+      FAKE_GEMINI_LOG: join(root, 'gemini-calls.jsonl'),
+      FAKE_GEMINI_MODE: 'ok',
+      FAKE_WRITE_FINDINGS: '1'
+    }
+
+    const out = runRelayExecute({
+      scriptPath, home, reports, ring,
+      siblings: ['hermes', 'agy', 'gemini-api'], windows: 3,
+      extraEnv: env, quotaStatus: quota
+    })
+    // agy is CONSERVE-excluded: W2 substitutes gemini-api, W3 keeps gemini-api.
+    assert.deepEqual(out.windows.map((w) => w.sibling), ['hermes', 'gemini-api', 'gemini-api'])
+    assert.equal(out.windows[0].model, null)
+    // Rotation advances once per admitted gemini-api window, independent of substitution.
+    assert.equal(out.windows[1].primaryModel, 'gemini-3.8-flash')
+    assert.equal(out.windows[2].primaryModel, 'gemini-2.5-flash')
+    assert.deepEqual(out.windows.map((w) => w.answeredModel), [null, 'gemini-3.8-flash', 'gemini-2.5-flash'])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})

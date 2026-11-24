@@ -24,14 +24,15 @@ export function killSwitchPath(stateDir) {
   return join(stateDir, 'STOP_SWARM')
 }
 
-export function recordPoolCall(stateDir, { quotaPool, taskId = null, status = 'ok', nowMs = Date.now() }) {
+export function recordPoolCall(stateDir, { quotaPool, taskId = null, status = 'ok', nowMs = Date.now(), ...telemetry }) {
   mkdirSync(stateDir, { recursive: true, mode: 0o700 })
   const entry = {
     quotaPool: String(quotaPool || 'unknown'),
     taskId,
     status,
     atMs: nowMs,
-    at: new Date(nowMs).toISOString()
+    at: new Date(nowMs).toISOString(),
+    ...telemetry
   }
   appendFileSync(ledgerPath(stateDir), `${JSON.stringify(entry)}\n`, { encoding: 'utf8', mode: 0o600 })
   return entry

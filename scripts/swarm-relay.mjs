@@ -45,6 +45,7 @@ import {
   createRingState,
   writeRingState
 } from './swarm-ring-state.mjs'
+import { advanceGeminiApiRotation, alternateModelForPrimary } from './swarm-gemini-rotation.mjs'
 
 export const RELAY_MODES = ['discover', 'fix', 'pipeline', 'case-solve', 'build', 'review', 'publish']
 export const DEFAULT_SIBLINGS = ['hermes', 'direct']
@@ -73,7 +74,7 @@ export function resolveWindowStatus({ error = null, stallKilled = false, exitCod
 
 /** Statuses that count as a successful relay window for the summary verdict. */
 export function isSuccessfulWindowStatus(status) {
-  return status === 'ok' || status === 'ok_no_findings' || status === 'ok_after_failover'
+  return status === 'ok' || status === 'ok_no_findings' || status === 'ok_after_failover' || status === 'ok_after_model_retry'
 }
 
 /**
@@ -804,6 +805,15 @@ export async function runRelay(argv) {
       maxConserveWindows: nonNegativeInt(opts.maxConserveWindows, DEFAULT_MAX_CONSERVE_WINDOWS, 'maxConserveWindows'),
       conserveWindowsUsed
     })
+    // gemini-api primary model: durable per-window round-robin across the Free-tier
+    // roster. Persisted in stateDir so restarts continue the cycle (no pile-up on
+    // model #1) and the provider's ~200 req/day budget spreads evenly. An explicit
+    // --model-map gemini-api=<model> still wins.
+    let rotation = null
+    if (choice.admitted && choice.sibling === 'gemini-api' && !plan.modelMap['gemini-api']) {
+      rotation = advanceGeminiApiRotation(stateDir)
+      choice.model = rotation.primaryModel
+    }
     if (choice.conserve) conserveWindowsUsed = choice.conserveWindowsUsed
     if (!choice.admitted) {
       windows.push({
@@ -856,6 +866,21 @@ export async function runRelay(argv) {
       ? { SWARM_GATE_VERDICT_PATH: roundVerdictPath, SWARM_WINDOW_ID: `r${assignment.round}-w${assignment.window}` }
       : {}
     const maxSubTurns = positiveInt(opts.subTurns, 1, 'subTurns')
+    const childEnvBase = {
+      ...process.env,
+      ...windowPolicyEnv(assignment.job),
+      ...gateEnv,
+      SWARM_RELAY_WINDOW: String(assignment.window),
+      SWARM_RELAY_MODE: plan.mode,
+      SWARM_RELAY_JOB: assignment.job,
+      SWARM_RELAY_WINDOW_INDEX: String(index),
+      SWARM_RELAY_ROUND: String(assignment.round),
+      SWARM_RELAY_SLOT: assignment.siblingSlot,
+      SWARM_RELAY_PARENT_SLOT: assignment.parentSlot || '',
+      SWARM_RELAY_WINDOW_SEC: String(plan.softWindowSec),
+      SWARM_RELAY_DEADLINE_AT: new Date(deadlineMs).toISOString(),
+      SWARM_WINDOW_DEADLINE_MS: String(deadlineMs)
+    }
     let res = null
     let subTurnsExecuted = 0
     let subTurnsStoppedByBudget = false
@@ -871,22 +896,7 @@ export async function runRelay(argv) {
       res = await runChild({
         command, args, cwd, stallKillSec: opts.stallKillSec, windowStartMs,
         horizonDeadlineMs: opts.clampToHorizon ? horizonDeadlineMs : null,
-        env: {
-          ...process.env,
-          ...windowPolicyEnv(assignment.job),
-          ...gateEnv,
-          SWARM_RELAY_WINDOW: String(assignment.window),
-          SWARM_RELAY_MODE: plan.mode,
-          SWARM_RELAY_JOB: assignment.job,
-          SWARM_RELAY_WINDOW_INDEX: String(index),
-          SWARM_RELAY_ROUND: String(assignment.round),
-          SWARM_RELAY_SLOT: assignment.siblingSlot,
-          SWARM_RELAY_PARENT_SLOT: assignment.parentSlot || '',
-          SWARM_RELAY_WINDOW_SEC: String(plan.softWindowSec),
-          SWARM_RELAY_DEADLINE_AT: new Date(deadlineMs).toISOString(),
-          SWARM_WINDOW_DEADLINE_MS: String(deadlineMs),
-          SWARM_RELAY_SUB_TURN: String(subTurn)
-        }
+        env: { ...childEnvBase, SWARM_RELAY_SUB_TURN: String(subTurn) }
       })
       if (res.error || res.status !== 0) break
     }
@@ -1004,17 +1014,82 @@ export async function runRelay(argv) {
     cumulativeDriftMs += windowDriftMs
     lastWindowDriftMs = windowDriftMs
 
-    // Quota ledger: one call against the pool actually used.
-    if (choice.pool) {
-      recordPoolCall(stateDir, { quotaPool: choice.pool, taskId: `relay-w${assignment.window}`, status: entry.status === 'ok' ? 'ok' : `exit_${exitCode ?? 'null'}` })
+    // Model telemetry + quota ledger: one row per real CLI attempt against the pool used.
+    const windowTelemetry = {
+      primaryModel: rotation ? rotation.primaryModel : (choice.model || null),
+      attemptedModels: [],
+      answeredModel: null
+    }
+    const recordAttempt = ({ model, status, exitCode = null, signal = null, error = null }) => {
+      const attempt = { model: model ?? null, status, exitCode: exitCode ?? null, signal: signal ?? null }
+      if (error) attempt.error = String(error)
+      windowTelemetry.attemptedModels.push(attempt)
+      if (choice.pool) {
+        recordPoolCall(stateDir, {
+          quotaPool: choice.pool,
+          taskId: `relay-w${assignment.window}`,
+          status,
+          primaryModel: windowTelemetry.primaryModel,
+          attemptedModels: windowTelemetry.attemptedModels.map((a) => ({ ...a })),
+          answeredModel: windowTelemetry.answeredModel
+        })
+      }
+    }
+    const flushWindowReport = () => {
+      Object.assign(entry, windowTelemetry)
+      writeReport(assignment.reportPath, { ...entry, mode: plan.mode, noHardKill: true })
     }
 
-    if (res.error && res.error.code === 'ENOENT') {
-      // Missing CLI: account the skipped pool call, then keep relaying.
-      recordPoolCall(stateDir, { quotaPool: choice.pool, taskId: `relay-w${assignment.window}`, status: 'missing_cli' })
+    if (exitCode === 0) {
+      windowTelemetry.answeredModel = choice.model || null
+      recordAttempt({ model: choice.model, status: 'ok', exitCode: 0, signal: res.signal || null })
+      flushWindowReport()
+    } else if (res.error && res.error.code === 'ENOENT') {
+      // Missing CLI: account the skipped call once, then keep relaying.
+      recordAttempt({ model: choice.model, status: 'missing_cli', exitCode, signal: res.signal || null, error: res.error.code })
+      flushWindowReport()
       continue
-    }
-    if (exitCode !== 0) {
+    } else {
+      // Failed primary attempt (CLI_OUTCOME_FAILED / non-zero exit).
+      recordAttempt({
+        model: choice.model,
+        status: `exit_${exitCode ?? 'null'}`,
+        exitCode,
+        signal: res.signal || null,
+        error: res.error ? String(res.error.code || res.error.message) : null
+      })
+
+      // Exactly ONE alternate gemini-api model per window, then straight to hermes.
+      if (choice.sibling === 'gemini-api') {
+        const altModel = rotation ? rotation.alternateModel : alternateModelForPrimary(choice.model)
+        const altCmd = buildSiblingCommand('gemini-api', { prompt, model: altModel })
+        const altRes = await runChild({
+          command: altCmd.command, args: altCmd.args, cwd, stallKillSec: opts.stallKillSec, windowStartMs: Date.now(),
+          horizonDeadlineMs: opts.clampToHorizon ? horizonDeadlineMs : null,
+          env: { ...childEnvBase }
+        })
+        const altCode = typeof altRes.status === 'number' ? altRes.status : null
+        if (!altRes.error && altCode === 0) {
+          windowTelemetry.answeredModel = altModel
+          recordAttempt({ model: altModel, status: 'ok', exitCode: 0, signal: altRes.signal || null })
+          entry.status = 'ok_after_model_retry'
+          entry.modelRetry = {
+            primaryModel: windowTelemetry.primaryModel,
+            alternateModel: altModel,
+            attempts: windowTelemetry.attemptedModels.map((a) => ({ ...a }))
+          }
+          flushWindowReport()
+          continue
+        }
+        recordAttempt({
+          model: altModel,
+          status: `exit_${altCode ?? 'null'}`,
+          exitCode: altCode,
+          signal: altRes.signal || null,
+          error: altRes.error ? String(altRes.error.code || altRes.error.message) : null
+        })
+      }
+
       // Self-healing failover: retry once with an alternate $0 sibling (hermes or direct)
       const fallbackSibling = choice.sibling === 'hermes' ? 'direct' : 'hermes'
       const fbPool = poolForSibling(fallbackSibling)
@@ -1023,7 +1098,7 @@ export async function runRelay(argv) {
       const fbRes = await runChild({
         command: fbCmd.command, args: fbCmd.args, cwd, stallKillSec: opts.stallKillSec, windowStartMs: fbStartMs,
         horizonDeadlineMs: opts.clampToHorizon ? horizonDeadlineMs : null,
-        env: { ...process.env, ...windowPolicyEnv(assignment.job), ...gateEnv, SWARM_RELAY_WINDOW: String(assignment.window), SWARM_RELAY_MODE: plan.mode, SWARM_RELAY_FALLBACK_FROM: choice.sibling }
+        env: { ...childEnvBase, SWARM_RELAY_FALLBACK_FROM: choice.sibling }
       })
       const fbCode = typeof fbRes.status === 'number' ? fbRes.status : null
       // Account the call against the pool that actually ran, and attribute the slot to it.
@@ -1048,10 +1123,11 @@ export async function runRelay(argv) {
       }
       if (entry.failover.status === 'ok') {
         entry.status = 'ok_after_failover'
-        writeReport(assignment.reportPath, { ...entry, mode: plan.mode, noHardKill: true })
+        flushWindowReport()
         continue
       }
       stopReason = 'sibling_failed'
+      flushWindowReport()
     }
   }
 
