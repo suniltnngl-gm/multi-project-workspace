@@ -1182,6 +1182,14 @@ async function dispatch(argv) {
       )
       break
     }
+    case 'bootstrap': {
+      // SWARM-PORTABLE-001: idempotent state-tree init + entrypoint/readiness check.
+      const { bootstrapPortable } = await import('./swarm-bootstrap.mjs')
+      const boot = bootstrapPortable({ repoDir: process.cwd(), log })
+      if (process.argv.includes('--json')) log(JSON.stringify(boot, null, 2))
+      if (!boot.ok) fail(`bootstrap --portable incomplete (stateRoot=${boot.stateRoot})`, 1)
+      break
+    }
     case 'task': {
       const subcommand = rest[0] ?? ''
       if (subcommand === 'create') return taskCreate(rest.slice(1))

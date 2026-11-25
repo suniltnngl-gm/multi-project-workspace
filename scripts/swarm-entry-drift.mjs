@@ -8,7 +8,7 @@
  *
  * Usage: node scripts/swarm-entry-drift.mjs [--json]
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, lstatSync, readlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -34,9 +34,22 @@ export function checkEntrySwarmSync({ repoDir = process.cwd(), entryPath = null 
   } catch {
     same = false
   }
+  // SWARM-PORTABLE-001: a relative symlink to the versioned copy is the canonical form and
+  // cannot drift by construction; report that explicitly instead of assuming a regular file.
+  let symlink = false
+  let symlinkTarget = null
+  try {
+    const st = lstatSync(entry)
+    symlink = st.isSymbolicLink()
+    if (symlink) symlinkTarget = resolve(entry, '..', readlinkSync(entry))
+  } catch {
+    symlink = false
+  }
   return {
     ok: same,
-    reason: same ? 'in_sync' : 'drift',
+    reason: same ? (symlink ? 'in_sync_symlink' : 'in_sync') : 'drift',
+    symlink,
+    symlinkTarget,
     repoCopy,
     entryPath: entry,
     // Resolve symlinks so ~/.local/bin/swarm -> entry/swarm reports the real file.
@@ -45,6 +58,7 @@ export function checkEntrySwarmSync({ repoDir = process.cwd(), entryPath = null 
 }
 
 export function formatDriftLine(result) {
+  if (result.ok && result.symlink) return `entrypointSync=in_sync (symlink -> ${result.symlinkTarget})`
   if (result.ok) return `entrypointSync=in_sync (${result.entryPath})`
   if (result.reason === 'repo_copy_missing') return `entrypointSync=UNKNOWN (repo copy missing: ${result.repoCopy})`
   if (result.reason === 'entrypoint_not_found') return 'entrypointSync=UNKNOWN (no entry/swarm found)'

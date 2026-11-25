@@ -2,8 +2,11 @@
 set -euo pipefail
 
 MPW_DIR="${MPW_DIR:-$HOME/Code/multi-project-workspace}"
-STATE_ROOT="${SWARM_STATE_ROOT:-$HOME/.local/state/curl-ai-bridge}"
+# SWARM-PORTABLE-001: one env contract for every state path. SWARM_STATE_DIR wins so a
+# clone/container/CI runner never writes into the developer's real state tree.
+STATE_ROOT="${SWARM_STATE_DIR:-${SWARM_STATE_ROOT:-$HOME/.local/state/curl-ai-bridge}}"
 export MPW_DIR
+export SWARM_STATE_DIR="$STATE_ROOT"
 OVERNIGHT_DIR="$STATE_ROOT/overnight"
 STOP_FILE="$OVERNIGHT_DIR/STOP_SWARM"
 
