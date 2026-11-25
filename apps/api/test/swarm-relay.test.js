@@ -558,9 +558,16 @@ test('W3 build brief pins the requested board task and is injected into the buil
   assert.match(all, /## Board target\(s\)/)
   assert.ok(all.length <= 5000)
 
-  const pinned = buildBuildBrief({ repoDir: repoRoot, taskId: '191' })
-  assert.match(pinned, /#191 /)
-  assert.doesNotMatch(pinned, /#151 /)
+  // Pin whatever the board actually lists instead of a hardcoded task id: the old
+  // assertion on #191 broke the moment that (delivered) task was closed.
+  const listed = [...all.matchAll(/^#(\d+) /gm)].map((m) => m[1])
+  assert.ok(listed.length >= 2, `need >=2 in-progress board targets to prove pinning, got ${listed.length}`)
+  const pinnedId = listed[0]
+  const otherId = listed.find((id) => id !== pinnedId)
+
+  const pinned = buildBuildBrief({ repoDir: repoRoot, taskId: pinnedId })
+  assert.ok(pinned.includes(`#${pinnedId} `), `pinned task #${pinnedId} missing from brief`)
+  assert.ok(!pinned.includes(`#${otherId} `), `unpinned task #${otherId} leaked into a pinned brief`)
 
   const prompt = buildSiblingPrompt({
     mode: 'pipeline',
@@ -571,7 +578,7 @@ test('W3 build brief pins the requested board task and is injected into the buil
     reportPath: '/tmp/relay-build-findings.json',
     buildBrief: pinned
   })
-  assert.match(prompt, /#191 /)
+  assert.match(prompt, new RegExp(`#${pinnedId} `))
   assert.match(prompt, /smallest verified fix set/)
 })
 
