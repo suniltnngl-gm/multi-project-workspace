@@ -846,3 +846,87 @@ test('execute: CONSERVE admission substitutes deterministically while admitted g
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+// --- #207 stdout-fallback findings persistence ----------------------------------
+
+function runStdoutSibling({ stdout, extraEnv = {} }) {
+  const root = mkdtempSync(join(tmpdir(), 'relay-stdout-'))
+  const scriptPath = resolve(new URL('../../../scripts/swarm-relay.mjs', import.meta.url).pathname)
+  const home = join(root, 'home')
+  const reports = join(root, 'reports')
+  const ring = join(root, 'ring')
+  mkdirSync(home, { recursive: true })
+  const fakeBin = join(root, 'fake-stdout.mjs')
+  writeFileSync(fakeBin, [
+    'const out = process.env.FAKE_STDOUT || ""',
+    'process.stdout.write(out)'
+  ].join('\n'))
+  const res = spawnSync(
+    process.execPath,
+    [scriptPath, '--mode', 'discover', '--siblings', 'hermes', '--windows', '1', '--execute',
+      '--report-dir', reports, '--ring-state-dir', ring, '--json'],
+    { encoding: 'utf8', env: { ...process.env, HOME: home, SWARM_RELAY_HERMES_BIN: `${process.execPath} ${fakeBin}`, FAKE_STDOUT: stdout, ...extraEnv } }
+  )
+  return { res, root, reports, home }
+}
+
+test('#207 cline/vibe-style JSON stdout is persisted as a normalized finding', () => {
+  const { res, root } = runStdoutSibling({
+    stdout: JSON.stringify({ headline: 'found two issues', prioritized_work: [{ title: 'A' }, { title: 'B' }], multi_option_cases: [] })
+  })
+  try {
+    const out = JSON.parse(String(res.stdout))
+    assert.equal(out.ok, true)
+    assert.equal(out.windows[0].status, 'ok')
+    assert.equal(out.windows[0].findingsWritten, true)
+    assert.equal(out.windows[0].findingsFallback, 'stdout')
+    const doc = JSON.parse(readFileSync(out.windows[0].findingsPath, 'utf8'))
+    assert.equal(doc.schema, 'relay-findings-normalized/v1')
+    assert.equal(doc.format, 'json-envelope')
+    assert.equal(doc.findings.length, 2)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('#207 codex-style plain text stdout is captured verbatim', () => {
+  const { res, root } = runStdoutSibling({ stdout: '## Findings\n- thing one\n- thing two\n' })
+  try {
+    const out = JSON.parse(String(res.stdout))
+    assert.equal(out.windows[0].status, 'ok')
+    assert.equal(out.windows[0].findingsFallback, 'stdout')
+    const doc = JSON.parse(readFileSync(out.windows[0].findingsPath, 'utf8'))
+    assert.equal(doc.format, 'text')
+    assert.match(doc.body, /thing one/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('#207 empty stdout stays fail-closed (never disguised as findings)', () => {
+  const { res, root } = runStdoutSibling({ stdout: '   \n\t\n' })
+  try {
+    const out = JSON.parse(String(res.stdout))
+    assert.equal(out.windows[0].status, 'ok_no_findings')
+    assert.equal(out.windows[0].findingsWritten, false)
+    assert.equal(out.windows[0].findingsFallback, 'empty_stdout')
+    assert.equal(existsSync(out.windows[0].findingsPath), false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('#207 relay report/findings paths resolve through SWARM_STATE_DIR', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'relay-state-dir-'))
+  const prev = process.env.SWARM_STATE_DIR
+  try {
+    process.env.SWARM_STATE_DIR = dir
+    const plan = buildRelayPlan({ mode: 'discover', siblings: ['hermes'], windows: 1 })
+    assert.equal(plan.reportDir, join(dir, 'reports'))
+    assert.ok(plan.assignments[0].findingsPath.startsWith(join(dir, 'reports')))
+  } finally {
+    if (prev === undefined) delete process.env.SWARM_STATE_DIR
+    else process.env.SWARM_STATE_DIR = prev
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

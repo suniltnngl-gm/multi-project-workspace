@@ -54,6 +54,8 @@ import {
 } from './swarm-ring-state.mjs'
 import { advanceGeminiApiRotation, alternateModelForPrimary } from './swarm-gemini-rotation.mjs'
 import { preBuildGuard, applyReplanVerdict, applyRebuildVerdict } from '../apps/api/src/toolchain/dispatch/delivery-pipeline.js'
+import { normalizeStdoutFindings } from '../apps/api/src/toolchain/dispatch/findings-normalize.js'
+import { statePaths } from './swarm-state-paths.mjs'
 import { quarantineDirtyWorktree } from '../apps/api/src/toolchain/dispatch/worktree-quarantine.js'
 import { readWorkItem, writeWorkItem } from '../apps/api/src/toolchain/dispatch/work-item-registry.js'
 
@@ -65,6 +67,10 @@ export const DEFAULT_ROUNDS = 1
 export const DEFAULT_MAX_CONSERVE_WINDOWS = 1
 export const DEFAULT_STALL_KILL_SEC = 0
 export const DEFAULT_REPORT_DIR = join(homedir(), '.local/state/curl-ai-bridge/reports')
+/** #214/#207: the report root resolves through the single SWARM_STATE_DIR contract. */
+export function defaultReportDir(env = process.env) {
+  return statePaths(env).reportsDir
+}
 
 /** Sibling CLIs that accept an explicit `--model` flag. */
 const MODEL_FLAG_CLIS = new Set(['hermes', 'opencode', 'agy', 'gemini-api', 'codex'])
@@ -288,7 +294,7 @@ export function buildRelayPlan({
   rounds = DEFAULT_ROUNDS,
   preset = null,
   modelMap = {},
-  reportDir = DEFAULT_REPORT_DIR,
+  reportDir = defaultReportDir(),
   runId = null
 } = {}) {
   const planMode = (preset === 'k5-pipeline-ring' && (!mode || mode === 'discover'))
@@ -527,7 +533,7 @@ function writeReport(path, payload) {
  * Run one child. No routine timer: `stallKillSec` defaults to 0 (disabled) so a normal
  * turn is never interrupted. When enabled, a runaway turn is killed at the stall limit.
  */
-function runChild({ command, args, cwd, env, stallKillSec, windowStartMs, horizonDeadlineMs = null }) {
+function runChild({ command, args, cwd, env, stallKillSec, windowStartMs, horizonDeadlineMs = null, echoStdout = true }) {
   return new Promise((resolvePromise) => {
     // Cooperative caps: an explicit stall bound and/or the run horizon. Both are opt-in.
     const limits = []
@@ -551,7 +557,7 @@ function runChild({ command, args, cwd, env, stallKillSec, windowStartMs, horizo
     child.stdout?.on('data', (chunk) => {
       const text = String(chunk)
       stdoutText += text
-      try { process.stdout.write(text) } catch { /* log stream closed */ }
+      if (echoStdout) { try { process.stdout.write(text) } catch { /* log stream closed */ } }
     })
     const finish = (status, signal, error, stallKilled) => {
       if (settled) return
@@ -598,7 +604,7 @@ function parseArgs(argv) {
     clampToHorizon: false,
     printQuotaStatus: false,
     ringStateDir: DEFAULT_RING_STATE_DIR,
-    reportDir: DEFAULT_REPORT_DIR,
+    reportDir: defaultReportDir(),
     workItemId: null,
     planFile: null,
     execute: false,
@@ -1052,6 +1058,9 @@ export async function runRelay(argv) {
       res = await runChild({
         command, args, cwd, stallKillSec: opts.stallKillSec, windowStartMs,
         horizonDeadlineMs: opts.clampToHorizon ? horizonDeadlineMs : null,
+        // --json output must stay machine-readable; a sibling's raw stdout is persisted as
+        // findings instead of being echoed onto the relay's stdout (#207).
+        echoStdout: !opts.json,
         env: { ...childEnvBase, SWARM_RELAY_SUB_TURN: String(subTurn) }
       })
       if (res.error || res.status !== 0) break
@@ -1059,7 +1068,28 @@ export async function runRelay(argv) {
 
     const exitCode = typeof res.status === 'number' ? res.status : null
     const findingsPath = assignment.findingsPath || assignment.reportPath || null
-    const findingsWritten = Boolean(findingsPath && existsSync(findingsPath))
+    // #207: read-only siblings (cline/vibe/codex/direct) often cannot write the findings
+    // file themselves. If they exited 0 without writing it, persist their captured stdout
+    // as a normalized artifact. Blank stdout stays fail-closed (never a fake finding).
+    let findingsWritten = Boolean(findingsPath && existsSync(findingsPath))
+    let findingsFallback = null
+    if (!findingsWritten && findingsPath && exitCode === 0 && !res.error && res.stallKilled !== true) {
+      const normalized = normalizeStdoutFindings({
+        stdout: res.stdout || '',
+        sibling: choice.sibling,
+        job: assignment.job,
+        mode: plan.mode,
+        round: assignment.round,
+        window: assignment.window
+      })
+      if (normalized.ok) {
+        protectedWriteFile(findingsPath, `${JSON.stringify(normalized.doc, null, 2)}\n`)
+        findingsWritten = true
+        findingsFallback = 'stdout'
+      } else {
+        findingsFallback = normalized.reason
+      }
+    }
     const entry = {
       window: assignment.window,
       round: assignment.round,
@@ -1084,7 +1114,8 @@ export async function runRelay(argv) {
       status: resolveWindowStatus({ error: res.error, stallKilled: res.stallKilled === true, exitCode, findingsWritten }),
       error: res.error ? String(res.error.code || res.error.message) : null,
       findingsPath,
-      findingsWritten
+      findingsWritten,
+      findingsFallback
     }
     ringState = advanceRingState(ringState, assignment, {
       model: choice.model, pool: choice.pool, findingsPath: assignment.findingsPath
@@ -1257,6 +1288,7 @@ export async function runRelay(argv) {
         const altRes = await runChild({
           command: altCmd.command, args: altCmd.args, cwd, stallKillSec: opts.stallKillSec, windowStartMs: Date.now(),
           horizonDeadlineMs: opts.clampToHorizon ? horizonDeadlineMs : null,
+          echoStdout: !opts.json,
           env: { ...childEnvBase }
         })
         const altCode = typeof altRes.status === 'number' ? altRes.status : null
