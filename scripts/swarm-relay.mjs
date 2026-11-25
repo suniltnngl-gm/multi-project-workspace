@@ -15,6 +15,7 @@
  *
  * Defaults to --dry-run (prints the relay plan, spawns nothing). Pass --execute to run.
  */
+import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
@@ -29,6 +30,10 @@ import { protectedWriteFile, snapshotRestorePoints } from '../apps/api/src/toolc
 import { applyPublishGate, deterministicRoundReview, modifiedFilesSince, readReviewVerdict, roundBaseSha } from './swarm-publish-gate.mjs'
 import { formatQuotaStatusLine } from './swarm-doctor-quota.mjs'
 import { windowPolicyEnv } from './swarm-window-policy.mjs'
+import {
+  acquireOrchestratorLock,
+  releaseOrchestratorLock
+} from './swarm-orchestrator-lock.mjs'
 import {
   PIPELINE_JOBS,
   RING_PRESETS,
@@ -262,6 +267,13 @@ export function readQuotaStatus(path) {
 /**
  * Pure planner: no I/O, no CLI spawning. Deterministic in its inputs.
  */
+/** Short, filename-safe id for one run: the time part of its ISO run id (#206). */
+export function shortRunId(runId) {
+  const raw = String(runId || '')
+  const t = raw.indexOf('T')
+  return (t >= 0 ? raw.slice(t + 1) : raw).replace(/[^A-Za-z0-9._-]/g, '-')
+}
+
 export function buildRelayPlan({
   mode = 'discover',
   siblings = DEFAULT_SIBLINGS,
@@ -271,7 +283,8 @@ export function buildRelayPlan({
   rounds = DEFAULT_ROUNDS,
   preset = null,
   modelMap = {},
-  reportDir = DEFAULT_REPORT_DIR
+  reportDir = DEFAULT_REPORT_DIR,
+  runId = null
 } = {}) {
   const planMode = (preset === 'k5-pipeline-ring' && (!mode || mode === 'discover'))
     ? 'pipeline'
@@ -287,9 +300,15 @@ export function buildRelayPlan({
   const softSec = positiveInt(windowSec ?? softWindowSec, DEFAULT_SOFT_WINDOW_SEC, 'windowSec')
   const dir = resolve(expandHome(reportDir))
   const models = modelMap && typeof modelMap === 'object' ? modelMap : {}
+  // One run id per plan, reused by the executor so ring state and artifacts agree (#206).
+  // A millisecond ISO stamp alone can repeat for two plans built in the same tick,
+  // so the default run id carries pid + a random suffix (#206 collision guard).
+  const planRunId = runId
+    || `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}-${randomUUID().slice(0, 8)}`
+  const stamp = shortRunId(planRunId)
 
   const assignments = Array.from({ length: totalPlanWindows }, (_, i) => buildAssignment({
-    list, index: i, dir, planMode, softSec, models
+    list, index: i, dir, planMode, softSec, models, stamp
   }))
 
   return {
@@ -302,19 +321,21 @@ export function buildRelayPlan({
     preset: preset || null,
     modelMap: models,
     reportDir: dir,
+    runId: planRunId,
+    runIdShort: stamp,
     execution: 'sequential',
     assignmentStrategy: 'round_robin',
     noHardKill: true,
     hardKill: false,
     killsSiblings: false,
     killSwitchFile: join(homedir(), '.local/state/curl-ai-bridge/overnight/STOP_SWARM'),
-    summaryReportPath: join(dir, `relay-${planMode}-summary.json`),
+    summaryReportPath: join(dir, `relay-${planMode}-${stamp}-summary.json`),
     assignments
   }
 }
 
 /** One window's assignment. `index` is zero-based across the whole run (rounds included). */
-export function buildAssignment({ list, index, dir, planMode, softSec, models = {}, allowConserve = false }) {
+export function buildAssignment({ list, index, dir, planMode, softSec, models = {}, allowConserve = false, stamp = '' }) {
   const window = index + 1
   const idx = index % list.length
   const round = Math.floor(index / list.length) + 1
@@ -337,7 +358,7 @@ export function buildAssignment({ list, index, dir, planMode, softSec, models = 
   const parentSlot = hasParent ? `parent${prevIdx + 1}` : null
   const parentWindow = hasParent ? index : null
   const parentFindingsPath = hasParent
-    ? join(dir, `relay-${planMode}-r${prevRound}-w${parentWindow}-${parentSibling}-findings.json`)
+    ? join(dir, `relay-${planMode}-${stamp}-r${prevRound}-w${parentWindow}-${parentSibling}-findings.json`)
     : null
   const demotedFromParentSlot = index >= list.length ? `parent${idx + 1}` : null
 
@@ -360,8 +381,8 @@ export function buildAssignment({ list, index, dir, planMode, softSec, models = 
     pool: poolForSibling(sibling),
     softWindowSec: softSec,
     hardKill: false,
-    findingsPath: join(dir, `relay-${planMode}-r${round}-w${window}-${sibling}-findings.json`),
-    reportPath: join(dir, `relay-${planMode}-r${round}-w${window}-${sibling}.json`)
+    findingsPath: join(dir, `relay-${planMode}-${stamp}-r${round}-w${window}-${sibling}-findings.json`),
+    reportPath: join(dir, `relay-${planMode}-${stamp}-r${round}-w${window}-${sibling}.json`)
   }
 }
 
@@ -662,6 +683,10 @@ export async function runRelay(argv) {
   }
 
   const stateDir = join(homedir(), '.local/state/curl-ai-bridge/overnight')
+  // #206: the orchestrator lease lives beside the ring ledger (relay/), per spec —
+  // not in the overnight quota dir, so a relay run never blocks an unrelated
+  // supervisor's pool ledger (and vice versa).
+  const lockDir = opts.ringStateDir || DEFAULT_RING_STATE_DIR
   if (opts.printQuotaStatus && !opts.execute) {
     const statusInfo = readQuotaStatus(opts.quotaStatus)
     const budgets = loadPoolBudgets({
@@ -745,6 +770,32 @@ export async function runRelay(argv) {
     return { ok: true, mode: 'dry-run', executed: false, plan, schedulePath }
   }
 
+  // #206 split-brain containment: only `--execute` runs take the orchestrator lock.
+  // A live holder is never preempted; the caller fails closed with diagnostics.
+  const acquired = acquireOrchestratorLock({ stateDir: lockDir, runId: plan.runId })
+  if (!acquired.ok) {
+    process.stderr.write(
+      `swarm-relay: ${acquired.reason}: holder=${acquired.holder} runId=${acquired.runId} `
+      + `pid=${acquired.pid} ageSec=${acquired.ageSec} expiresAt=${acquired.expiresAt}\n`
+    )
+    return { ok: false, mode: 'execute', executed: false, stopReason: acquired.reason, lock: acquired }
+  }
+  let lockHeld = true
+  const releaseLock = () => {
+    if (!lockHeld) return
+    releaseOrchestratorLock({ stateDir: lockDir, runId: plan.runId, generation: acquired.lock.generation })
+    lockHeld = false
+  }
+  // Release on normal exit/error exit, and explicitly on signals so a stall kill or
+  // Ctrl-C cannot strand the lease for its full TTL.
+  process.on('exit', releaseLock)
+  for (const sig of ['SIGINT', 'SIGTERM']) {
+    process.once(sig, () => {
+      releaseLock()
+      process.kill(process.pid, sig)
+    })
+  }
+
   const cwd = resolve(new URL('..', import.meta.url).pathname)
   const { quota, conservePools } = readQuotaStatus(opts.quotaStatus)
   const budgets = loadPoolBudgets({
@@ -764,7 +815,8 @@ export async function runRelay(argv) {
   let lastWindowDriftMs = 0
 
   // Each invocation gets a fresh, run-scoped ledger: no slot/parent carry-over.
-  const runId = startedAt.replace(/[:.]/g, '-')
+  // The runId comes from the plan so ring state and artifact names share one stamp (#206).
+  const runId = plan.runId
   let ringState = createRingState({ siblings: plan.siblings, mode: plan.mode, nowIso: startedAt, generation: 0, runId })
 
   const windows = []
@@ -804,7 +856,8 @@ export async function runRelay(argv) {
 
     const assignment = buildAssignment({
       list: plan.siblings, index, dir: plan.reportDir, planMode: plan.mode,
-      softSec: plan.softWindowSec, models: plan.modelMap, allowConserve: opts.allowConserve
+      softSec: plan.softWindowSec, models: plan.modelMap, allowConserve: opts.allowConserve,
+      stamp: plan.runIdShort
     })
     const choice = selectSlot({
       ring: plan.siblings,

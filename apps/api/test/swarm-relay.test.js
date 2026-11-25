@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -167,10 +167,21 @@ test('buildRelayPlan alternates hermes -> opencode -> hermes with noHardKill: tr
     plan.assignments.map((a) => a.sibling),
     ['hermes', 'opencode', 'hermes']
   )
-  assert.ok(plan.assignments[0].reportPath.endsWith('relay-discover-r1-w1-hermes.json'))
-  assert.ok(plan.assignments[0].findingsPath.endsWith('relay-discover-r1-w1-hermes-findings.json'))
-  assert.ok(plan.assignments[1].reportPath.endsWith('relay-discover-r1-w2-opencode.json'))
-  assert.ok(plan.assignments[2].reportPath.endsWith('relay-discover-r2-w3-hermes.json'))
+  // #206: filenames carry the run's short id so back-to-back same-round runs cannot collide.
+  const stamp = plan.runIdShort
+  assert.ok(stamp && stamp.length > 0)
+  assert.ok(plan.assignments[0].reportPath.endsWith(`relay-discover-${stamp}-r1-w1-hermes.json`))
+  assert.ok(plan.assignments[0].findingsPath.endsWith(`relay-discover-${stamp}-r1-w1-hermes-findings.json`))
+  assert.ok(plan.assignments[1].reportPath.endsWith(`relay-discover-${stamp}-r1-w2-opencode.json`))
+  assert.ok(plan.assignments[2].reportPath.endsWith(`relay-discover-${stamp}-r2-w3-hermes.json`))
+})
+
+test('two plans never share a run stamp, so their artifacts cannot overwrite each other (#206)', () => {
+  const a = buildRelayPlan({ mode: 'discover', siblings: ['hermes'], windows: 1, reportDir: '/tmp/relay-a' })
+  const b = buildRelayPlan({ mode: 'discover', siblings: ['hermes'], windows: 1, reportDir: '/tmp/relay-b' })
+  assert.notEqual(a.runIdShort, b.runIdShort)
+  assert.notEqual(a.assignments[0].reportPath, b.assignments[0].reportPath)
+  assert.ok(a.summaryReportPath.endsWith(`relay-discover-${a.runIdShort}-summary.json`))
 })
 
 test('swarm-relay.mjs --dry-run --json exits 0 with relay-plan/v1', () => {
@@ -259,6 +270,44 @@ test('ring ledger round-trips through protectedWriteFile and resolves parent slo
   }
 })
 
+test('execute fails closed when another orchestrator holds the lock (#206)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'relay-lock-'))
+  const scriptPath = resolve(new URL('../../../scripts/swarm-relay.mjs', import.meta.url).pathname)
+  try {
+    const home = join(root, 'home')
+    const reports = join(root, 'reports')
+    const ring = join(root, 'ring')
+    mkdirSync(home, { recursive: true })
+    // The relay takes its lease beside the ring ledger: the --ring-state-dir passed below.
+    mkdirSync(ring, { recursive: true })
+    const lockPath = join(ring, 'orchestrator.lock.json')
+    writeFileSync(lockPath, `${JSON.stringify({
+      schema: 'orchestrator-lock/v1',
+      holder: 'swarm-relay',
+      runId: 'run-other',
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      expiresAtMs: Date.now() + 600_000,
+      generation: 3
+    }, null, 2)}\n`)
+
+    const res = spawnSync(
+      process.execPath,
+      [scriptPath, '--mode', 'discover', '--siblings', 'hermes', '--windows', '1', '--execute', '--report-dir', reports, '--ring-state-dir', ring, '--json'],
+      { encoding: 'utf8', env: { ...process.env, HOME: home } }
+    )
+    assert.equal(res.status, 1)
+    assert.match(String(res.stderr), /orchestrator_lock_held/)
+    assert.match(String(res.stderr), /runId=run-other/)
+    // The live lease is untouched, and no sibling was spawned.
+    assert.equal(existsSync(lockPath), true)
+    assert.equal(JSON.parse(readFileSync(lockPath, 'utf8')).generation, 3)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('window status separates ok_no_findings from failure and counts as success', () => {
   assert.equal(resolveWindowStatus({ exitCode: 0, findingsWritten: true }), 'ok')
   assert.equal(resolveWindowStatus({ exitCode: 0, findingsWritten: false }), 'ok_no_findings')
@@ -303,7 +352,8 @@ test('execute: sibling exit 0 without a findings artifact records ok_no_findings
     assert.equal(missing.windows[0].status, 'ok_no_findings')
     assert.equal(missing.windows[0].exitCode, 0)
     assert.equal(missing.windows[0].findingsWritten, false)
-    assert.ok(missing.windows[0].findingsPath.endsWith('relay-discover-r1-w1-hermes-findings.json'))
+    assert.ok(missing.windows[0].findingsPath.endsWith('r1-w1-hermes-findings.json'))
+    assert.match(missing.windows[0].findingsPath, /relay-discover-.+-r1-w1-hermes-findings\.json$/)
 
     const written = run({ FAKE_WRITE_FINDINGS: '1' })
     assert.equal(written.ok, true)
@@ -637,8 +687,10 @@ test('execute: gemini-api primary failure retries exactly one rotated alternate 
     assert.equal(ledger[1].answeredModel, 'gemini-2.5-flash')
     assert.equal(ledger[1].attemptedModels.length, 2)
 
-    // Window report carries the same telemetry.
-    const report = JSON.parse(readFileSync(join(reports, 'relay-discover-r1-w1-gemini-api.json'), 'utf8'))
+    // Window report carries the same telemetry (#206: report names are run-stamped).
+    const reportName = readdirSync(reports).find((f) => /^relay-discover-.+-r1-w1-gemini-api\.json$/.test(f))
+    assert.ok(reportName, 'run-stamped gemini-api window report not found')
+    const report = JSON.parse(readFileSync(join(reports, reportName), 'utf8'))
     assert.equal(report.primaryModel, 'gemini-3.8-flash')
     assert.equal(report.answeredModel, 'gemini-2.5-flash')
     assert.equal(report.attemptedModels.length, 2)
