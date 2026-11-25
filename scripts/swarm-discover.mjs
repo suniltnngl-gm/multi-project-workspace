@@ -16,6 +16,7 @@ import { createTask, readQueue, queueStats } from '../apps/api/src/toolchain/dis
 import { rankTasks, scoreTask } from '../apps/api/src/toolchain/dispatch/task-prioritizer.js'
 import { createWorkItem } from '../apps/api/src/toolchain/dispatch/case-task-lifecycle.js'
 import { readCases, writeCase } from '../apps/api/src/toolchain/dispatch/case-registry.js'
+import { isReconcilable } from '../apps/api/src/toolchain/dispatch/cas-state.js'
 
 export function computeEvidenceFingerprint({ source = 'unknown', summary = '', headSha = '' } = {}) {
   return createHash('sha256').update(`${source}|${headSha}|${String(summary).trim()}`).digest('hex').slice(0, 16)
@@ -143,10 +144,12 @@ export function reconcileStaleDiscoveredTasks(queueDir, candidates, { apply = fa
   const existing = readQueue(queueDir)
   const expired = []
   const archiveDir = join(queueDir, '..', 'archive')
-  const RESTING_STATES = new Set(['queued', 'parked'])
+  // #210/#212: only resting states may be archived. Anything scheduled/planning/building/
+  // reviewing/publishing is left untouched (in_flight_skip), so an active item can never
+  // disappear mid-window.
   for (const t of existing) {
     if (!String(t.taskId || '').startsWith('disc-')) continue
-    if (!RESTING_STATES.has(t.state)) continue
+    if (!isReconcilable(t.state)) continue
     if (!liveIds.has(t.taskId)) {
       expired.push(t.taskId)
       if (apply) {
@@ -166,11 +169,22 @@ export function syncDiscoveredToQueue(queueDir, candidates, { apply = false, cas
   const existing = readQueue(queueDir)
   const existingIds = new Set(existing.map((t) => t.taskId))
   const existingCaseIds = new Set(caseDir ? readCases(caseDir).map((c) => c.id) : [])
+  // #210/#212: fingerprint dedupe. A candidate matching an already-tracked resting record
+  // is attached to it rather than duplicated into a second contradictory task/case.
+  const knownFingerprints = new Set([
+    ...existing.map((t) => t.fingerprint || t.evidenceFingerprint),
+    ...(caseDir ? readCases(caseDir).map((c) => c.fingerprint || c.evidenceFingerprint) : [])
+  ].filter(Boolean))
   const created = []
   const cases = []
   const skipped = []
 
   for (const c of candidates) {
+    const fp = c.fingerprint || c.evidenceFingerprint
+    if (fp && knownFingerprints.has(fp)) {
+      skipped.push(`${c.taskId}:duplicate_fingerprint`)
+      continue
+    }
     if (c.kind === 'case') {
       if (existingCaseIds.has(c.taskId)) {
         skipped.push(c.taskId)

@@ -55,6 +55,7 @@ export function quarantineDirtyWorktree({
   activeLease = false,
   allowRestore = false,
   backupRoot = null,
+  isOwned = () => false,
   nowIso = () => new Date().toISOString(),
   runGit = (args, cwd) => spawnSync('git', args, { cwd, encoding: 'utf8' }),
   existsSync: existsFn = existsSync,
@@ -68,11 +69,13 @@ export function quarantineDirtyWorktree({
   const dirty = parsePorcelainStatus(status.stdout)
   if (dirty.length === 0) return { ok: true, reason: 'clean', quarantined: [], restored: false }
 
-  if (activeLease) {
+  const ownedPaths = dirty.filter((d) => isOwned(d.path)).map((d) => d.path)
+  if (activeLease || ownedPaths.length > 0) {
     return {
       ok: false,
       reason: 'dirty_tree_with_active_work_item',
       workItemId,
+      ownedPaths,
       dirty: dirty.map((d) => d.path),
       restored: false
     }

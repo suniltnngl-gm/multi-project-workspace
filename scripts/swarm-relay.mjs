@@ -53,6 +53,9 @@ import {
   writeRingState
 } from './swarm-ring-state.mjs'
 import { advanceGeminiApiRotation, alternateModelForPrimary } from './swarm-gemini-rotation.mjs'
+import { preBuildGuard } from '../apps/api/src/toolchain/dispatch/delivery-pipeline.js'
+import { quarantineDirtyWorktree } from '../apps/api/src/toolchain/dispatch/worktree-quarantine.js'
+import { readWorkItem } from '../apps/api/src/toolchain/dispatch/work-item-registry.js'
 
 export const RELAY_MODES = ['discover', 'fix', 'pipeline', 'case-solve', 'build', 'review', 'publish']
 export const DEFAULT_SIBLINGS = ['hermes', 'direct']
@@ -596,6 +599,8 @@ function parseArgs(argv) {
     printQuotaStatus: false,
     ringStateDir: DEFAULT_RING_STATE_DIR,
     reportDir: DEFAULT_REPORT_DIR,
+    workItemId: null,
+    planFile: null,
     execute: false,
     json: false,
     help: false
@@ -629,6 +634,8 @@ function parseArgs(argv) {
     }
     else if (a === '--ring-state-dir') opts.ringStateDir = argv[++i]
     else if (a === '--report-dir') opts.reportDir = argv[++i]
+    else if (a === '--work-item') opts.workItemId = argv[++i]
+    else if (a === '--plan-file') opts.planFile = argv[++i]
     else if (a === '--quota-aware') opts.quotaAware = true
     else if (a === '--task') opts.task = argv[++i]
     else if (a === '--horizon-ms') opts.horizonMs = argv[++i]
@@ -829,6 +836,43 @@ export async function runRelay(argv) {
       releaseLocks()
       process.kill(process.pid, sig)
     })
+  }
+
+  // #210: a work-item-driven round declares its binding explicitly. The pre-build guard
+  // proves planRevision/baseHeadSha are still current, then ensures the tree is safe to
+  // edit. Fail-closed; both flags must be supplied together.
+  if (opts.workItemId || opts.planFile) {
+    if (!opts.workItemId || !opts.planFile) {
+      process.stderr.write('swarm-relay: --work-item and --plan-file must be supplied together\n')
+      return { ok: false, mode: 'execute', executed: false, stopReason: 'incomplete_work_item_binding' }
+    }
+    const cwd = resolve(new URL('..', import.meta.url).pathname)
+    const headRes = spawnSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' })
+    const headSha = String(headRes.stdout || '').trim() || null
+    const workItemDir = join(homedir(), '.local/state/curl-ai-bridge/registries/work-items')
+    const workItem = readWorkItem(workItemDir, opts.workItemId)
+    if (!workItem) {
+      process.stderr.write(`swarm-relay: work_item_not_found: ${opts.workItemId} (${workItemDir})\n`)
+      return { ok: false, mode: 'execute', executed: false, stopReason: 'work_item_not_found' }
+    }
+    const guard = preBuildGuard({
+      repoDir: cwd,
+      workItemId: opts.workItemId,
+      planPath: resolve(opts.planFile),
+      workItem,
+      headSha,
+      backupRoot: join(homedir(), '.local/state/curl-ai-bridge/repo-checkpoints'),
+      allowRestore: false,
+      quarantine: quarantineDirtyWorktree
+    })
+    if (!guard.ok) {
+      process.stderr.write(`swarm-relay: pre_build_guard:${guard.reason} workItem=${opts.workItemId}\n`)
+      return { ok: false, mode: 'execute', executed: false, stopReason: guard.reason, guard }
+    }
+    process.stdout.write(
+      `swarm-relay: pre_build_guard ok workItem=${opts.workItemId} `
+      + `planRevision=${workItem.currentPlanRevision ?? 'n/a'} quarantine=${guard.reason}\n`
+    )
   }
 
   const cwd = resolve(new URL('..', import.meta.url).pathname)
