@@ -155,25 +155,52 @@ test('rejectRoundCleanup restores pre-round edits and removes round-created untr
   }
 })
 
-test('applyPublishGate REJECT reports ok:false when cleanup cannot restore state', () => {
+test('#221: no_backup_history on a tracked sibling edit falls back to a scoped git checkout', () => {
+  const repo = initRepo()
+  const state = mkdtempSync(join(tmpdir(), 'pubgate-nobak-'))
+  try {
+    // Written directly and committed without protectedWriteFile: there is no backup snapshot.
+    writeFileSync(join(repo, 'unsnapshotted.txt'), 'base\n')
+    git(repo, 'add', '--', 'unsnapshotted.txt')
+    git(repo, 'commit', '-qm', 'unsnapshotted base', '--', 'unsnapshotted.txt')
+    writeFileSync(join(repo, 'unsnapshotted.txt'), 'cline edit\n')
+
+    const res = rejectRoundCleanup({ repoDir: repo, baseSha: 'HEAD', preExisting: [], backupRoot: state })
+    assert.equal(res.ok, true)
+    assert.deepEqual(res.undone, ['unsnapshotted.txt'])
+    assert.deepEqual(res.failed, [])
+    assert.deepEqual(res.remaining, [])
+    assert.equal(readFileSync(join(repo, 'unsnapshotted.txt'), 'utf8'), 'base\n')
+    assert.equal(readFileSync(join(repo, 'a.txt'), 'utf8'), 'v1\n', 'unrelated files must not be touched')
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+    rmSync(state, { recursive: true, force: true })
+  }
+})
+
+test('applyPublishGate REJECT reports ok:false when the scoped HEAD fallback cannot restore state', () => {
   const repo = initRepo()
   const reportDir = mkdtempSync(join(tmpdir(), 'pubgate-report-'))
   try {
-    writeFileSync(join(repo, 'a.txt'), 'base\n')
+    // late.txt is added after baseSha, so checkout <baseSha> -- late.txt fails.
+    writeFileSync(join(repo, 'bootstrap.txt'), 'x\n')
     git(repo, 'add', '-A')
-    git(repo, 'commit', '-qm', 'base')
-    // Dirty an existing file with NO restore point anywhere -> undo must fail loudly.
-    writeFileSync(join(repo, 'a.txt'), 'dirty\n')
+    git(repo, 'commit', '-qm', 'bootstrap base')
+    const baseSha = git(repo, 'rev-parse', 'HEAD')
+    writeFileSync(join(repo, 'late.txt'), 'base\n')
+    git(repo, 'add', '-A')
+    git(repo, 'commit', '-qm', 'add late')
+    writeFileSync(join(repo, 'late.txt'), 'dirty\n')
     const gate = applyPublishGate({
       verdict: { verdict: 'REJECT', reason: 'w4_verdict_reject' },
       repoDir: repo,
-      baseSha: 'HEAD',
+      baseSha,
       reportDir,
       push: false
     })
     assert.equal(gate.ok, false)
     assert.equal(gate.action, 'reject_cleanup_incomplete')
-    assert.ok(Array.isArray(gate.remaining) && gate.remaining.includes('a.txt'))
+    assert.ok(Array.isArray(gate.remaining) && gate.remaining.includes('late.txt'))
   } finally {
     rmSync(repo, { recursive: true, force: true })
     rmSync(reportDir, { recursive: true, force: true })

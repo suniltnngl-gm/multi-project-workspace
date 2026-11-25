@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, readFileSync
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus, evaluateReviewGate, reviewGateReason, computeHorizonDeadlineMs, effectiveWindowBudgetMs, parseSiblingVerdict, buildReviewBrief, pickFocusedTest, buildBuildBrief } from '../../../scripts/swarm-relay.mjs'
+import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus, w5CleanupReportPath, evaluateReviewGate, reviewGateReason, computeHorizonDeadlineMs, effectiveWindowBudgetMs, parseSiblingVerdict, buildReviewBrief, pickFocusedTest, buildBuildBrief } from '../../../scripts/swarm-relay.mjs'
 import { computeEvidenceFingerprint, reconcileStaleDiscoveredTasks, parseSeedPayload } from '../../../scripts/swarm-discover.mjs'
 import { buildExecutiveBrief } from '../../../scripts/swarm-brief.mjs'
 import { evaluateOpenCase } from '../../../scripts/swarm-case-solve.mjs'
@@ -449,6 +449,12 @@ test('#220: an empty round diff reports no_modified_files, never the passing det
   assert.equal(reviewGateReason({ detReason: 'deterministic_gates_passed', modifiedCount: 0 }), 'no_modified_files')
   assert.equal(reviewGateReason({ detReason: 'deterministic_gates_passed', modifiedCount: 2 }), 'deterministic_gates_passed')
   assert.equal(reviewGateReason({ modifiedCount: 1 }), 'deterministic_gate_failed')
+})
+
+test('#221: W5 cleanup report path is a string, never the plan object', () => {
+  assert.equal(w5CleanupReportPath({ assignment: { reportPath: '/tmp/w5.json' }, plan: { mode: 'pipeline' } }), '/tmp/w5.json')
+  assert.throws(() => w5CleanupReportPath({ assignment: { reportPath: { mode: 'pipeline' } } }), /w5_cleanup_report_path_required/)
+  assert.throws(() => w5CleanupReportPath({}), /w5_cleanup_report_path_required/)
 })
 
 test('Phase 3 horizon math: rolling pool reset pulls the deadline earlier; drift tightens the window budget', () => {

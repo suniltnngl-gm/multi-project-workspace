@@ -13,7 +13,7 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { homedir } from 'os'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { evaluateDeterministicDiff } from './swarm-review.mjs'
 import { checkpointPassingDiff, protectedWriteFile, undoLastEdit } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
 
@@ -156,7 +156,19 @@ export function rejectRoundCleanup({ repoDir, baseSha, preExisting = [], backupR
       }
       undone.push(rel)
     } catch (err) {
-      failed.push({ file: rel, error: String(err && err.message || err) })
+      // #221: a build sibling (cline/codex) can edit a tracked file without ever
+      // going through protectedWriteFile, so no .backups/ snapshot exists. Restore
+      // exactly that file from the round base — never a wholesale reset.
+      const reason = String(err && err.message || err)
+      const relSafe = !isAbsolute(String(rel)) && !String(rel).split(/[\\/]/).includes('..')
+      if (/no_backup_history/.test(reason) && relSafe && baseSha) {
+        const restore = spawnSync('git', ['-C', repoDir, 'checkout', String(baseSha), '--', String(rel)], { encoding: 'utf8', timeout: 5000 })
+        if (restore.status === 0) {
+          undone.push(rel)
+          continue
+        }
+      }
+      failed.push({ file: rel, error: reason })
     }
   }
   const allow = new Set(left)

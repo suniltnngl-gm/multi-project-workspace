@@ -94,6 +94,13 @@ export function isSuccessfulWindowStatus(status) {
   return status === 'ok' || status === 'ok_no_findings' || status === 'ok_after_failover' || status === 'ok_after_model_retry'
 }
 
+/** #221: W5 cleanup must write to the window's path, never the plan object. */
+export function w5CleanupReportPath({ assignment = {} } = {}) {
+  const path = assignment.reportPath
+  if (typeof path !== 'string' || !path) throw new Error('w5_cleanup_report_path_required')
+  return path
+}
+
 /**
  * GOV-1 review gate: an ACCEPT requires a valid W4 artifact AND clean deterministic
  * gates AND no unreviewed head advance since the round base.
@@ -1273,7 +1280,7 @@ export async function runRelay(argv) {
       // Fail loudly: never relay into the next round with unreviewed dirty files.
       if (gate.ok === false) {
         stopReason = 'publish_cleanup_failed'
-        writeReport(plan, stateDir, entry)
+        writeReport(w5CleanupReportPath({ assignment }), { ...entry, mode: plan.mode, noHardKill: true })
         break
       }
     }
