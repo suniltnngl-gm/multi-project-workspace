@@ -200,7 +200,7 @@ if (mode === 'llm') {
     console.log(JSON.stringify({ ok: true, dryRun: true, mode: 'llm', sessionId, pool, cap, sizeWarning: spec.sizeWarning, command: spec.command, args: spec.args }, null, 2))
     process.exit(0)
   }
-  recordPoolCall(stateDir, { quotaPool: pool, source: 'swarm-ask', sessionId })
+  recordPoolCall(stateDir, { quotaPool: pool, source: 'swarm-ask', sessionId, unleasedOperator: true })
   const child = spawnSync(spec.command, spec.args, { encoding: 'utf8', timeout: (timeoutSec + 10) * 1000 })
   if (has('--json')) {
     console.log(JSON.stringify({

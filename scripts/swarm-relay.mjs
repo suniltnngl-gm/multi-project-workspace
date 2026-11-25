@@ -818,6 +818,11 @@ export async function runRelay(argv) {
     releaseLocks()
     return { ok: false, mode: 'execute', executed: false, stopReason: failure.reason, lock: failure }
   }
+  // #216: pool-call writes must carry the active quota-ledger lease generation.
+  const quotaLedgerLease = () => {
+    const h = held.find((x) => x.resource === 'quota-ledger')
+    return h ? { runId: plan.runId, generation: Number(h.lock.generation), pid: Number(h.lock.pid) } : null
+  }
   // Heartbeat (#209 / case-swarm-lease-lifecycle): renew every third of the TTL so a long
   // round cannot lose a lease it still legitimately holds.
   const heartbeatMs = Math.max(60_000, Math.floor(DEFAULT_ORCHESTRATOR_LOCK_TTL_MS / 3))
@@ -1253,7 +1258,8 @@ export async function runRelay(argv) {
           status,
           primaryModel: windowTelemetry.primaryModel,
           attemptedModels: windowTelemetry.attemptedModels.map((a) => ({ ...a })),
-          answeredModel: windowTelemetry.answeredModel
+          answeredModel: windowTelemetry.answeredModel,
+          lease: quotaLedgerLease()
         })
       }
     }
@@ -1325,7 +1331,7 @@ export async function runRelay(argv) {
       })
       const fbCode = typeof fbRes.status === 'number' ? fbRes.status : null
       // Account the call against the pool that actually ran, and attribute the slot to it.
-      recordPoolCall(stateDir, { quotaPool: fbPool, taskId: `relay-w${assignment.window}`, status: !fbRes.error && fbCode === 0 ? 'ok' : `exit_${fbCode ?? 'null'}` })
+      recordPoolCall(stateDir, { quotaPool: fbPool, taskId: `relay-w${assignment.window}`, status: !fbRes.error && fbCode === 0 ? 'ok' : `exit_${fbCode ?? 'null'}`, lease: quotaLedgerLease() })
       ringState.slots[assignment.siblingSlot] = {
         ...(ringState.slots[assignment.siblingSlot] || {}),
         cli: fallbackSibling,

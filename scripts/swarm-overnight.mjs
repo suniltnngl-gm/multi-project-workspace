@@ -225,7 +225,7 @@ while (true) {
     pid: ledgerLease.lock.pid, resource: 'quota-ledger'
   })
   clearInterval(renewHeartbeat)
-  recordPoolCall(opts.stateDir, { quotaPool: pool, taskId: nextTask.taskId, status: ok ? 'ok' : `exit_${res.status}` })
+  recordPoolCall(opts.stateDir, { quotaPool: pool, taskId: nextTask.taskId, status: ok ? 'ok' : `exit_${res.status}`, lease: { runId: ledgerRunId, generation: Number(ledgerLease.lock.generation), pid: Number(ledgerLease.lock.pid) } })
   releaseOrchestratorLock({
     stateDir: opts.stateDir, runId: ledgerRunId, generation: ledgerLease.lock.generation,
     pid: ledgerLease.lock.pid, resource: 'quota-ledger'

@@ -51,15 +51,16 @@ test('split-brain counters come only from real events; uninstrumented ones stay 
       { event: 'lease_reclaimed_split_brain_guard', runId: 'old' },
       { event: 'demoted_to_case', workItemId: 'WI-1', trail: ['work-item>job', 'job>task', 'task>case'] },
       { event: 'plan_replan', planRevision: 2 },
-      { event: 'build_rebuild', rebuildCount: 1 }
+      { event: 'build_rebuild', rebuildCount: 1 },
+      { event: 'pool_call_rejected', reason: 'stale_lease_generation', holder: 'relay-run' }
     ])
     const report = computeHealthRollup({ paths: statePaths({ SWARM_STATE_DIR: root }), nowMs: 2_000 })
     assert.equal(report.splitBrain.deadLeasesReclaimed, 1)
     assert.equal(report.splitBrain.circuitBreakerDemotions, 1)
     assert.equal(report.splitBrain.replanLoops, 1)
     assert.equal(report.splitBrain.rebuildLoops, 1)
+    assert.equal(report.splitBrain.casConflictsPrevented, 1)
     // No instrumentation exists for these yet — reported as null, never an invented zero.
-    assert.equal(report.splitBrain.casConflictsPrevented, null)
     assert.equal(report.splitBrain.stalePlansBlocked, null)
   } finally {
     rmSync(root, { recursive: true, force: true })

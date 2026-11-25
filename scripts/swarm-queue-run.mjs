@@ -26,6 +26,7 @@ import {
 } from '../apps/api/src/toolchain/dispatch/job-queue.js'
 import { evaluateFiveHourCap } from '../apps/api/src/toolchain/dispatch/burn-rate-pacer.js'
 import { createLeaseStore } from '../apps/api/src/toolchain/dispatch/lease-store.js'
+import { acquireOrchestratorLock, releaseOrchestratorLock } from './swarm-orchestrator-lock.mjs'
 
 const argv = process.argv.slice(2)
 const opts = {}
@@ -176,6 +177,30 @@ async function main() {
     }
   }
 
+  // #216: this runner mutates the job queue and drives pool spend, so it must hold the
+  // quota-ledger lease for the duration of the bounded job. A live holder fails closed.
+  const ledgerRunId = `queue-run-${process.pid}-${Date.now()}`
+  const ledgerRes = acquireOrchestratorLock({
+    stateDir: leaseStateDir, runId: ledgerRunId, resource: 'quota-ledger', holder: 'swarm-queue-run'
+  })
+  if (!ledgerRes.ok) {
+    if (opts.json) {
+      process.stdout.write(`${JSON.stringify({ tick: 'deferred_orchestrator_lease', reason: ledgerRes.reason, holder: ledgerRes.holder, runId: ledgerRes.runId }, null, 2)}\n`)
+    } else {
+      process.stderr.write(`swarm-queue-run: ${ledgerRes.reason}: quota-ledger held by ${ledgerRes.holder}\n`)
+    }
+    process.exit(3)
+  }
+  const releaseLedger = () => {
+    try {
+      releaseOrchestratorLock({
+        stateDir: leaseStateDir, runId: ledgerRunId, generation: ledgerRes.lock.generation, resource: 'quota-ledger'
+      })
+    } catch { /* already released */ }
+  }
+  process.on('exit', releaseLedger)
+  for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { releaseLedger(); process.exit(130) })
+
   const ctx = {
     cli: opts.cli || task.pinned?.cli || 'opencode',
     model: opts.model || task.pinned?.model || 'opencode/deepseek-v4.1-flash-free',
@@ -184,7 +209,12 @@ async function main() {
   }
 
   const jobStartedAtMs = Date.now()
-  let outcome = await runJob({ job, task, ctx })
+  let outcome
+  try {
+    outcome = await runJob({ job, task, ctx })
+  } finally {
+    releaseLedger()
+  }
 
   // Case resolution (harvest-verified-artifact): if a plan job timed out after writing a fresh,
   // valid checkpoint plan (>=200 bytes and mtime >= jobStartedAtMs), harvest it.

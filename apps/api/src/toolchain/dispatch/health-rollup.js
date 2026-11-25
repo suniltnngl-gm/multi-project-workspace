@@ -130,10 +130,11 @@ export function computeHealthRollup({
       replanLoops: counterFromEvents(events, ['plan_replan']),
       rebuildLoops: counterFromEvents(events, ['build_rebuild']),
       leaseContentionsBlocked: null,
-      casConflictsPrevented: null,
+      // #216: refusals are audited into lifecycle-transitions.jsonl as pool_call_rejected.
+      casConflictsPrevented: lifecycle.present ? counterFromEvents(events, ['pool_call_rejected']) : null,
       stalePlansBlocked: null,
       discoverDuplicatesDeduped: null,
-      notInstrumented: ['leaseContentionsBlocked', 'casConflictsPrevented', 'stalePlansBlocked', 'discoverDuplicatesDeduped']
+      notInstrumented: ['leaseContentionsBlocked', 'stalePlansBlocked', 'discoverDuplicatesDeduped']
     },
     delivery: {
       commitsPushed,
