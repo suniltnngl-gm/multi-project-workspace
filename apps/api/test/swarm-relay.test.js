@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus, w5CleanupReportPath, evaluateReviewGate, reviewGateReason, computeHorizonDeadlineMs, effectiveWindowBudgetMs, parseSiblingVerdict, buildReviewBrief, pickFocusedTest, buildBuildBrief } from '../../../scripts/swarm-relay.mjs'
@@ -10,6 +10,7 @@ import { computeEvidenceFingerprint, reconcileStaleDiscoveredTasks, parseSeedPay
 import { buildExecutiveBrief } from '../../../scripts/swarm-brief.mjs'
 import { evaluateOpenCase } from '../../../scripts/swarm-case-solve.mjs'
 import { evaluateDeterministicDiff } from '../../../scripts/swarm-review.mjs'
+import { resolveStateRoot, statePaths } from '../../../scripts/swarm-state-paths.mjs'
 import { createRingState, advanceRingState, resolveSlot, readRingState, writeRingState } from '../../../scripts/swarm-ring-state.mjs'
 
 test('offloaded parent helpers (brief, case-solve, review) enforce unrecoverable pause and deterministic gates', () => {
@@ -941,4 +942,24 @@ test('#207 relay report/findings paths resolve through SWARM_STATE_DIR', () => {
     else process.env.SWARM_STATE_DIR = prev
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('swarm-review state root: SWARM_STATE_DIR takes precedence over SWARM_STATE_ROOT and default', () => {
+  const defaultRoot = join(homedir(), '.local', 'state', 'curl-ai-bridge')
+
+  // SWARM_STATE_DIR wins over SWARM_STATE_ROOT
+  assert.equal(
+    resolveStateRoot({ SWARM_STATE_DIR: '/custom/dir', SWARM_STATE_ROOT: '/legacy/root' }),
+    '/custom/dir'
+  )
+  // SWARM_STATE_ROOT used when SWARM_STATE_DIR is unset
+  assert.equal(resolveStateRoot({ SWARM_STATE_ROOT: '/legacy/root' }), '/legacy/root')
+  // Default root when neither is set
+  assert.equal(resolveStateRoot({}), defaultRoot)
+  // statePaths().reportsDir follows the resolved root
+  assert.equal(
+    statePaths({ SWARM_STATE_DIR: '/custom/dir' }).reportsDir,
+    join('/custom/dir', 'reports')
+  )
+  assert.equal(statePaths({}).reportsDir, join(defaultRoot, 'reports'))
 })

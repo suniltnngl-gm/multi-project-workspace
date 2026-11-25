@@ -8,8 +8,8 @@
  * 3. Emits `{ verdict: "ACCEPT"|"REJECT", reason, reviewedAt }` (and writes `--verdict-out`).
  */
 import { spawnSync } from 'node:child_process'
-import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { statePaths } from './swarm-state-paths.mjs'
 import { fileURLToPath } from 'node:url'
 import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
 import { redactSecrets } from '../apps/api/src/toolchain/dispatch/session-handoff.js'
@@ -84,8 +84,8 @@ if (isMain) {
 
   const headRes = spawnSync('git', ['-C', repoDir, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8', timeout: 5000 })
   const headSha = (headRes.stdout || '').trim() || 'unknown'
-  const stateRoot = process.env.SWARM_STATE_ROOT || join(homedir(), '.local', 'state', 'curl-ai-bridge')
-  const defaultVerdictPath = join(stateRoot, 'reports', `review-latest-${headSha}.json`)
+  const { reportsDir } = statePaths()
+  const defaultVerdictPath = join(reportsDir, `review-latest-${headSha}.json`)
   const payload = { ...result, headSha, reviewedAt: new Date().toISOString() }
   const outPath = resolve(verdictOut || defaultVerdictPath)
   protectedWriteFile(outPath, `${JSON.stringify(payload, null, 2)}\n`)
