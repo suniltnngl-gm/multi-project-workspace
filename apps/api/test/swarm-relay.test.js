@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, readFileSync
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus, evaluateReviewGate, computeHorizonDeadlineMs, effectiveWindowBudgetMs, parseSiblingVerdict, buildReviewBrief, pickFocusedTest, buildBuildBrief } from '../../../scripts/swarm-relay.mjs'
+import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus, evaluateReviewGate, reviewGateReason, computeHorizonDeadlineMs, effectiveWindowBudgetMs, parseSiblingVerdict, buildReviewBrief, pickFocusedTest, buildBuildBrief } from '../../../scripts/swarm-relay.mjs'
 import { computeEvidenceFingerprint, reconcileStaleDiscoveredTasks, parseSeedPayload } from '../../../scripts/swarm-discover.mjs'
 import { buildExecutiveBrief } from '../../../scripts/swarm-brief.mjs'
 import { evaluateOpenCase } from '../../../scripts/swarm-case-solve.mjs'
@@ -443,6 +443,12 @@ test('evaluateReviewGate requires artifact ACCEPT + clean deterministic gates + 
   assert.equal(evaluateReviewGate({ artifactVerdict: 'REJECT', detOk: true, headDrift: false }).reason, 'w4_verdict_reject')
   assert.equal(evaluateReviewGate({ artifactVerdict: 'ACCEPT', detOk: false, detReason: 'unit_tests_failed', headDrift: false }).reason, 'unit_tests_failed')
   assert.equal(evaluateReviewGate({ artifactVerdict: 'ACCEPT', detOk: true, headDrift: true }).reason, 'unexpected_head_advance_before_review')
+})
+
+test('#220: an empty round diff reports no_modified_files, never the passing deterministic reason', () => {
+  assert.equal(reviewGateReason({ detReason: 'deterministic_gates_passed', modifiedCount: 0 }), 'no_modified_files')
+  assert.equal(reviewGateReason({ detReason: 'deterministic_gates_passed', modifiedCount: 2 }), 'deterministic_gates_passed')
+  assert.equal(reviewGateReason({ modifiedCount: 1 }), 'deterministic_gate_failed')
 })
 
 test('Phase 3 horizon math: rolling pool reset pulls the deadline earlier; drift tightens the window budget', () => {

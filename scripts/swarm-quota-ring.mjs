@@ -20,7 +20,9 @@ import { ROOT_DIR, resolveDatabasePath } from './env.mjs'
 
 export const RING_PRESETS = Object.freeze({
   'tier1-ring': ['hermes', 'direct', 'gemini-api', 'opencode'],
-  'k5-pipeline-ring': ['hermes', 'direct', 'gemini-api', 'direct-vercel', 'guest']
+  // W3 build needs real workspace write tools; cline runs with --yolo in build windows.
+  // hermes stays at W1 so the virtual W5 guest slot falls back to a tool-capable publisher.
+  'k5-pipeline-ring': ['hermes', 'direct', 'cline', 'direct-vercel', 'guest']
 })
 
 export const PIPELINE_JOBS = Object.freeze([

@@ -16,6 +16,7 @@
  * Defaults to --dry-run (prints the relay plan, spawns nothing). Pass --execute to run.
  */
 import { randomUUID } from 'node:crypto'
+import Database from 'better-sqlite3'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
@@ -155,6 +156,33 @@ export function pickFocusedTest(files = []) {
 }
 
 /**
+ * #220: fail-soft read of the pinned board task's exact target paths and acceptance
+ * criteria. A CI checkout with no live DB simply gets no injected detail.
+ */
+export function readPinnedTaskDetails({ repoDir, taskId = null } = {}) {
+  const needle = String(taskId ?? '').replace(/^#/, '')
+  if (!/^\d+$/.test(needle)) return null
+  const dbPath = join(resolve(repoDir), 'apps', 'api', 'data', 'workspace.sqlite')
+  if (!existsSync(dbPath)) return null
+  let connection = null
+  try {
+    connection = new Database(dbPath, { readonly: true, fileMustExist: true })
+    return connection.prepare(
+      'SELECT id,title,relevant_files,acceptance_criteria,description,next_move FROM tasks WHERE id = ?'
+    ).get(Number(needle)) || null
+  } catch {
+    return null
+  } finally {
+    if (connection) connection.close()
+  }
+}
+
+/** #220: an empty round diff has its own reason, never the passing deterministic reason. */
+export function reviewGateReason({ detReason = null, modifiedCount = 0 } = {}) {
+  return modifiedCount > 0 ? (detReason || 'deterministic_gate_failed') : 'no_modified_files'
+}
+
+/**
  * $0 pre-pack for W3/W2: the board's in-progress targets, so a single-shot CLI has a
  * concrete deliverable instead of guessing. Pass `--task <id>` to pin one target.
  */
@@ -168,7 +196,21 @@ export function buildBuildBrief({ repoDir, taskId = null, maxBytes = 5000 } = {}
     if (hit) picked = [hit]
   }
   const body = picked.slice(0, 3).join('\n') || '(no in-progress board tasks)'
-  return [`## Board target(s) — pick the pinned task or the highest-priority one, implement the smallest verified change, run focused tests`, body].join('\n').slice(0, maxBytes)
+  const pinnedTask = readPinnedTaskDetails({ repoDir, taskId })
+  const parts = [
+    '## Board target(s) — pick the pinned task or the highest-priority one, implement the smallest verified change, run focused tests',
+    body
+  ]
+  if (pinnedTask?.relevant_files) {
+    parts.push('## Exact target files (pinned task relevant_files) — edit these paths only', pinnedTask.relevant_files)
+  }
+  if (pinnedTask?.acceptance_criteria) {
+    parts.push('## Acceptance criteria (pinned task)', pinnedTask.acceptance_criteria)
+  }
+  if (pinnedTask?.next_move) {
+    parts.push('## Next move (pinned task)', pinnedTask.next_move)
+  }
+  return parts.join('\n').slice(0, maxBytes)
 }
 
 export const DEFAULT_HORIZON_MS = 5 * 60 * 60 * 1000
@@ -1157,7 +1199,7 @@ export async function runRelay(argv) {
         artifactVerdict: artifact.verdict,
         artifactReason: artifact.reason,
         detOk,
-        detReason: det.reason || (modified.length ? 'deterministic_gate_failed' : 'no_modified_files'),
+        detReason: reviewGateReason({ detReason: det.reason, modifiedCount: modified.length }),
         headDrift,
         deterministicOnly: Boolean(!siblingVerdict && det.ok && !headDrift && modified.length > 0)
       })

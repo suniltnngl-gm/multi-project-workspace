@@ -119,21 +119,21 @@ test('resolveRing applies the tier1-ring preset and rejects unknown presets', ()
   assert.equal(plan.assignments[3].pool, 'opencode-tidepool-free')
 })
 
-test('k5-pipeline-ring preset rotates 5-stage jobs (discover->case-solve->build->review->publish), direct-vercel W4, and Round 6 Copilot guest W5', () => {
-  assert.deepEqual(resolveRing(null, 'k5-pipeline-ring'), ['hermes', 'direct', 'gemini-api', 'direct-vercel', 'guest'])
+test('k5-pipeline-ring preset rotates 5-stage jobs (discover->case-solve->build->review->publish), cline W3 write mode, direct-vercel W4, and Round 6 Copilot guest W5', () => {
+  assert.deepEqual(resolveRing(null, 'k5-pipeline-ring'), ['hermes', 'direct', 'cline', 'direct-vercel', 'guest'])
   const plan = buildRelayPlan({ preset: 'k5-pipeline-ring', rounds: 6, reportDir: '/tmp/relay-k5' })
   assert.equal(plan.mode, 'pipeline')
   assert.equal(plan.windows, 5)
   assert.equal(plan.rounds, 6)
   assert.equal(plan.assignments.length, 30)
 
-  // Round 1 (W1..W5): discover -> case-solve -> build -> review (direct-vercel) -> publish (live roster sibling; never the local dry-run default)
+  // Round 1 (W1..W5): discover -> case-solve -> build (cline, write mode) -> review (direct-vercel) -> publish (live roster sibling; never the local dry-run default)
   assert.deepEqual(
     plan.assignments.slice(0, 5).map((a) => ({ job: a.job, sibling: a.sibling, pool: a.pool })),
     [
       { job: 'discover', sibling: 'hermes', pool: 'nous-hermes-free' },
       { job: 'case-solve', sibling: 'direct', pool: 'cloudflare-workers-ai' },
-      { job: 'build', sibling: 'gemini-api', pool: 'gemini-api-key' },
+      { job: 'build', sibling: 'cline', pool: 'cline-free' },
       { job: 'review', sibling: 'direct-vercel', pool: 'vercel-ai-gateway' },
       { job: 'publish', sibling: 'hermes', pool: 'nous-hermes-free' }
     ]
