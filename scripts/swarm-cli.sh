@@ -158,7 +158,13 @@ case "$cmd" in
     rm -f "$STOP_FILE"
     echo "swarm: kill-switch cleared"
     ;;
+  health)
+    exec node "$MPW_DIR/scripts/swarm-health.mjs" "$@" ;;
   status)
+    if [ "${1:-}" = "--json" ]; then
+      # SWARM-HEALTH-001: machine-readable rollup (read-only).
+      exec node "$MPW_DIR/scripts/swarm-health.mjs" --json
+    fi
     node -e '
       const fs = require("fs"), path = require("path");
       const root = process.env.SWARM_STATE_ROOT || path.join(process.env.HOME, ".local/state/curl-ai-bridge");
