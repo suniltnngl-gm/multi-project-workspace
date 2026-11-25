@@ -13,6 +13,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { assertCurrentLease, assertCasWrite, currentStateVersion } from './cas-state.js'
 
 function nowIso() {
   return new Date().toISOString()
@@ -39,23 +40,39 @@ export function readJob(dir, jobId) {
 }
 
 /**
- * Atomically write a job. `expectedRevision` enforces compare-and-set: a stale writer
- * is rejected with `revision_conflict:<jobId>:<current>` and the on-disk record wins.
+ * Atomically write a job. Fail-closed on two independent guards:
+ *  - `lease` must name the resource lease the caller holds (`{ dir, resource, runId, pid, generation }`);
+ *    a missing or non-current lease throws `lease_required` / `orchestrator_lock_held`.
+ *  - `expectedStateVersion` is an If-Match check against the stored record, so a writer
+ *    that lost the race throws `stale_state_version` instead of clobbering.
+ * `expectedRevision` additionally enforces compare-and-set on the registry revision.
  */
-export function writeJob(dir, record, { expectedRevision = null } = {}) {
+export function writeJob(dir, record, { expectedRevision = null, expectedStateVersion, lease } = {}) {
   if (!record?.jobId) throw new Error('job_id_required')
+  if (!lease) throw new Error(`lease_required:${record.jobId}`)
+  const gate = assertCurrentLease({
+    leaseDir: lease.dir,
+    resource: lease.resource || 'relay-ring',
+    runId: lease.runId ?? null,
+    pid: lease.pid ?? null,
+    generation: lease.generation ?? null
+  })
+  if (!gate.ok) throw new Error(`${gate.reason}:${record.jobId}`)
+
   mkdirSync(dir, { recursive: true })
   const target = jobPath(dir, record.jobId)
-  if (expectedRevision !== null && existsSync(target)) {
-    const current = JSON.parse(readFileSync(target, 'utf8'))
-    const currentRevision = current.registry?.revision ?? 0
+  const existing = existsSync(target) ? JSON.parse(readFileSync(target, 'utf8')) : null
+  assertCasWrite(existing ?? {}, expectedStateVersion)
+  if (expectedRevision !== null && existing) {
+    const currentRevision = existing.registry?.revision ?? 0
     if (currentRevision !== expectedRevision) {
       throw new Error(`revision_conflict:${record.jobId}:${currentRevision}`)
     }
   }
   const next = {
     ...record,
-    registry: { path: target, updatedAt: nowIso(), revision: (record.registry?.revision ?? 0) + 1 }
+    stateVersion: (existing ? currentStateVersion(existing) : 0) + 1,
+    registry: { path: target, updatedAt: nowIso(), revision: ((existing?.registry?.revision) ?? (record.registry?.revision ?? 0)) + 1 }
   }
   const tmp = `${target}.tmp-${randomUUID()}`
   writeFileSync(tmp, JSON.stringify(next, null, 2))

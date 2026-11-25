@@ -15,6 +15,14 @@ import {
   claimSlot,
   releaseSlot
 } from '../../src/toolchain/dispatch/work-item-registry.js'
+import { acquireOrchestratorLock } from '../../../../scripts/swarm-orchestrator-lock.mjs'
+
+function heldLease(dir, runId = 'cas-test') {
+  const leaseDir = join(dir, 'leases')
+  const acq = acquireOrchestratorLock({ stateDir: leaseDir, runId, resource: 'relay-ring', pid: process.pid, killFn: () => {} })
+  assert.equal(acq.ok, true)
+  return { dir: leaseDir, resource: 'relay-ring', runId, pid: process.pid, generation: acq.lock.generation }
+}
 
 function tempDir() {
   return mkdtempSync(join(tmpdir(), 'reg-lattice-'))
@@ -68,11 +76,14 @@ test('job registry round-trips and bumps revision on every write', () => {
   const dir = tempDir()
   try {
     assert.deepEqual(readJobs(dir), [])
-    const first = writeJob(dir, job())
+    const lease = heldLease(dir)
+    const first = writeJob(dir, job(), { expectedStateVersion: 0, lease })
     assert.equal(first.registry.revision, 1)
+    assert.equal(first.stateVersion, 1)
     assert.equal(readJob(dir, 'JOB-1').jobId, 'JOB-1')
-    const second = writeJob(dir, { ...first, state: 'deprioritized' }, { expectedRevision: 1 })
+    const second = writeJob(dir, { ...first, state: 'deprioritized' }, { expectedRevision: 1, expectedStateVersion: first.stateVersion, lease })
     assert.equal(second.registry.revision, 2)
+    assert.equal(second.stateVersion, 2)
     assert.equal(readJob(dir, 'JOB-1').state, 'deprioritized')
     assert.equal(readJob(dir, 'missing'), null)
   } finally {
@@ -83,13 +94,20 @@ test('job registry round-trips and bumps revision on every write', () => {
 test('negative: a stale expectedRevision is rejected instead of clobbering a newer write', () => {
   const dir = tempDir()
   try {
-    const first = writeJob(dir, job())
-    writeJob(dir, { ...first, priority: 'P0' }, { expectedRevision: 1 })
+    const lease = heldLease(dir)
+    const first = writeJob(dir, job(), { expectedStateVersion: 0, lease })
+    writeJob(dir, { ...first, priority: 'P0' }, { expectedRevision: 1, expectedStateVersion: first.stateVersion, lease })
+    // Right version, stale revision -> the revision guard fires.
     assert.throws(
-      () => writeJob(dir, { ...first, priority: 'P2' }, { expectedRevision: 1 }),
+      () => writeJob(dir, { ...first, priority: 'P2' }, { expectedRevision: 1, expectedStateVersion: 2, lease }),
       /revision_conflict:JOB-1/
     )
     assert.equal(readJob(dir, 'JOB-1').priority, 'P0')
+    // Right revision, stale version -> the CAS guard fires.
+    assert.throws(
+      () => writeJob(dir, { ...first, priority: 'P3' }, { expectedRevision: 2, expectedStateVersion: first.stateVersion, lease }),
+      /stale_state_version:2:1/
+    )
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -98,8 +116,9 @@ test('negative: a stale expectedRevision is rejected instead of clobbering a new
 test('work-item registry round-trips and preserves scheduling fields', () => {
   const dir = tempDir()
   try {
-    const written = writeWorkItem(dir, workItem())
+    const written = writeWorkItem(dir, workItem(), { expectedStateVersion: 0, lease: heldLease(dir) })
     assert.equal(written.registry.revision, 1)
+    assert.equal(written.stateVersion, 1)
     const loaded = readWorkItem(dir, 'WI-1')
     assert.equal(loaded.slotRef, 'slot-1')
     assert.equal(loaded.status, 'ASSIGNED')
@@ -167,7 +186,7 @@ test('releasing a slot is owner-checked and idempotent', () => {
 test('a work-item written through the registry is valid JSON with a registry block', () => {
   const dir = tempDir()
   try {
-    writeWorkItem(dir, workItem())
+    writeWorkItem(dir, workItem(), { expectedStateVersion: 0, lease: heldLease(dir) })
     const raw = JSON.parse(readFileSync(join(dir, 'WI-1.json'), 'utf8'))
     assert.equal(raw.registry.revision, 1)
     assert.ok(raw.registry.updatedAt)

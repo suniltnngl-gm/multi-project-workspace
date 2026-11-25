@@ -16,7 +16,7 @@
  *     its lease.
  *   - Release is idempotent and owner-checked (runId + generation + pid).
  */
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, appendFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 export const ORCHESTRATOR_LOCK_SCHEMA = 'orchestrator-lock/v1'
@@ -221,6 +221,22 @@ export function renewOrchestratorLock({
   return { ok: true, lock: readOrchestratorLock(path, { readFileSync: readFn }), lockPath: path }
 }
 
+/** Audit line for an operator/automatic reclaim; best-effort, never blocks the reclaim. */
+function appendReclaimAudit(stateDir, reclaimedFrom) {
+  try {
+    const path = join(String(stateDir), 'lifecycle-transitions.jsonl')
+    const line = `${JSON.stringify({
+      event: 'lease_reclaimed_split_brain_guard',
+      holder: reclaimedFrom?.holder ?? null,
+      runId: reclaimedFrom?.runId ?? null,
+      generation: reclaimedFrom?.generation ?? null,
+      pid: reclaimedFrom?.pid ?? null,
+      at: new Date().toISOString()
+    })}\n`
+    appendFileSync(path, line, { encoding: 'utf8', mode: 0o600 })
+  } catch { /* audit is observational; a failed append must not strand the lease */ }
+}
+
 /**
  * Operator-facing reclaim (#209, case-swarm-lease-lifecycle). Applies exactly the same
  * rule as automatic reclamation — expired AND dead holder PID — so a live process is
@@ -250,5 +266,6 @@ export function reclaimExpiredOrchestratorLock({
   } catch (err) {
     if (err?.code !== 'ENOENT') throw err
   }
+  appendReclaimAudit(stateDir, existing)
   return { ok: true, reclaimed: true, lockPath: path, reclaimedFrom: existing }
 }

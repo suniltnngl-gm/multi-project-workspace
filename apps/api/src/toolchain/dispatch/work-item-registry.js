@@ -17,6 +17,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { assertCurrentLease, assertCasWrite, currentStateVersion } from './cas-state.js'
 
 export const WORK_ITEM_SLOT_SCHEMA = 'work-item-slot/v1'
 export const DEFAULT_SLOT_TTL_MS = 30 * 60 * 1000
@@ -50,24 +51,37 @@ export function readWorkItem(dir, workItemId) {
 }
 
 /**
- * Atomically write a work-item. `expectedRevision` enforces compare-and-set; a stale
- * writer is rejected with `revision_conflict:<workItemId>:<current>`.
+ * Atomically write a work-item. Same two fail-closed guards as the job registry:
+ * `lease` must name the current resource lease the caller holds, and
+ * `expectedStateVersion` is an If-Match check against the stored record.
  */
-export function writeWorkItem(dir, record, { expectedRevision = null } = {}) {
+export function writeWorkItem(dir, record, { expectedRevision = null, expectedStateVersion, lease } = {}) {
   if (!record?.workItemId) throw new Error('work_item_id_required')
+  if (!lease) throw new Error(`lease_required:${record.workItemId}`)
+  const gate = assertCurrentLease({
+    leaseDir: lease.dir,
+    resource: lease.resource || 'relay-ring',
+    runId: lease.runId ?? null,
+    pid: lease.pid ?? null,
+    generation: lease.generation ?? null
+  })
+  if (!gate.ok) throw new Error(`${gate.reason}:${record.workItemId}`)
+
   mkdirSync(dir, { recursive: true })
   const target = workItemPath(dir, record.workItemId)
-  if (expectedRevision !== null && existsSync(target)) {
-    const current = JSON.parse(readFileSync(target, 'utf8'))
-    const currentRevision = current.registry?.revision ?? 0
+  const existing = existsSync(target) ? JSON.parse(readFileSync(target, 'utf8')) : null
+  assertCasWrite(existing ?? {}, expectedStateVersion)
+  if (expectedRevision !== null && existing) {
+    const currentRevision = existing.registry?.revision ?? 0
     if (currentRevision !== expectedRevision) {
       throw new Error(`revision_conflict:${record.workItemId}:${currentRevision}`)
     }
   }
   const next = {
     ...record,
+    stateVersion: (existing ? currentStateVersion(existing) : 0) + 1,
     updatedAt: nowIso(),
-    registry: { path: target, updatedAt: nowIso(), revision: (record.registry?.revision ?? 0) + 1 }
+    registry: { path: target, updatedAt: nowIso(), revision: ((existing?.registry?.revision) ?? (record.registry?.revision ?? 0)) + 1 }
   }
   const tmp = `${target}.tmp-${randomUUID()}`
   writeFileSync(tmp, JSON.stringify(next, null, 2))
