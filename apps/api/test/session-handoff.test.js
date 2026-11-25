@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { resolveStateRoot, statePaths } from '../../../scripts/swarm-state-paths.mjs'
 import {
   MAX_HANDOFF_LINES,
   buildHandoffCard,
@@ -192,6 +193,25 @@ test('recordPoolCall increments checkPoolFiveHourAdmission for the swarm-ask poo
     const after = checkPoolFiveHourAdmission(dir, 'agy-gemini')
     assert.equal(after.callsInWindow, 1)
     assert.equal(after.admitted, true)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('swarm handoff/ask state root honours SWARM_STATE_DIR then SWARM_STATE_ROOT then default', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'handoff-state-override-'))
+  try {
+    assert.equal(resolveStateRoot({ SWARM_STATE_DIR: join(dir, 'primary') }), join(dir, 'primary'))
+    assert.equal(resolveStateRoot({ SWARM_STATE_ROOT: join(dir, 'legacy') }), join(dir, 'legacy'))
+    assert.equal(
+      resolveStateRoot({ SWARM_STATE_DIR: join(dir, 'primary'), SWARM_STATE_ROOT: join(dir, 'legacy') }),
+      join(dir, 'primary'),
+      'SWARM_STATE_DIR must take precedence over SWARM_STATE_ROOT'
+    )
+    const paths = statePaths({ SWARM_STATE_DIR: join(dir, 'primary') })
+    assert.equal(paths.root, join(dir, 'primary'))
+    assert.ok(paths.overnightDir.startsWith(paths.root), 'derived path escaped the state root')
+    assert.equal(paths.overnightDir, join(dir, 'primary', 'overnight'), 'derived path must stay under the override root')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

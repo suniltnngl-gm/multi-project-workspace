@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { resolveStateRoot } from './swarm-state-paths.mjs'
 import {
   buildHandoffCard,
   readLatestHandoff,
@@ -38,7 +39,7 @@ Options:
 }
 
 const handoffDir = flag('--handoff-dir', resolveDefaultHandoffDir())
-const stateRoot = process.env.SWARM_STATE_ROOT || join(homedir(), '.local', 'state', 'curl-ai-bridge')
+const stateRoot = resolveStateRoot()
 const mpwDir = process.env.MPW_DIR || join(homedir(), 'Code', 'multi-project-workspace')
 
 if (has('--read')) {

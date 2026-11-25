@@ -9,8 +9,8 @@
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { resolveStateRoot } from './swarm-state-paths.mjs'
 import {
   buildReadOnlyAskCommand,
   grepAllSessionTranscripts,
@@ -180,7 +180,7 @@ if (mode === 'grep') {
 }
 
 if (mode === 'llm') {
-  const stateRoot = process.env.SWARM_STATE_ROOT || join(homedir(), '.local', 'state', 'curl-ai-bridge')
+  const stateRoot = resolveStateRoot()
   const stateDir = flag('--state-dir', join(stateRoot, 'overnight'))
   const pool = flag('--pool', cli === 'agy' ? 'agy-gemini' : cli)
   const cap = checkPoolFiveHourAdmission(stateDir, pool)
