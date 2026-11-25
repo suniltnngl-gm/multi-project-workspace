@@ -53,9 +53,9 @@ import {
   writeRingState
 } from './swarm-ring-state.mjs'
 import { advanceGeminiApiRotation, alternateModelForPrimary } from './swarm-gemini-rotation.mjs'
-import { preBuildGuard } from '../apps/api/src/toolchain/dispatch/delivery-pipeline.js'
+import { preBuildGuard, applyReplanVerdict, applyRebuildVerdict } from '../apps/api/src/toolchain/dispatch/delivery-pipeline.js'
 import { quarantineDirtyWorktree } from '../apps/api/src/toolchain/dispatch/worktree-quarantine.js'
-import { readWorkItem } from '../apps/api/src/toolchain/dispatch/work-item-registry.js'
+import { readWorkItem, writeWorkItem } from '../apps/api/src/toolchain/dispatch/work-item-registry.js'
 
 export const RELAY_MODES = ['discover', 'fix', 'pipeline', 'case-solve', 'build', 'review', 'publish']
 export const DEFAULT_SIBLINGS = ['hermes', 'direct']
@@ -841,6 +841,12 @@ export async function runRelay(argv) {
   // #210: a work-item-driven round declares its binding explicitly. The pre-build guard
   // proves planRevision/baseHeadSha are still current, then ensures the tree is safe to
   // edit. Fail-closed; both flags must be supplied together.
+  // #210/#213 work-item context. Populated only when the round declares its binding.
+  const stateRoot = join(homedir(), '.local/state/curl-ai-bridge')
+  const workItemRegistryDir = join(stateRoot, 'registries', 'work-items')
+  let activeWorkItem = null
+  let workItemWriteLease = null
+
   if (opts.workItemId || opts.planFile) {
     if (!opts.workItemId || !opts.planFile) {
       process.stderr.write('swarm-relay: --work-item and --plan-file must be supplied together\n')
@@ -849,11 +855,15 @@ export async function runRelay(argv) {
     const cwd = resolve(new URL('..', import.meta.url).pathname)
     const headRes = spawnSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' })
     const headSha = String(headRes.stdout || '').trim() || null
-    const workItemDir = join(homedir(), '.local/state/curl-ai-bridge/registries/work-items')
-    const workItem = readWorkItem(workItemDir, opts.workItemId)
+    const workItem = readWorkItem(workItemRegistryDir, opts.workItemId)
     if (!workItem) {
-      process.stderr.write(`swarm-relay: work_item_not_found: ${opts.workItemId} (${workItemDir})\n`)
+      process.stderr.write(`swarm-relay: work_item_not_found: ${opts.workItemId} (${workItemRegistryDir})\n`)
       return { ok: false, mode: 'execute', executed: false, stopReason: 'work_item_not_found' }
+    }
+    activeWorkItem = workItem
+    const ring = held.find((h) => h.resource === 'relay-ring')
+    if (ring) {
+      workItemWriteLease = { dir: ring.dir, resource: 'relay-ring', runId: plan.runId, pid: ring.lock.pid, generation: ring.lock.generation }
     }
     const guard = preBuildGuard({
       repoDir: cwd,
@@ -1118,6 +1128,41 @@ export async function runRelay(argv) {
       roundVerdicts.set(assignment.round, verdict)
       roundVerdictPaths.set(assignment.round, artifact.source || null)
       entry.reviewVerdict = verdict
+      // #213: circuit breakers on the live W2/W4 verdict path. A rejection before any
+      // successful build window in this run counts as a plan REPLAN; after one it is a
+      // REBUILD. Overflow walks the adjacent tiers into a Case instead of looping.
+      if (opts.workItemId && activeWorkItem && verdict.verdict === 'REJECT') {
+        const builtThisRun = windows.some((w) => w.job === 'build' && w.status === 'ok')
+        const handler = builtThisRun ? applyRebuildVerdict : applyReplanVerdict
+        try {
+          const outcome = handler({
+            workItem: activeWorkItem,
+            caseOptions: [
+              { id: 'retry-with-guidance', label: 'Re-run the window with the reviewer critique as guidance' },
+              { id: 'operator-review', label: 'Escalate to the operator for a design decision' }
+            ],
+            ctx: { reason: verdict.reason || 'review_reject' },
+            persist: (rec) => writeWorkItem(workItemRegistryDir, rec, {
+              expectedStateVersion: activeWorkItem.stateVersion,
+              lease: workItemWriteLease
+            }),
+            auditDir: stateRoot
+          })
+          if (outcome.action === 'demoted_to_case') {
+            stopReason = 'demoted_to_case'
+            windows.push({
+              ...entry, status: 'demoted_to_case', reason: outcome.reason,
+              trail: outcome.trail.map((t) => t.hop)
+            })
+            break
+          }
+          if (outcome.workItem) activeWorkItem = outcome.workItem
+        } catch (err) {
+          stopReason = 'state_write_failed'
+          process.stderr.write(`swarm-relay: circuit_breaker:${String(err?.message || err)}\n`)
+          break
+        }
+      }
     }
     if (assignment.job === 'publish') {
       const verdict = roundVerdicts.get(assignment.round) || { verdict: 'REJECT', reason: 'missing_verdict_artifact' }

@@ -13,7 +13,9 @@ import {
   recordReplanAttempt,
   recordRebuildAttempt,
   adjacentTierDemotion,
-  preBuildGuard
+  preBuildGuard,
+  applyReplanVerdict,
+  applyRebuildVerdict
 } from '../../src/toolchain/dispatch/delivery-pipeline.js'
 import { prioritizeTaskAsJob, scheduleJobAsWorkItem } from '../../src/toolchain/dispatch/registry-lattice.js'
 
@@ -84,6 +86,61 @@ test('preBuildGuard refuses a stale plan before any edit', () => {
     assert.equal(res.reason, 'stale_plan_revision')
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('W2 circuit breaker: within budget bumps planRevision so stale plans are rejected', () => {
+  const wi = { ...scheduledWorkItem(), currentPlanRevision: 1, replanCount: 0 }
+  const persisted = []
+  const out = applyReplanVerdict({
+    workItem: wi,
+    persist: (rec) => { persisted.push(rec); return rec },
+    auditDir: null
+  })
+  assert.equal(out.action, 'replan')
+  assert.equal(out.nextPlanRevision, 2)
+  assert.equal(persisted.length, 1)
+  assert.equal(persisted[0].currentPlanRevision, 2)
+  assert.equal(persisted[0].replanCount, 1)
+})
+
+test('W2 circuit breaker: exceeding maxReplans demotes through all three tiers into a case', () => {
+  const root = mkdtempSync(join(tmpdir(), 'replan-overflow-'))
+  try {
+    const wi = { ...scheduledWorkItem(), currentPlanRevision: 2, replanCount: 2 }
+    const out = applyReplanVerdict({ workItem: wi, caseOptions: ['opt-1', 'opt-2'], auditDir: root })
+    assert.equal(out.action, 'demoted_to_case')
+    assert.equal(out.reason, 'max_replans_exceeded')
+    assert.deepEqual(out.trail.map((t) => t.hop), ['work-item>job', 'job>task', 'task>case'])
+    const audit = readFileSync(join(root, 'lifecycle-transitions.jsonl'), 'utf8').trim()
+    assert.equal(JSON.parse(audit).event, 'demoted_to_case')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('W4 circuit breaker: normal REBUILD increments, overflow demotes instead of burning quota', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rebuild-cb-'))
+  try {
+    const okOut = applyRebuildVerdict({
+      workItem: { ...scheduledWorkItem(), rebuildCount: 0 },
+      persist: (rec) => rec,
+      auditDir: root
+    })
+    assert.equal(okOut.action, 'rebuild')
+    assert.equal(okOut.rebuildCount, 1)
+
+    const over = applyRebuildVerdict({
+      workItem: { ...scheduledWorkItem(), rebuildCount: 2 },
+      caseOptions: ['opt-1', 'opt-2'],
+      auditDir: root
+    })
+    assert.equal(over.action, 'demoted_to_case')
+    assert.equal(over.reason, 'max_rebuilds_exceeded')
+    const lines = readFileSync(join(root, 'lifecycle-transitions.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+    assert.deepEqual(lines.map((l) => l.event), ['build_rebuild', 'demoted_to_case'])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })
 

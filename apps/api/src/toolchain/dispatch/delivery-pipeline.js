@@ -16,7 +16,8 @@ import {
   demoteTaskToCaseRecord
 } from './registry-lattice.js'
 import { verifyPlanBinding } from './plan-binding.js'
-import { readFileSync as defaultReadFileSync } from 'node:fs'
+import { readFileSync as defaultReadFileSync, appendFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 export const STAGE_VERDICTS = Object.freeze({
   PLAN_APPROVE: 'APPROVE_BUILD',
@@ -87,6 +88,63 @@ export function adjacentTierDemotion({ workItem, options = null, ctx = {} }) {
   trail.push({ hop: 'task>case', ok: true, caseId: asCase.id })
 
   return { ok: true, trail, job: asJob, task: asTask, case: asCase }
+}
+
+/** Audit line for lifecycle transitions; best-effort, never blocks the transition. */
+export function appendLifecycleTransition(stateDir, event) {
+  try {
+    const path = join(String(stateDir), 'lifecycle-transitions.jsonl')
+    appendFileSync(path, `${JSON.stringify({ ...event, at: new Date().toISOString() })}\n`, { encoding: 'utf8', mode: 0o600 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * W2 verdict handler (#213). Within budget: bump replanCount and planRevision so any plan
+ * artifact carrying the old revision is rejected by verifyPlanBinding. Over budget: walk
+ * the adjacent tiers into a Case instead of looping back.
+ */
+export function applyReplanVerdict({ workItem, caseOptions = null, ctx = {}, persist = null, auditDir = null }) {
+  const attempt = recordReplanAttempt(workItem)
+  if (attempt.action === 'replan') {
+    const nextPlanRevision = (Number(workItem?.currentPlanRevision) || 0) + 1
+    const updated = typeof persist === 'function'
+      ? persist({ ...workItem, replanCount: attempt.replanCount, currentPlanRevision: nextPlanRevision })
+      : { ...workItem, replanCount: attempt.replanCount, currentPlanRevision: nextPlanRevision }
+    if (auditDir) appendLifecycleTransition(auditDir, {
+      event: 'plan_replan', workItemId: workItem.workItemId,
+      replanCount: attempt.replanCount, planRevision: nextPlanRevision
+    })
+    return { ok: true, action: 'replan', replanCount: attempt.replanCount, nextPlanRevision, workItem: updated }
+  }
+  const demotion = adjacentTierDemotion({ workItem, options: caseOptions, ctx })
+  if (auditDir) appendLifecycleTransition(auditDir, {
+    event: 'demoted_to_case', workItemId: workItem.workItemId, reason: attempt.reason,
+    trail: demotion.trail.map((t) => t.hop)
+  })
+  return { ok: true, action: 'demoted_to_case', reason: attempt.reason, trail: demotion.trail, case: demotion.case }
+}
+
+/** W4 verdict handler (#213). Same contract with rebuildCount. */
+export function applyRebuildVerdict({ workItem, caseOptions = null, ctx = {}, persist = null, auditDir = null }) {
+  const attempt = recordRebuildAttempt(workItem)
+  if (attempt.action === 'rebuild') {
+    const updated = typeof persist === 'function'
+      ? persist({ ...workItem, rebuildCount: attempt.rebuildCount })
+      : { ...workItem, rebuildCount: attempt.rebuildCount }
+    if (auditDir) appendLifecycleTransition(auditDir, {
+      event: 'build_rebuild', workItemId: workItem.workItemId, rebuildCount: attempt.rebuildCount
+    })
+    return { ok: true, action: 'rebuild', rebuildCount: attempt.rebuildCount, workItem: updated }
+  }
+  const demotion = adjacentTierDemotion({ workItem, options: caseOptions, ctx })
+  if (auditDir) appendLifecycleTransition(auditDir, {
+    event: 'demoted_to_case', workItemId: workItem.workItemId, reason: attempt.reason,
+    trail: demotion.trail.map((t) => t.hop)
+  })
+  return { ok: true, action: 'demoted_to_case', reason: attempt.reason, trail: demotion.trail, case: demotion.case }
 }
 
 /**
