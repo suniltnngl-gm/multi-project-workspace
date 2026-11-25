@@ -25,7 +25,9 @@ export const TASK_COLUMNS = {
   worktree_path: "TEXT NOT NULL DEFAULT ''",
   origin_job_id: "TEXT NOT NULL DEFAULT ''",
   parent_task_id: 'INTEGER REFERENCES tasks(id) ON DELETE SET NULL',
-  agent_run_id: 'TEXT REFERENCES agent_runs(id) ON DELETE SET NULL'
+  agent_run_id: 'TEXT REFERENCES agent_runs(id) ON DELETE SET NULL',
+  registered_by: "TEXT NOT NULL DEFAULT ''",
+  governed: 'INTEGER NOT NULL DEFAULT 0'
 }
 
 function toTask(row) {

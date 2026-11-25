@@ -177,3 +177,101 @@ test('invalid input and missing database fail closed', () => {
     assert.match(missing.stderr, /database_missing_or_symlink/)
   } finally { f.close() }
 })
+
+// --- #217 multi-project resolution ----------------------------------------------
+
+function multiProjectFixture({ generation = 9 } = {}) {
+  // Both projects must share the generation the test passes via --expected-generation,
+  // otherwise the second registration correctly fails closed with a generation mismatch.
+  const f = fixture({ generation })
+  const db = createDatabase(f.databasePath)
+  try {
+    db.db.prepare(
+      'INSERT INTO project_writer_lease_state(project_id,fencing_generation,current_lease_id,updated_at) VALUES(?,?,?,?)'
+    ).run('multi-project-workspace', generation, null, new Date(0).toISOString())
+  } finally { db.close() }
+  return { ...f, generation }
+}
+
+test('#217 default resolution still lands on curl-ai-bridge when nothing is specified', () => {
+  const f = fixture()
+  try {
+    const result = run(f, 'status')
+    assert.equal(result.status, 0, result.stderr)
+    const output = JSON.parse(result.stdout)
+    // The git-root directory name is not a registered project in this fixture DB, so the
+    // legacy default must win rather than failing closed.
+    assert.equal(output.projectId, 'curl-ai-bridge')
+  } finally { f.close() }
+})
+
+test('#217 explicit --project registers a governed task under that project', () => {
+  const f = multiProjectFixture({ generation: 9 })
+  try {
+    const result = run(f, 'register', task({ project: 'multi-project-workspace', title: 'Repo-1 governed task' }), [
+      '--project', 'multi-project-workspace',
+      '--expected-generation', '9',
+      '--authorization-ref', 'operator-chat-provenance:multi-project-test',
+      '--idempotency-key', 'multi-project-cli-test'
+    ])
+    assert.equal(result.status, 0, result.stderr)
+    const output = JSON.parse(result.stdout)
+    assert.equal(output.projectId, 'multi-project-workspace')
+    assert.equal(output.governed, true)
+    assert.equal(output.registeredBy, 'task-bootstrap-register-current')
+
+    const read = new Database(f.databasePath, { readonly: true, fileMustExist: true })
+    try {
+      const stored = read.prepare('SELECT project,registered_by,governed FROM tasks WHERE id=?').get(output.taskId)
+      assert.deepEqual(stored, { project: 'multi-project-workspace', registered_by: 'task-bootstrap-register-current', governed: 1 })
+      assert.equal(read.prepare("SELECT fencing_generation FROM project_writer_lease_state WHERE project_id='multi-project-workspace'").get().fencing_generation, 9)
+    } finally { read.close() }
+  } finally { f.close() }
+})
+
+test('#217 title dedupe is scoped per project, so equal titles in two projects do not collide', () => {
+  const f = multiProjectFixture({ generation: 9 })
+  try {
+    const argsFor = (key) => [
+      '--expected-generation', '9',
+      '--authorization-ref', 'operator-chat-provenance:dedupe-test',
+      '--idempotency-key', key
+    ]
+    const payload = { project: 'multi-project-workspace', title: 'Shared title', task_type: 'feature' }
+    const first = run(f, 'register', payload, ['--project', 'multi-project-workspace', ...argsFor('dedupe-multi')])
+    assert.equal(first.status, 0, first.stderr)
+    const otherPayload = { project: 'curl-ai-bridge', title: 'Shared title', task_type: 'feature' }
+    const second = run(f, 'register', otherPayload, ['--project', 'curl-ai-bridge', ...argsFor('dedupe-cab')])
+    assert.equal(second.status, 0, second.stderr)
+    assert.notEqual(JSON.parse(first.stdout).taskId, JSON.parse(second.stdout).taskId)
+
+    // Same project + same title is deduplicated instead of creating a duplicate.
+    const third = run(f, 'register', payload, ['--project', 'multi-project-workspace', ...argsFor('dedupe-multi-2')])
+    assert.equal(third.status, 0, third.stderr)
+    const thirdOut = JSON.parse(third.stdout)
+    assert.equal(thirdOut.replayed, true)
+    assert.equal(thirdOut.deduplicatedByTitle, true)
+    assert.equal(thirdOut.taskId, JSON.parse(first.stdout).taskId)
+
+    const read = new Database(f.databasePath, { readonly: true, fileMustExist: true })
+    try { assert.equal(read.prepare('SELECT count(*) AS count FROM tasks').get().count, 2) }
+    finally { read.close() }
+  } finally { f.close() }
+})
+
+test('#217 unregistered project slug fails closed without creating a task', () => {
+  const f = fixture()
+  try {
+    const result = run(f, 'register', task({ project: 'typo-prject' }), [
+      '--project', 'typo-prject',
+      '--expected-generation', '7',
+      '--authorization-ref', 'operator-chat-provenance:unknown-project',
+      '--idempotency-key', 'unknown-project-test'
+    ])
+    assert.equal(result.status, 2)
+    assert.match(result.stderr, /unknown_project/)
+    const read = new Database(f.databasePath, { readonly: true, fileMustExist: true })
+    try { assert.equal(read.prepare('SELECT count(*) AS count FROM tasks').get().count, 0) }
+    finally { read.close() }
+  } finally { f.close() }
+})
