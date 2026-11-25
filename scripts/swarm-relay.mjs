@@ -20,7 +20,7 @@ import Database from 'better-sqlite3'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
   checkPoolFiveHourAdmission,
@@ -117,6 +117,45 @@ export function evaluateReviewGate({ artifactVerdict = null, artifactReason = nu
   return { verdict: 'REJECT', reason: 'w4_verdict_reject' }
 }
 
+/** #222: explicit, machine-readable reason when a sibling advances HEAD mid-round. */
+export function headDriftReason() {
+  return 'head_drift_mid_round'
+}
+
+const FORBID_COMMIT_HOOK = `#!/bin/sh
+# Scoped relay guard for W1..W4. Refuses commits while SWARM_FORBID_COMMIT=1.
+# Removed before W5 publish and on error/exit; never overwrites an existing hook.
+if [ "\${SWARM_FORBID_COMMIT:-0}" = "1" ]; then
+  echo "swarm relay: commit/push forbidden before the W5 publish gate" >&2
+  exit 1
+fi
+exit 0
+`
+
+/** Install the W1..W4 forbid-commit hooks only where no hook already exists. */
+export function installForbidCommitHook(repoDir) {
+  const hooksDir = join(resolve(repoDir), '.git', 'hooks')
+  if (!existsSync(hooksDir)) mkdirSync(hooksDir, { recursive: true, mode: 0o700 })
+  let installed = false
+  for (const name of ['pre-commit', 'pre-push']) {
+    const hookPath = join(hooksDir, name)
+    if (!existsSync(hookPath)) {
+      writeFileSync(hookPath, FORBID_COMMIT_HOOK, { mode: 0o700 })
+      installed = true
+    }
+  }
+  return installed
+}
+
+/** Idempotent cleanup: missing hooks and missing .git/hooks are both fine. */
+export function removeForbidCommitHook(repoDir) {
+  const hooksDir = join(resolve(repoDir), '.git', 'hooks')
+  if (!existsSync(hooksDir)) return
+  for (const name of ['pre-commit', 'pre-push']) {
+    rmSync(join(hooksDir, name), { force: true })
+  }
+}
+
 /** Parse only an explicit standalone `VERDICT: ACCEPT|REJECT` line; ignore tool-call JSON. */
 export function parseSiblingVerdict(stdoutText) {
   for (const line of String(stdoutText || '').split(/\r?\n/)) {
@@ -185,7 +224,8 @@ export function readPinnedTaskDetails({ repoDir, taskId = null } = {}) {
 }
 
 /** #220: an empty round diff has its own reason, never the passing deterministic reason. */
-export function reviewGateReason({ detReason = null, modifiedCount = 0 } = {}) {
+export function reviewGateReason({ detReason = null, modifiedCount = 0, headDrift = false } = {}) {
+  if (headDrift) return headDriftReason()
   return modifiedCount > 0 ? (detReason || 'deterministic_gate_failed') : 'no_modified_files'
 }
 
@@ -482,6 +522,7 @@ export function buildSiblingPrompt({
       roleLine,
       `Apply the smallest verified fix set for the active case/task, run focused tests, and write a concise JSON report to ${reportPath}.`,
       'Never force-push, never reset --hard, never discard untracked work.',
+      'Never git commit or git push in this window: non-publish windows run with SWARM_FORBID_COMMIT=1 and a scoped pre-commit hook; leave edits for W4 review and W5 gated checkpoint.',
       deadlineLine,
       budget,
       buildBrief,
@@ -978,6 +1019,9 @@ export async function runRelay(argv) {
   const backupRoot = join(homedir(), '.local/state/curl-ai-bridge/repo-checkpoints')
   const totalWindows = plan.rounds === 'continuous' ? Number.POSITIVE_INFINITY : plan.windows * plan.rounds
 
+  // #222: W1..W4 are forbidden from committing. The scoped hook is installed at
+  // each round start, removed before W5 publish, and removed again on error/exit.
+  try {
   for (let index = 0; index < totalWindows; index += 1) {
     if (index % plan.siblings.length === 0) {
       roundBase = roundBaseSha(cwd)
@@ -985,6 +1029,8 @@ export async function runRelay(argv) {
       // and remember which files existed before the build window touched them.
       roundPreExisting = modifiedFilesSince({ repoDir: cwd, baseSha: roundBase })
       snapshotRestorePoints(roundPreExisting, { repoDir: cwd, backupRoot })
+      // #222: fail-closed W1..W4 guard; removed before W5 publish.
+      installForbidCommitHook(cwd)
     }
     const remainingHorizonMs = horizonDeadlineMs - Date.now()
     // Never start a round/window that cannot fit inside the 5h horizon.
@@ -1086,6 +1132,7 @@ export async function runRelay(argv) {
       ...process.env,
       ...windowPolicyEnv(assignment.job),
       ...gateEnv,
+      SWARM_FORBID_COMMIT: assignment.job === 'publish' ? '0' : '1',
       SWARM_RELAY_WINDOW: String(assignment.window),
       SWARM_RELAY_MODE: plan.mode,
       SWARM_RELAY_JOB: assignment.job,
@@ -1206,7 +1253,7 @@ export async function runRelay(argv) {
         artifactVerdict: artifact.verdict,
         artifactReason: artifact.reason,
         detOk,
-        detReason: reviewGateReason({ detReason: det.reason, modifiedCount: modified.length }),
+        detReason: reviewGateReason({ detReason: det.reason, modifiedCount: modified.length, headDrift }),
         headDrift,
         deterministicOnly: Boolean(!siblingVerdict && det.ok && !headDrift && modified.length > 0)
       })
@@ -1250,6 +1297,8 @@ export async function runRelay(argv) {
       }
     }
     if (assignment.job === 'publish') {
+      // #222: W1..W4 enforcement ends here; W5 is the only window allowed to commit.
+      removeForbidCommitHook(cwd)
       const verdict = roundVerdicts.get(assignment.round) || { verdict: 'REJECT', reason: 'missing_verdict_artifact' }
       const verdictArtifactPath = roundVerdictPaths.get(assignment.round) || null
       const gate = applyPublishGate({
@@ -1407,6 +1456,9 @@ export async function runRelay(argv) {
       stopReason = 'sibling_failed'
       flushWindowReport()
     }
+  }
+  } finally {
+    removeForbidCommitHook(cwd)
   }
 
   const roundsCompleted = new Set(windows.map((w) => w.round)).size

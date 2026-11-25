@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, readFileSync
 import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus, w5CleanupReportPath, evaluateReviewGate, reviewGateReason, computeHorizonDeadlineMs, effectiveWindowBudgetMs, parseSiblingVerdict, buildReviewBrief, pickFocusedTest, buildBuildBrief } from '../../../scripts/swarm-relay.mjs'
+import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus, w5CleanupReportPath, headDriftReason, installForbidCommitHook, removeForbidCommitHook, evaluateReviewGate, reviewGateReason, computeHorizonDeadlineMs, effectiveWindowBudgetMs, parseSiblingVerdict, buildReviewBrief, pickFocusedTest, buildBuildBrief } from '../../../scripts/swarm-relay.mjs'
 import { computeEvidenceFingerprint, reconcileStaleDiscoveredTasks, parseSeedPayload } from '../../../scripts/swarm-discover.mjs'
 import { buildExecutiveBrief } from '../../../scripts/swarm-brief.mjs'
 import { evaluateOpenCase } from '../../../scripts/swarm-case-solve.mjs'
@@ -456,6 +456,36 @@ test('#221: W5 cleanup report path is a string, never the plan object', () => {
   assert.equal(w5CleanupReportPath({ assignment: { reportPath: '/tmp/w5.json' }, plan: { mode: 'pipeline' } }), '/tmp/w5.json')
   assert.throws(() => w5CleanupReportPath({ assignment: { reportPath: { mode: 'pipeline' } } }), /w5_cleanup_report_path_required/)
   assert.throws(() => w5CleanupReportPath({}), /w5_cleanup_report_path_required/)
+})
+
+test('#222: mid-round head drift emits an explicit reason, not a generic gate reason', () => {
+  assert.equal(headDriftReason(), 'head_drift_mid_round')
+  assert.equal(reviewGateReason({ detReason: 'deterministic_gates_passed', modifiedCount: 2, headDrift: true }), 'head_drift_mid_round')
+  assert.equal(
+    evaluateReviewGate({ artifactVerdict: 'ACCEPT', artifactReason: 'w4_sibling_stdout_accept', detOk: false, detReason: headDriftReason(), headDrift: true }).reason,
+    'head_drift_mid_round'
+  )
+})
+
+test('#222: forbid-commit hooks install idempotently and never clobber an existing hook', () => {
+  const repo = mkdtempSync(join(tmpdir(), 'relay-forbid-commit-'))
+  try {
+    mkdirSync(join(repo, '.git', 'hooks'), { recursive: true })
+    assert.equal(installForbidCommitHook(repo), true)
+    const hook = join(repo, '.git', 'hooks', 'pre-commit')
+    assert.equal(existsSync(hook), true)
+    assert.match(readFileSync(hook, 'utf8'), /SWARM_FORBID_COMMIT/)
+    assert.equal(installForbidCommitHook(repo), false, 'second install must not overwrite')
+    writeFileSync(hook, '#!/bin/sh\nexit 0\n')
+    installForbidCommitHook(repo)
+    assert.equal(readFileSync(hook, 'utf8'), '#!/bin/sh\nexit 0\n', 'existing hook preserved')
+    removeForbidCommitHook(repo)
+    assert.equal(existsSync(hook), false)
+    assert.equal(existsSync(join(repo, '.git', 'hooks', 'pre-push')), false)
+    removeForbidCommitHook(repo)
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
 })
 
 test('Phase 3 horizon math: rolling pool reset pulls the deadline earlier; drift tightens the window budget', () => {
