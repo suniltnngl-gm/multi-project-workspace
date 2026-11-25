@@ -27,6 +27,12 @@ import {
 import { scanAndCompactLocalSessions } from '../apps/api/src/toolchain/dispatch/session-compactor.js'
 import { createLeaseStore } from '../apps/api/src/toolchain/dispatch/lease-store.js'
 import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
+import {
+  acquireOrchestratorLock,
+  releaseOrchestratorLock,
+  renewOrchestratorLock,
+  DEFAULT_ORCHESTRATOR_LOCK_TTL_MS
+} from './swarm-orchestrator-lock.mjs'
 import { discoverCandidates, reconcileStaleDiscoveredTasks } from './swarm-discover.mjs'
 
 const argv = process.argv.slice(2)
@@ -181,6 +187,31 @@ while (true) {
     continue
   }
 
+  // #209: fence the shared quota ledger for this tick's writes. Read-only probes
+  // (the admission check above) stay lease-free; only the write boundary takes it.
+  const ledgerRunId = `overnight-${startedAtMs}`
+  const ledgerLease = acquireOrchestratorLock({
+    stateDir: opts.stateDir,
+    runId: ledgerRunId,
+    resource: 'quota-ledger',
+    holder: 'swarm-overnight'
+  })
+  if (!ledgerLease.ok) {
+    ticks.push({
+      tick: ticks.length + 1, taskId: nextTask.taskId, pool,
+      status: 'deferred_orchestrator_lease', reason: ledgerLease.reason, holder: ledgerLease.holder
+    })
+    stopReason = 'orchestrator_lease_held'
+    break
+  }
+  const renewHeartbeat = setInterval(() => {
+    renewOrchestratorLock({
+      stateDir: opts.stateDir, runId: ledgerRunId, generation: ledgerLease.lock.generation,
+      pid: ledgerLease.lock.pid, resource: 'quota-ledger'
+    })
+  }, Math.max(60_000, Math.floor(DEFAULT_ORCHESTRATOR_LOCK_TTL_MS / 3)))
+  renewHeartbeat.unref?.()
+
   const queueRunner = resolve(new URL('./swarm-queue-run.mjs', import.meta.url).pathname)
   const res = spawnSync(
     process.execPath,
@@ -188,7 +219,17 @@ while (true) {
     { cwd: resolve(new URL('..', import.meta.url).pathname), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 300_000 }
   )
   const ok = res.status === 0
+  // Heartbeat at the write boundary, then record and release.
+  renewOrchestratorLock({
+    stateDir: opts.stateDir, runId: ledgerRunId, generation: ledgerLease.lock.generation,
+    pid: ledgerLease.lock.pid, resource: 'quota-ledger'
+  })
+  clearInterval(renewHeartbeat)
   recordPoolCall(opts.stateDir, { quotaPool: pool, taskId: nextTask.taskId, status: ok ? 'ok' : `exit_${res.status}` })
+  releaseOrchestratorLock({
+    stateDir: opts.stateDir, runId: ledgerRunId, generation: ledgerLease.lock.generation,
+    pid: ledgerLease.lock.pid, resource: 'quota-ledger'
+  })
   ticks.push({ tick: ticks.length + 1, taskId: nextTask.taskId, pool, status: ok ? 'ok' : 'failed', exitCode: res.status })
   consecutiveFailures = ok ? 0 : consecutiveFailures + 1
 }

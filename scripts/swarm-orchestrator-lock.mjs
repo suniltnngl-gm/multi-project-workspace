@@ -21,9 +21,19 @@ import { dirname, join } from 'node:path'
 
 export const ORCHESTRATOR_LOCK_SCHEMA = 'orchestrator-lock/v1'
 export const DEFAULT_ORCHESTRATOR_LOCK_TTL_MS = 30 * 60 * 1000
+export const DEFAULT_ORCHESTRATOR_RESOURCE = 'orchestrator'
 
-export function orchestratorLockPath(stateDir) {
-  return join(String(stateDir), 'orchestrator.lock.json')
+/**
+ * Resolve a resource-scoped lease path: `<stateDir>/<resource>.lock.json`.
+ * The default keeps the historical `orchestrator.lock.json` name so existing
+ * callers are unaffected; shared resources (quota ledger, queue) get their own
+ * name so unrelated modes never block each other.
+ */
+export function orchestratorLockPath(stateDir, { resource = DEFAULT_ORCHESTRATOR_RESOURCE } = {}) {
+  const name = String(resource || '').trim()
+  if (!name) throw new Error('resource_required')
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new Error(`resource_name_invalid:${name}`)
+  return join(String(stateDir), `${name}.lock.json`)
 }
 
 function parseLock(text) {
@@ -71,6 +81,8 @@ function serialize(lock) {
 export function acquireOrchestratorLock({
   stateDir,
   runId,
+  resource = DEFAULT_ORCHESTRATOR_RESOURCE,
+  holder = 'swarm-relay',
   pid = process.pid,
   nowMs = Date.now(),
   ttlMs = DEFAULT_ORCHESTRATOR_LOCK_TTL_MS,
@@ -79,11 +91,12 @@ export function acquireOrchestratorLock({
   writeFileSync: writeFn = writeFileSync,
   unlinkSync: unlinkFn = unlinkSync
 } = {}) {
-  const path = orchestratorLockPath(stateDir)
+  const path = orchestratorLockPath(stateDir, { resource })
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
   const fresh = () => ({
     schema: ORCHESTRATOR_LOCK_SCHEMA,
-    holder: 'swarm-relay',
+    holder: String(holder),
+    resource: String(resource),
     runId: String(runId),
     pid: Number(pid),
     startedAt: new Date(nowMs).toISOString(),
@@ -151,10 +164,11 @@ export function releaseOrchestratorLock({
   runId,
   generation = null,
   pid = process.pid,
+  resource = DEFAULT_ORCHESTRATOR_RESOURCE,
   readFileSync: readFn = readFileSync,
   unlinkSync: unlinkFn = unlinkSync
 } = {}) {
-  const path = orchestratorLockPath(stateDir)
+  const path = orchestratorLockPath(stateDir, { resource })
   const existing = readOrchestratorLock(path, { readFileSync: readFn })
   if (!existsSync(path) || !existing) return { ok: true, released: false, reason: 'no_lock', lockPath: path }
   if (
@@ -170,4 +184,71 @@ export function releaseOrchestratorLock({
     if (err?.code !== 'ENOENT') throw err
   }
   return { ok: true, released: true, lockPath: path }
+}
+
+/**
+ * Heartbeat renewal (#209, case-swarm-lease-lifecycle). Owner-checked on runId,
+ * generation and pid: a superseded or foreign writer cannot extend a lease it does
+ * not hold. Extends `expiresAt` by `ttlMs` from `nowMs` and stamps `renewedAt`.
+ */
+export function renewOrchestratorLock({
+  stateDir,
+  runId,
+  generation,
+  pid = process.pid,
+  resource = DEFAULT_ORCHESTRATOR_RESOURCE,
+  nowMs = Date.now(),
+  ttlMs = DEFAULT_ORCHESTRATOR_LOCK_TTL_MS,
+  readFileSync: readFn = readFileSync,
+  writeFileSync: writeFn = writeFileSync
+} = {}) {
+  const path = orchestratorLockPath(stateDir, { resource })
+  const existing = readOrchestratorLock(path, { readFileSync: readFn })
+  if (!existsSync(path) || !existing) return { ok: false, reason: 'no_lock', lockPath: path }
+  const ownerMatches = String(existing.runId) === String(runId)
+    && Number(existing.pid) === Number(pid)
+    && (generation === null || Number(existing.generation) === Number(generation))
+  if (!ownerMatches) {
+    return { ok: false, reason: 'lock_owner_mismatch', lockPath: path, holder: existing.runId }
+  }
+  const renewed = {
+    ...existing,
+    expiresAt: new Date(nowMs + Number(ttlMs)).toISOString(),
+    expiresAtMs: nowMs + Number(ttlMs),
+    renewedAt: new Date(nowMs).toISOString()
+  }
+  writeFn(path, serialize(renewed), { encoding: 'utf8', mode: 0o600 })
+  return { ok: true, lock: readOrchestratorLock(path, { readFileSync: readFn }), lockPath: path }
+}
+
+/**
+ * Operator-facing reclaim (#209, case-swarm-lease-lifecycle). Applies exactly the same
+ * rule as automatic reclamation — expired AND dead holder PID — so a live process is
+ * never preempted by an operator action. Use this instead of unlinking a lock by hand.
+ */
+export function reclaimExpiredOrchestratorLock({
+  stateDir,
+  resource = DEFAULT_ORCHESTRATOR_RESOURCE,
+  nowMs = Date.now(),
+  killFn = process.kill,
+  readFileSync: readFn = readFileSync,
+  unlinkSync: unlinkFn = unlinkSync
+} = {}) {
+  const path = orchestratorLockPath(stateDir, { resource })
+  const existing = readOrchestratorLock(path, { readFileSync: readFn })
+  if (!existsSync(path) || !existing) return { ok: true, reclaimed: false, reason: 'no_lock', lockPath: path }
+
+  const expiresMs = Number.isFinite(Number(existing.expiresAtMs))
+    ? Number(existing.expiresAtMs)
+    : Date.parse(existing.expiresAt)
+  const expired = Number.isFinite(expiresMs) && nowMs > expiresMs
+  if (!expired) return { ok: false, reclaimed: false, reason: 'lease_not_expired', lockPath: path, holder: existing.runId, expiresAt: existing.expiresAt }
+  if (pidAlive(existing.pid, killFn)) return { ok: false, reclaimed: false, reason: 'holder_pid_alive', lockPath: path, holder: existing.runId, pid: existing.pid }
+
+  try {
+    unlinkFn(path)
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err
+  }
+  return { ok: true, reclaimed: true, lockPath: path, reclaimedFrom: existing }
 }

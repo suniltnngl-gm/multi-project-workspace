@@ -32,7 +32,9 @@ import { formatQuotaStatusLine } from './swarm-doctor-quota.mjs'
 import { windowPolicyEnv } from './swarm-window-policy.mjs'
 import {
   acquireOrchestratorLock,
-  releaseOrchestratorLock
+  releaseOrchestratorLock,
+  renewOrchestratorLock,
+  DEFAULT_ORCHESTRATOR_LOCK_TTL_MS
 } from './swarm-orchestrator-lock.mjs'
 import {
   PIPELINE_JOBS,
@@ -770,28 +772,61 @@ export async function runRelay(argv) {
     return { ok: true, mode: 'dry-run', executed: false, plan, schedulePath }
   }
 
-  // #206 split-brain containment: only `--execute` runs take the orchestrator lock.
-  // A live holder is never preempted; the caller fails closed with diagnostics.
-  const acquired = acquireOrchestratorLock({ stateDir: lockDir, runId: plan.runId })
-  if (!acquired.ok) {
+  // #206 split-brain containment, #209 resource-scoped leases. Only `--execute` runs
+  // take leases; a live holder is never preempted and the caller fails closed with
+  // diagnostics. Two resources: relay's own ring ledger, and the shared quota ledger
+  // that both relay and the overnight supervisor write.
+  const held = []
+  const releaseLocks = () => {
+    while (held.length) {
+      const h = held.pop()
+      releaseOrchestratorLock({
+        stateDir: h.dir, runId: plan.runId, generation: h.lock.generation, resource: h.resource
+      })
+    }
+  }
+  const acquireResource = (resource, dir) => {
+    const res = acquireOrchestratorLock({ stateDir: dir, runId: plan.runId, resource, holder: 'swarm-relay' })
+    if (!res.ok) return res
+    held.push({ resource, dir, lock: res.lock })
+    return res
+  }
+  let failure = null
+  for (const [resource, dir] of [['relay-ring', lockDir], ['quota-ledger', stateDir]]) {
+    const res = acquireResource(resource, dir)
+    if (!res.ok) { failure = res; break }
+  }
+  if (failure) {
     process.stderr.write(
-      `swarm-relay: ${acquired.reason}: holder=${acquired.holder} runId=${acquired.runId} `
-      + `pid=${acquired.pid} ageSec=${acquired.ageSec} expiresAt=${acquired.expiresAt}\n`
+      `swarm-relay: ${failure.reason}: resource=${failure.lockPath?.split('/').pop()} `
+      + `holder=${failure.holder} runId=${failure.runId} pid=${failure.pid} `
+      + `ageSec=${failure.ageSec} expiresAt=${failure.expiresAt}\n`
     )
-    return { ok: false, mode: 'execute', executed: false, stopReason: acquired.reason, lock: acquired }
+    releaseLocks()
+    return { ok: false, mode: 'execute', executed: false, stopReason: failure.reason, lock: failure }
   }
-  let lockHeld = true
-  const releaseLock = () => {
-    if (!lockHeld) return
-    releaseOrchestratorLock({ stateDir: lockDir, runId: plan.runId, generation: acquired.lock.generation })
-    lockHeld = false
-  }
+  // Heartbeat (#209 / case-swarm-lease-lifecycle): renew every third of the TTL so a long
+  // round cannot lose a lease it still legitimately holds.
+  const heartbeatMs = Math.max(60_000, Math.floor(DEFAULT_ORCHESTRATOR_LOCK_TTL_MS / 3))
+  const heartbeat = setInterval(() => {
+    for (const h of held) {
+      renewOrchestratorLock({
+        stateDir: h.dir, runId: plan.runId, generation: h.lock.generation,
+        pid: h.lock.pid, resource: h.resource, ttlMs: DEFAULT_ORCHESTRATOR_LOCK_TTL_MS
+      })
+    }
+  }, heartbeatMs)
+  heartbeat.unref?.()
   // Release on normal exit/error exit, and explicitly on signals so a stall kill or
-  // Ctrl-C cannot strand the lease for its full TTL.
-  process.on('exit', releaseLock)
+  // Ctrl-C cannot strand a lease for its full TTL.
+  process.on('exit', () => {
+    clearInterval(heartbeat)
+    releaseLocks()
+  })
   for (const sig of ['SIGINT', 'SIGTERM']) {
     process.once(sig, () => {
-      releaseLock()
+      clearInterval(heartbeat)
+      releaseLocks()
       process.kill(process.pid, sig)
     })
   }

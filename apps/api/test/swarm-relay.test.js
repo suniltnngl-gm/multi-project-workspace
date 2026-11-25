@@ -280,7 +280,7 @@ test('execute fails closed when another orchestrator holds the lock (#206)', () 
     mkdirSync(home, { recursive: true })
     // The relay takes its lease beside the ring ledger: the --ring-state-dir passed below.
     mkdirSync(ring, { recursive: true })
-    const lockPath = join(ring, 'orchestrator.lock.json')
+    const lockPath = join(ring, 'relay-ring.lock.json')
     writeFileSync(lockPath, `${JSON.stringify({
       schema: 'orchestrator-lock/v1',
       holder: 'swarm-relay',
