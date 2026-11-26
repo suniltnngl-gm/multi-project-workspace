@@ -8,7 +8,8 @@ import {
   ringStatePath,
   readRingState,
   writeRingState,
-  createRingState
+  createRingState,
+  advanceRingState
 } from '../../../scripts/swarm-ring-state.mjs'
 import { DEFAULT_STATE_ROOT, statePaths } from '../../../scripts/swarm-state-paths.mjs'
 
@@ -65,5 +66,45 @@ test('ring ledger round-trips through the SWARM_STATE_DIR override tree only', (
   } finally {
     rmSync(dir, { recursive: true, force: true })
     rmSync(realHome, { recursive: true, force: true })
+  }
+})
+
+test('advanceRingState enforces single-active-parent invariant and writeRingState blocks stale generation split-brain', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ring-split-brain-'))
+  try {
+    let state = createRingState({ siblings: ['hermes', 'direct', 'gemini-api'], mode: 'pipeline', runId: 'run-A' })
+    // W1: sibling1 promoted to parent1
+    state = advanceRingState(state, {
+      window: 1, sibling: 'hermes', siblingSlot: 'sibling1',
+      promotedToParentSlot: 'parent1', demotedFromParentSlot: null, parentSlot: null
+    })
+    assert.equal(state.activeParentSlot, 'parent1')
+    assert.equal(Object.values(state.slots).filter((s) => s.role === 'parent').length, 1)
+
+    // W2: sibling2 promoted to parent2 -> parent1 MUST be demoted so only 1 active parent exists
+    state = advanceRingState(state, {
+      window: 2, sibling: 'direct', siblingSlot: 'sibling2',
+      promotedToParentSlot: 'parent2', demotedFromParentSlot: null, parentSlot: 'parent1'
+    })
+    assert.equal(state.activeParentSlot, 'parent2')
+    assert.equal(state.slots.sibling1.role, 'sibling')
+    assert.equal(state.slots.sibling1.promotedAs, null)
+    assert.equal(state.slots.sibling2.role, 'parent')
+    assert.equal(state.slots.sibling2.promotedAs, 'parent2')
+    assert.equal(Object.values(state.slots).filter((s) => s.role === 'parent').length, 1)
+
+    // CAS generation fencing: writing with stale expectedGeneration fails closed
+    writeRingState(dir, state, { expectedGeneration: 0 })
+    assert.throws(
+      () => writeRingState(dir, { ...state, generation: 1 }, { expectedGeneration: 1 }),
+      /ring_state_generation_conflict/
+    )
+    // Concurrent runId with lower generation cannot clobber newer generation
+    assert.throws(
+      () => writeRingState(dir, { ...state, runId: 'run-B', generation: 1 }),
+      /ring_state_generation_conflict/
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
   }
 })

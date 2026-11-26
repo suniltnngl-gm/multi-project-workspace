@@ -129,12 +129,12 @@ export function computeHealthRollup({
       dirtyTreesQuarantined: quarantined,
       replanLoops: counterFromEvents(events, ['plan_replan']),
       rebuildLoops: counterFromEvents(events, ['build_rebuild']),
-      leaseContentionsBlocked: null,
+      leaseContentionsBlocked: lifecycle.present ? counterFromEvents(events, ['orchestrator_lock_held', 'lease_contention']) : null,
       // #216: refusals are audited into lifecycle-transitions.jsonl as pool_call_rejected.
-      casConflictsPrevented: lifecycle.present ? counterFromEvents(events, ['pool_call_rejected']) : null,
-      stalePlansBlocked: null,
-      discoverDuplicatesDeduped: null,
-      notInstrumented: ['leaseContentionsBlocked', 'stalePlansBlocked', 'discoverDuplicatesDeduped']
+      casConflictsPrevented: lifecycle.present ? counterFromEvents(events, ['pool_call_rejected', 'ring_state_generation_conflict']) : null,
+      stalePlansBlocked: lifecycle.present ? counterFromEvents(events, ['stale_plan_revision', 'stale_base_head']) : null,
+      discoverDuplicatesDeduped: lifecycle.present ? counterFromEvents(events, ['duplicate_fingerprint']) : null,
+      notInstrumented: lifecycle.present ? [] : ['leaseContentionsBlocked', 'stalePlansBlocked', 'discoverDuplicatesDeduped']
     },
     delivery: {
       commitsPushed,

@@ -104,6 +104,17 @@ export function advanceRingState(state, assignment, detail = {}, { nowIso = new 
   slot.pool = detail.pool ?? slot.pool
   slot.parentSlot = assignment.parentSlot || null
   slot.findingsPath = detail.findingsPath ?? slot.findingsPath
+
+  // Single-active-parent invariant (prevents rotating-parent split-brain):
+  // First demote any previously promoted parent (including explicit wrap-around demotion),
+  // then promote ONLY the completing slot if it is a different slot or not being demoted.
+  for (const [k, s] of Object.entries(next.slots)) {
+    if (k !== slotKey && s.role === 'parent') {
+      s.role = 'sibling'
+      s.promotedAs = null
+    }
+  }
+
   slot.role = assignment.promotedToParentSlot ? 'parent' : 'sibling'
   slot.promotedAs = assignment.promotedToParentSlot || null
 
@@ -117,6 +128,7 @@ export function advanceRingState(state, assignment, detail = {}, { nowIso = new 
     }
   }
 
+  next.activeParentSlot = slot.promotedAs || null
   next.window = assignment.window
   next.round = Math.floor((assignment.window - 1) / next.siblings.length) + 1
   next.activeSlot = slotKey
@@ -142,8 +154,26 @@ export function resolveSlot(state, keyOrCli) {
   return { key: preferred[0], ...preferred[1] }
 }
 
-/** Atomic write via the guarded mutation helper (per-file recovery backup). */
-export function writeRingState(dir, state) {
+/**
+ * Atomic CAS-fenced write via the guarded mutation helper (per-file recovery backup).
+ * Prevents concurrent-writer split-brain: if `expectedGeneration` is supplied (or if
+ * on-disk `generation >= state.generation` for a different `runId`), fails closed with
+ * `ring_state_generation_conflict` instead of silently clobbering a newer parent rotation.
+ */
+export function writeRingState(dir, state, { expectedGeneration = null } = {}) {
+  const existing = readRingState(dir)
+  if (expectedGeneration !== null) {
+    const diskGen = existing ? Number(existing.generation || 0) : 0
+    if (diskGen !== Number(expectedGeneration)) {
+      throw new Error(`ring_state_generation_conflict:expected=${expectedGeneration},disk=${diskGen}`)
+    }
+  } else if (existing && state && existing.runId && state.runId && existing.runId !== state.runId && !existing.finishedAt) {
+    const diskGen = Number(existing.generation || 0)
+    const nextGen = Number(state.generation || 0)
+    if (diskGen > nextGen) {
+      throw new Error(`ring_state_generation_conflict:runId=${state.runId},diskRunId=${existing.runId},diskGen=${diskGen},nextGen=${nextGen}`)
+    }
+  }
   return protectedWriteFile(ringStatePath(dir), `${JSON.stringify(state, null, 2)}\n`)
 }
 

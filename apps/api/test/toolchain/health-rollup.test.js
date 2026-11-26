@@ -52,7 +52,10 @@ test('split-brain counters come only from real events; uninstrumented ones stay 
       { event: 'demoted_to_case', workItemId: 'WI-1', trail: ['work-item>job', 'job>task', 'task>case'] },
       { event: 'plan_replan', planRevision: 2 },
       { event: 'build_rebuild', rebuildCount: 1 },
-      { event: 'pool_call_rejected', reason: 'stale_lease_generation', holder: 'relay-run' }
+      { event: 'pool_call_rejected', reason: 'stale_lease_generation', holder: 'relay-run' },
+      { event: 'orchestrator_lock_held', resource: 'relay-ring' },
+      { event: 'stale_plan_revision', planRevision: 1 },
+      { event: 'duplicate_fingerprint', fingerprint: 'abc123' }
     ])
     const report = computeHealthRollup({ paths: statePaths({ SWARM_STATE_DIR: root }), nowMs: 2_000 })
     assert.equal(report.splitBrain.deadLeasesReclaimed, 1)
@@ -60,8 +63,10 @@ test('split-brain counters come only from real events; uninstrumented ones stay 
     assert.equal(report.splitBrain.replanLoops, 1)
     assert.equal(report.splitBrain.rebuildLoops, 1)
     assert.equal(report.splitBrain.casConflictsPrevented, 1)
-    // No instrumentation exists for these yet — reported as null, never an invented zero.
-    assert.equal(report.splitBrain.stalePlansBlocked, null)
+    assert.equal(report.splitBrain.leaseContentionsBlocked, 1)
+    assert.equal(report.splitBrain.stalePlansBlocked, 1)
+    assert.equal(report.splitBrain.discoverDuplicatesDeduped, 1)
+    assert.deepEqual(report.splitBrain.notInstrumented, [])
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
