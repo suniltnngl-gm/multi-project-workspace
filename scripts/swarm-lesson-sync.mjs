@@ -9,15 +9,23 @@
  * Defaults to --dry-run (zero writes). Pass --apply to persist.
  */
 import { existsSync, readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { readCases } from '../apps/api/src/toolchain/dispatch/case-registry.js'
 import { readQueue } from '../apps/api/src/toolchain/dispatch/job-queue.js'
 import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
+import { statePaths } from './swarm-state-paths.mjs'
 
-const DEFAULT_LESSONS_PATH = join(homedir(), '.local/state/curl-ai-bridge/lessons/lesson-register.json')
-const DEFAULT_CASES_DIR = join(homedir(), '.local/state/curl-ai-bridge/queue/cases')
-const DEFAULT_QUEUE_DIR = join(homedir(), '.local/state/curl-ai-bridge/queue/active')
+/** #228: all lesson-register defaults derive from the single state-root contract. */
+export function defaultLessonPaths(env = process.env) {
+  const paths = statePaths(env)
+  return {
+    lessonsPath: join(paths.lessonsDir, 'lesson-register.json'),
+    casesDir: paths.casesDir,
+    queueDir: paths.queueActiveDir
+  }
+}
+
+const { lessonsPath: DEFAULT_LESSONS_PATH, casesDir: DEFAULT_CASES_DIR, queueDir: DEFAULT_QUEUE_DIR } = defaultLessonPaths()
 
 export function extractLessonsFromState({ cases = [], tasks = [] } = {}) {
   const derived = []
