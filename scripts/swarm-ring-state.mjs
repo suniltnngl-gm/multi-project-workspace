@@ -13,12 +13,15 @@
  * can resolve it.
  */
 import { existsSync, readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
+import { statePaths } from './swarm-state-paths.mjs'
 
 export const RING_STATE_SCHEMA = 'ring-state/v1'
-export const DEFAULT_RING_STATE_DIR = join(homedir(), '.local/state/curl-ai-bridge/relay')
+/** #227: the relay ring ledger dir resolves through the single state-root contract
+ * (SWARM_STATE_DIR > legacy SWARM_STATE_ROOT > ~/.local/state/curl-ai-bridge/relay)
+ * via statePaths().relayDir instead of an inline homedir join. */
+export const DEFAULT_RING_STATE_DIR = statePaths().relayDir
 export const RING_STATE_FILE = 'ring-state.json'
 
 export function ringStatePath(dir = DEFAULT_RING_STATE_DIR) {
