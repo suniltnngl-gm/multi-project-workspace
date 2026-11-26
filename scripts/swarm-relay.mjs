@@ -231,6 +231,13 @@ export function reviewGateReason({ detReason = null, modifiedCount = 0, headDrif
 
 /** Resolve the next eligible in_progress/queued task after the current one (board-driven ordering). */
 export function resolveNextTaskId(currentTaskId, repoDir) {
+  // #234/#237: --task arrives as "#237" in the documented operator form (and as a
+  // bare/ numeric id from a prior advance). Strip the leading '#' exactly as
+  // readPinnedTaskDetails/buildBuildBrief do — Number("#237") is NaN, which would
+  // make W5 checkpoint_pushed silently fail to advance (no_next_task) instead of
+  // handing the next eligible task to the following round.
+  const needle = String(currentTaskId ?? '').replace(/^#/, '')
+  if (!/^\d+$/.test(needle)) return null
   const dbPath = join(resolve(repoDir), 'apps', 'api', 'data', 'workspace.sqlite')
   if (!existsSync(dbPath)) return null
   let connection = null
@@ -247,7 +254,7 @@ export function resolveNextTaskId(currentTaskId, repoDir) {
                 id
        LIMIT 1`
     )
-    return stmt.get(Number(currentTaskId)) || null
+    return stmt.get(Number(needle)) || null
   } catch {
     return null
   } finally {
