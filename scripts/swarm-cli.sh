@@ -2,8 +2,9 @@
 set -euo pipefail
 
 MPW_DIR="${MPW_DIR:-$HOME/Code/multi-project-workspace}"
-# Resolve this script's own directory: MPW_DIR can be relocated by isolated HOME tests.
-SWARM_CLI_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# Resolve this script's own physical directory through symlinks (e.g. ~/.local/bin/swarm -> entry/swarm -> scripts/swarm-cli.sh).
+SWARM_CLI_SOURCE="$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+SWARM_CLI_DIR="$(CDPATH= cd -- "$(dirname -- "$SWARM_CLI_SOURCE")" && pwd -P)"
 # SWARM-PORTABLE-001: one env contract for every state path. SWARM_STATE_DIR wins so a
 # clone/container/CI runner never writes into the developer's real state tree.
 STATE_ROOT="${SWARM_STATE_DIR:-${SWARM_STATE_ROOT:-$HOME/.local/state/curl-ai-bridge}}"
@@ -188,7 +189,8 @@ case "$cmd" in
     # entry/swarm is unversioned and must stay byte-identical to the repo copy.
     node "$MPW_DIR/scripts/swarm-entry-drift.mjs" || true
     # Resolve the script path before any cd: callers may invoke `swarm` from any cwd.
-    SWARM_CLI_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+    SWARM_CLI_SOURCE="$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+    SWARM_CLI_DIR=$(CDPATH= cd -- "$(dirname -- "$SWARM_CLI_SOURCE")" && pwd -P)
     node --input-type=module -e '
       import fs from "node:fs";
       import path from "node:path";
