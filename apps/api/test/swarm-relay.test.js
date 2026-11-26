@@ -3,9 +3,10 @@ import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus, w5CleanupReportPath, headDriftReason, installForbidCommitHook, removeForbidCommitHook, evaluateReviewGate, reviewGateReason, computeHorizonDeadlineMs, effectiveWindowBudgetMs, parseSiblingVerdict, buildReviewBrief, pickFocusedTest, buildBuildBrief } from '../../../scripts/swarm-relay.mjs'
+import Database from 'better-sqlite3'
+import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus, w5CleanupReportPath, headDriftReason, installForbidCommitHook, removeForbidCommitHook, evaluateReviewGate, reviewGateReason, computeHorizonDeadlineMs, effectiveWindowBudgetMs, parseSiblingVerdict, buildReviewBrief, pickFocusedTest, buildBuildBrief, applyPublishGate, roundBaseSha, resolveNextTaskId, advanceTaskAfterCheckpoint } from '../../../scripts/swarm-relay.mjs'
 import { computeEvidenceFingerprint, reconcileStaleDiscoveredTasks, parseSeedPayload } from '../../../scripts/swarm-discover.mjs'
 import { buildExecutiveBrief } from '../../../scripts/swarm-brief.mjs'
 import { evaluateOpenCase } from '../../../scripts/swarm-case-solve.mjs'
@@ -465,6 +466,79 @@ test('#222: mid-round head drift emits an explicit reason, not a generic gate re
     evaluateReviewGate({ artifactVerdict: 'ACCEPT', artifactReason: 'w4_sibling_stdout_accept', detOk: false, detReason: headDriftReason(), headDrift: true }).reason,
     'head_drift_mid_round'
   )
+})
+
+test('#232: resolveNextTaskId picks the next eligible in_progress/queued task ordered by priority', () => {
+  const repo = mkdtempSync(join(tmpdir(), 'relay-next-task-'))
+  try {
+    const db = join(repo, 'apps/api/data/workspace.sqlite')
+    mkdirSync(dirname(db), { recursive: true })
+    writeFileSync(db, '')
+    const conn = new Database(db, { fileMustExist: true })
+    conn.exec(`
+      CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT, status TEXT, priority TEXT);
+      INSERT INTO tasks (id, title, status, priority) VALUES (100, 'current', 'in_progress', 'P2');
+      INSERT INTO tasks (id, title, status, priority) VALUES (101, 'next P1', 'in_progress', 'P1');
+      INSERT INTO tasks (id, title, status, priority) VALUES (102, 'next queued', 'queued', 'P1');
+      INSERT INTO tasks (id, title, status, priority) VALUES (103, 'lower', 'in_progress', 'medium');
+    `)
+    conn.close()
+    assert.equal(resolveNextTaskId(100, repo).id, 101)
+    assert.equal(resolveNextTaskId(101, repo).id, 103)  // after 101 (in_progress, P1), next is 103 (in_progress, medium)
+    assert.equal(resolveNextTaskId(102, repo).id, 103)  // 102 excluded (id must be > 102); only candidate is 103
+    assert.equal(resolveNextTaskId(103, repo), null)    // no tasks with id > 103
+    assert.equal(resolveNextTaskId(200, repo), null)
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+test('#232: advanceTaskAfterCheckpoint returns the next task id or null when idle', () => {
+  const repo = mkdtempSync(join(tmpdir(), 'relay-advance-'))
+  try {
+    const db = join(repo, 'apps/api/data/workspace.sqlite')
+    mkdirSync(dirname(db), { recursive: true })
+    writeFileSync(db, '')
+    const conn = new Database(db, { fileMustExist: true })
+    conn.exec(`
+      CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT, status TEXT, priority TEXT);
+      INSERT INTO tasks (id, title, status, priority) VALUES (100, 'current', 'in_progress', 'P2');
+      INSERT INTO tasks (id, title, status, priority) VALUES (101, 'next', 'in_progress', 'P2');
+    `)
+    conn.close()
+    assert.equal(advanceTaskAfterCheckpoint({ currentTaskId: 100, repoDir: repo }), 101)
+    conn.close()
+    assert.equal(advanceTaskAfterCheckpoint({ currentTaskId: 100, repoDir: repo }), 101)
+    assert.equal(advanceTaskAfterCheckpoint({ currentTaskId: 101, repoDir: repo }), null)
+    assert.equal(advanceTaskAfterCheckpoint({ currentTaskId: null, repoDir: repo }), null)
+    assert.equal(advanceTaskAfterCheckpoint({ currentTaskId: 999, repoDir: repo }), null)
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+test('#232: W5 checkpoint_pushed advances the pinned task (via advanceTaskAfterCheckpoint)', () => {
+  const repo = mkdtempSync(join(tmpdir(), 'relay-advance-w5-'))
+  try {
+    const db = join(repo, 'apps/api/data/workspace.sqlite')
+    mkdirSync(dirname(db), { recursive: true })
+    writeFileSync(db, '')
+    const conn = new Database(db, { fileMustExist: true })
+    conn.exec(`
+      CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT, status TEXT, priority TEXT);
+      INSERT INTO tasks (id, title, status, priority) VALUES (100, 'current', 'in_progress', 'P2');
+      INSERT INTO tasks (id, title, status, priority) VALUES (101, 'next', 'in_progress', 'P2');
+    `)
+    conn.close()
+    // Verify the advancement logic: after checkpoint_pushed for task 100, the next
+    // eligible task is 101. The publish gate's job (outside this unit test) records
+    // the checkpoint; here we verify the ledger-side advancement.
+    assert.equal(advanceTaskAfterCheckpoint({ currentTaskId: 100, repoDir: repo }), 101)
+    // No further task: advances to null (clean idle after the last task).
+    assert.equal(advanceTaskAfterCheckpoint({ currentTaskId: 101, repoDir: repo }), null)
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
 })
 
 test('#222: forbid-commit hooks install idempotently and never clobber an existing hook', () => {

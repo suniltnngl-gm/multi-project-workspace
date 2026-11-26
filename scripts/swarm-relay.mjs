@@ -29,6 +29,7 @@ import {
 } from '../apps/api/src/toolchain/dispatch/overnight-supervisor.js'
 import { protectedWriteFile, snapshotRestorePoints } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
 import { applyPublishGate, deterministicRoundReview, modifiedFilesSince, readReviewVerdict, roundBaseSha } from './swarm-publish-gate.mjs'
+export { applyPublishGate, roundBaseSha }
 import { formatQuotaStatusLine } from './swarm-doctor-quota.mjs'
 import { windowPolicyEnv } from './swarm-window-policy.mjs'
 import {
@@ -227,6 +228,40 @@ export function readPinnedTaskDetails({ repoDir, taskId = null } = {}) {
 export function reviewGateReason({ detReason = null, modifiedCount = 0, headDrift = false } = {}) {
   if (headDrift) return headDriftReason()
   return modifiedCount > 0 ? (detReason || 'deterministic_gate_failed') : 'no_modified_files'
+}
+
+/** Resolve the next eligible in_progress/queued task after the current one (board-driven ordering). */
+export function resolveNextTaskId(currentTaskId, repoDir) {
+  const dbPath = join(resolve(repoDir), 'apps', 'api', 'data', 'workspace.sqlite')
+  if (!existsSync(dbPath)) return null
+  let connection = null
+  try {
+    connection = new Database(dbPath, { readonly: true, fileMustExist: true })
+    const stmt = connection.prepare(
+      `SELECT id, title, status, priority
+       FROM tasks
+       WHERE status IN ('in_progress', 'queued') AND id > ?
+       ORDER BY CASE status WHEN 'in_progress' THEN 0 ELSE 1 END,
+                CASE priority WHEN 'P1' THEN 0 WHEN 'P2' THEN 1 WHEN 'P3' THEN 2
+                            WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2
+                            ELSE 3 END,
+                id
+       LIMIT 1`
+    )
+    return stmt.get(Number(currentTaskId)) || null
+  } catch {
+    return null
+  } finally {
+    if (connection) connection.close()
+  }
+}
+
+/** Advance the pinned task after a W5 checkpoint_pushed, returning the next task id or null if idle. */
+export function advanceTaskAfterCheckpoint({ currentTaskId = null, repoDir = null } = {}) {
+  if (!currentTaskId) return null
+  const next = resolveNextTaskId(currentTaskId, repoDir)
+  if (!next) return null
+  return next.id
 }
 
 /**
@@ -1325,6 +1360,19 @@ export async function runRelay(argv) {
         gate: gate.gate || null,
         remaining: gate.remaining || [],
         replanPath: gate.replanPath || null
+      }
+      // Advance the pinned task after a W5 checkpoint_pushed for subsequent rounds.
+      if (gate.action === 'checkpoint_pushed' && opts.task && cwd) {
+        const nextTaskId = advanceTaskAfterCheckpoint({ currentTaskId: opts.task, repoDir: cwd })
+        if (nextTaskId) {
+          // Per-round ledger attribution: the publish window owned the previous task.
+          entry.publishGate.nextTaskId = nextTaskId
+          opts.task = nextTaskId
+        } else {
+          // No next eligible task: stop/idle cleanly after this round.
+          entry.taskAdvance = { from: opts.task, to: null, idle: true }
+          stopReason = 'no_next_task'
+        }
       }
       // Fail loudly: never relay into the next round with unreviewed dirty files.
       if (gate.ok === false) {
