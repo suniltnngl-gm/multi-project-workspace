@@ -7,11 +7,24 @@
  *
  * Defaults to --dry-run (zero writes). Pass --apply --queue-dir <dir> to enqueue newly
  * discovered tasks (deduplicated by taskId) into the SP-007/SP-009 job queue.
+ *
+ * Periodic discovery also scans the durable state tree for split-brain conditions
+ * and can maintain a progressive mtime/hash workspace index. All scanning, hashing
+ * and classification is delegated to `split-brain-scanner.js` (#251) — this CLI is
+ * a shaping adapter, never a second authority. Opt-in read-only external-root
+ * scanning inventories directories without mutating any file.
  */
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { statePaths } from '../scripts/swarm-state-paths.mjs'
+import {
+  WORKSPACE_INDEX_SCHEMA,
+  scanExternalProjects,
+  scanSplitBrainHazards,
+  scanWorkspaceProgressive
+} from '../apps/api/src/toolchain/dispatch/split-brain-scanner.js'
 import { createTask, readQueue, queueStats } from '../apps/api/src/toolchain/dispatch/job-queue.js'
 import { rankTasks, scoreTask } from '../apps/api/src/toolchain/dispatch/task-prioritizer.js'
 import { createWorkItem } from '../apps/api/src/toolchain/dispatch/case-task-lifecycle.js'
@@ -20,6 +33,111 @@ import { isReconcilable } from '../apps/api/src/toolchain/dispatch/cas-state.js'
 
 export function computeEvidenceFingerprint({ source = 'unknown', summary = '', headSha = '' } = {}) {
   return createHash('sha256').update(`${source}|${headSha}|${String(summary).trim()}`).digest('hex').slice(0, 16)
+}
+
+/**
+ * CLI adapters over `split-brain-scanner.js` (#251). Hashing, hazard detection and
+ * 4-bucket classification live in the canonical module; this file only shapes the
+ * discover CLI payload and candidates.
+ */
+export function readJsonSafe(path) {
+  if (!path || !existsSync(path)) return null
+  try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null }
+}
+
+/**
+ * Progressive workspace index adapter. External roots stay inventory-only; the
+ * canonical indexer runs once for the primary (repo) root and persists only on
+ * `--apply`. A discovery window is read-only by default.
+ */
+export function scanWorkspaceIndex({ roots = [], indexPath = null, env = process.env, apply = false } = {}) {
+  const path = indexPath || statePaths(env).workspaceIndexPath
+  const prior = readJsonSafe(path)
+  const primary = roots.find((r) => r && (typeof r === 'string' || r.path))
+  if (!primary) return { ok: true, changed: false, fileCount: 0, path }
+  const rootDir = typeof primary === 'string' ? primary : primary.path
+  const scanned = scanWorkspaceProgressive({ rootDir, indexPath: path, env, persist: Boolean(apply) })
+  const changed = prior?.schema !== WORKSPACE_INDEX_SCHEMA
+    || scanned.hashed > 0
+    || scanned.totalFiles !== prior?.totalFiles
+  return {
+    ok: scanned.ok,
+    changed,
+    fileCount: scanned.totalFiles,
+    path: scanned.indexPath,
+    scanned: scanned.scanned,
+    cacheHits: scanned.cacheHits,
+    hashed: scanned.hashed
+  }
+}
+
+/**
+ * Split-brain discovery adapter: delegates to the canonical hazard scanner and
+ * maps its `id/severity/detail` hazards into the CLI's finding shape (no local
+ * hazard logic, no extra `inline_state_paths` check).
+ */
+export function discoverSplitBrainChecks({ env = process.env, stateRoot = null, nowMs = Date.now() } = {}) {
+  const effectiveEnv = stateRoot ? { ...env, SWARM_STATE_DIR: stateRoot } : env
+  const scanned = scanSplitBrainHazards({ env: effectiveEnv, nowMs })
+  const findings = (scanned.hazards || []).map((h) => ({ kind: h.id, severity: h.severity, detail: h.detail }))
+  return {
+    ok: scanned.ok,
+    checkCount: 3,
+    findingCount: scanned.hazardCount,
+    findings,
+    hazards: scanned.hazards,
+    stateRoot: statePaths(effectiveEnv).root
+  }
+}
+
+function splitBrainCandidates(checks) {
+  return (checks.findings || []).map((f) => ({
+    taskId: `disc-splitbrain-${f.kind}`,
+    source: 'split_brain',
+    priority: f.severity || 'P1',
+    blocker: true,
+    costTier: 'local',
+    summary: `Split-brain check '${f.kind}': ${f.detail}`,
+    jobs: [{ type: 'plan' }, { type: 'build' }, { type: 'review' }]
+  }))
+}
+
+/**
+ * External-root inventory adapter: canonical 4-bucket classifier plus canonical
+ * progressive indexer for the file count. Proposes read-only split/merge cases and
+ * never writes to the external root. Use externalRoots: [{ path, readOnly: true }].
+ */
+export function discoverExternalRoots({ externalRoots = [], env = process.env } = {}) {
+  const candidates = []
+  const inventories = []
+  for (const spec of externalRoots) {
+    const dir = typeof spec === 'string' ? spec : spec?.path
+    if (!dir || !existsSync(dir)) continue
+    const root = resolve(dir)
+    const classified = scanExternalProjects(root)
+    const inventory = scanWorkspaceProgressive({ rootDir: root, env, persist: false })
+    const fileCount = inventory.totalFiles
+    const buckets = {}
+    for (const item of classified.items || []) buckets[item.bucket] = (buckets[item.bucket] || 0) + 1
+    inventories.push({ root, fileCount, readOnly: true, buckets })
+    candidates.push({
+      taskId: `disc-extroot-${createHash('sha256').update(root).digest('hex').slice(0, 10)}`,
+      source: 'external_root',
+      priority: 'P2',
+      blocker: false,
+      costTier: 'local',
+      readOnly: true,
+      kind: 'case',
+      buckets,
+      options: [
+        { id: 'split', label: `Keep ${root} separate (read-only inventory of ${fileCount} file(s))` },
+        { id: 'merge', label: `Consolidate ${root} into the governed workspace (requires operator authorization)` }
+      ],
+      summary: `External root ${root}: read-only split/merge consolidation (${fileCount} file(s))`,
+      jobs: [{ type: 'plan' }, { type: 'review' }]
+    })
+  }
+  return { candidates, inventories, candidateCount: candidates.length }
 }
 
 function safeGit(repoDir, args) {
@@ -66,9 +184,27 @@ export function parseSeedPayload(parsed) {
   return items
 }
 
-export function discoverCandidates({ repoDir = process.cwd(), seedTasks = [], maxTodos = 5 } = {}) {
+export function discoverCandidates({
+  repoDir = process.cwd(),
+  seedTasks = [],
+  maxTodos = 5,
+  env = process.env,
+  splitBrain = true,
+  externalRoots = []
+} = {}) {
   const root = resolve(repoDir)
   const candidates = []
+
+  // Periodic split-brain discovery. Findings only appear when a real anomaly is
+  // present, so a healthy tree adds no candidates. Never mutates state.
+  if (splitBrain !== false) {
+    candidates.push(...splitBrainCandidates(discoverSplitBrainChecks({ env })))
+  }
+
+  // Opt-in read-only external-root inventory (split/merge consolidation cases).
+  if (Array.isArray(externalRoots) && externalRoots.length) {
+    candidates.push(...discoverExternalRoots({ externalRoots, env }).candidates)
+  }
 
   const dirtyTracked = safeGit(root, ['diff', '--name-only'])
   if (dirtyTracked) {
@@ -247,8 +383,11 @@ if (isMain) {
       --queue-dir <dir>             Task queue directory
       --case-dir <dir>              Case registry directory for multi-option cases
       --seed-json <file>            Optional JSON file of seed tasks/cases
+      --external-root <dir>         Opt-in read-only external root (repeatable)
+      --no-split-brain              Disable periodic split-brain discovery checks
+      --index-workspace             Build the progressive workspace index (index only)
       --dry-run                     Preview only (default)
-      --apply                       Persist tasks and cases
+      --apply                       Persist tasks, cases and the workspace index
       --json                        Output JSON
   -h, --help                        Show this help
 `)
@@ -260,6 +399,9 @@ if (isMain) {
     queueDir: null,
     caseDir: null,
     seedJson: null,
+    splitBrain: true,
+    externalRoots: [],
+    indexWorkspace: false,
     apply: false,
     json: false
   }
@@ -268,11 +410,16 @@ if (isMain) {
     if (a === '--json') opts.json = true
     else if (a === '--apply') opts.apply = true
     else if (a === '--dry-run') opts.apply = false
+    else if (a === '--no-split-brain') opts.splitBrain = false
+    else if (a === '--index-workspace') opts.indexWorkspace = true
     else if (a === '--mode') opts.mode = argv[++i]
     else if (a === '--repo') opts.repoDir = argv[++i]
     else if (a === '--queue-dir') opts.queueDir = argv[++i]
     else if (a === '--case-dir') opts.caseDir = argv[++i]
     else if (a === '--seed-json') opts.seedJson = argv[++i]
+    else if (a === '--external-root') {
+      opts.externalRoots.push({ path: argv[++i], readOnly: true })
+    }
   }
 
   let seedTasks = []
@@ -281,7 +428,20 @@ if (isMain) {
     seedTasks = parseSeedPayload(parsed)
   }
 
-  const candidates = discoverCandidates({ repoDir: opts.repoDir, seedTasks })
+  const candidates = discoverCandidates({
+    repoDir: opts.repoDir,
+    seedTasks,
+    splitBrain: opts.splitBrain,
+    externalRoots: opts.externalRoots
+  })
+  const splitBrainChecks = opts.splitBrain ? discoverSplitBrainChecks() : null
+  const externalScan = opts.externalRoots.length ? discoverExternalRoots({ externalRoots: opts.externalRoots }) : null
+  const workspaceIndex = opts.indexWorkspace
+    ? scanWorkspaceIndex({
+      roots: [opts.repoDir, ...opts.externalRoots.map((e) => ({ ...e, readOnly: true }))],
+      apply: opts.apply
+    })
+    : null
   const sync = opts.queueDir ? syncDiscoveredToQueue(opts.queueDir, candidates, { apply: opts.apply, caseDir: opts.caseDir }) : null
   const payload = {
     ok: true,
@@ -289,6 +449,9 @@ if (isMain) {
     repo: resolve(opts.repoDir),
     candidateCount: candidates.length,
     candidates,
+    splitBrainChecks,
+    externalScan,
+    workspaceIndex: workspaceIndex ? { changed: workspaceIndex.changed, fileCount: workspaceIndex.fileCount, path: workspaceIndex.path } : null,
     sync
   }
   process.stdout.write(opts.json ? `${JSON.stringify(payload, null, 2)}\n` : `${opts.mode}: ${candidates.length} candidate(s)\n`)

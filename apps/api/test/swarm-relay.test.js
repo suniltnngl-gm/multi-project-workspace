@@ -7,7 +7,8 @@ import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Database from 'better-sqlite3'
 import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus, w5CleanupReportPath, headDriftReason, installForbidCommitHook, removeForbidCommitHook, evaluateReviewGate, reviewGateReason, computeHorizonDeadlineMs, effectiveWindowBudgetMs, parseSiblingVerdict, buildReviewBrief, pickFocusedTest, buildBuildBrief, applyPublishGate, roundBaseSha, resolveNextTaskId, advanceTaskAfterCheckpoint } from '../../../scripts/swarm-relay.mjs'
-import { computeEvidenceFingerprint, reconcileStaleDiscoveredTasks, parseSeedPayload } from '../../../scripts/swarm-discover.mjs'
+import { computeEvidenceFingerprint, reconcileStaleDiscoveredTasks, parseSeedPayload, discoverSplitBrainChecks, scanWorkspaceIndex, discoverExternalRoots } from '../../../scripts/swarm-discover.mjs'
+import { scanExternalProjects, scanSplitBrainHazards } from '../../../apps/api/src/toolchain/dispatch/split-brain-scanner.js'
 import { buildExecutiveBrief } from '../../../scripts/swarm-brief.mjs'
 import { evaluateOpenCase } from '../../../scripts/swarm-case-solve.mjs'
 import { evaluateDeterministicDiff } from '../../../scripts/swarm-review.mjs'
@@ -387,10 +388,17 @@ test('swarm ask fails closed with exit 1 on missing value or unknown parent-slot
     rmSync(emptyDir, { recursive: true, force: true })
   }
 
-  // Bare `swarm relay quota-status` (positional or flag) exits 0 and prints eligible/quotaAdmitted
+  // Bare `swarm relay quota-status` exits 0 and keeps AGY pools CONSERVE-excluded.
+  // quotaAdmitted tracks 5h caps / weekly exhaustion, so it varies with live quota.
   const qsOut = execFileSync(process.execPath, [relayScript, 'quota-status'], { encoding: 'utf8' })
-  assert.match(qsOut, /agy-gemini: eligible=false quotaAdmitted=true conserve=true/)
-  assert.match(qsOut, /agy-claude-gpt: eligible=false quotaAdmitted=false conserve=true/)
+  assert.match(qsOut, /^swarm relay quota-status/m)
+  for (const pool of ['agy-gemini', 'agy-claude-gpt']) {
+    const line = qsOut.split(/\r?\n/).find((l) => l.trim().startsWith(`${pool}:`))
+    assert.ok(line, `${pool} must be listed`)
+    assert.match(line, /eligible=false\b/, `${pool} must be ineligible by default`)
+    assert.match(line, /conserve=true\b/, `${pool} must stay CONSERVE-excluded`)
+    assert.match(line, /quotaAdmitted=(true|false)\b/, `${pool} must report quota admission`)
+  }
 
   // Regression for Hermes's RangeError repro when evaluateResourceGate defers without explicit `nowMs`
   const gateRes = evaluateResourceGate({
@@ -1081,4 +1089,144 @@ test('swarm-review state root: SWARM_STATE_DIR takes precedence over SWARM_STATE
     join('/custom/dir', 'reports')
   )
   assert.equal(statePaths({}).reportsDir, join(defaultRoot, 'reports'))
+})
+
+// --- SP-009 periodic split-brain discovery + progressive workspace index --------
+
+test('statePaths().workspaceIndexPath resolves under the state root (SWARM_STATE_DIR override)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'workspace-index-path-'))
+  try {
+    assert.equal(
+      statePaths({ SWARM_STATE_DIR: dir }).workspaceIndexPath,
+      join(dir, 'workspace-index.json')
+    )
+    assert.equal(
+      statePaths({}).workspaceIndexPath,
+      join(homedir(), '.local', 'state', 'curl-ai-bridge', 'workspace-index.json')
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('discoverSplitBrainChecks delegates to canonical scanSplitBrainHazards (sole authority)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'splitbrain-delegate-'))
+  try {
+    mkdirSync(join(root, 'relay'), { recursive: true })
+    mkdirSync(join(root, 'queue', 'cases'), { recursive: true })
+    writeFileSync(join(root, 'relay', 'ring-state.json'), JSON.stringify({
+      schema: 'ring-state/v1',
+      slots: {
+        sibling1: { role: 'parent', path: '/home/sunilkr/.local/state/curl-ai-bridge/relay' },
+        sibling2: { role: 'parent' }
+      }
+    }))
+    writeFileSync(join(root, 'relay', 'orchestrator.lock.json'), JSON.stringify({
+      schema: 'orchestrator-lock/v1', holder: 'dead-holder', expiresAtMs: 1000
+    }))
+    writeFileSync(join(root, 'queue', 'cases', 'legacy.json'), '{}')
+    const nowMs = Date.now()
+    const env = { ...process.env, SWARM_STATE_DIR: root }
+    const canonical = scanSplitBrainHazards({ env, nowMs })
+    const before = readdirSync(join(root, 'relay')).sort().join('|')
+    const res = discoverSplitBrainChecks({ env, stateRoot: root, nowMs })
+
+    assert.equal(res.ok, canonical.ok)
+    assert.equal(res.checkCount, 3)
+    assert.equal(res.findingCount, canonical.hazardCount)
+    assert.deepEqual(res.hazards, canonical.hazards)
+    assert.deepEqual(res.findings.map((f) => f.kind), canonical.hazards.map((h) => h.id))
+    // Only the canonical three hazards exist; the removed inline-path check is gone.
+    assert.equal(res.findings.some((f) => f.kind === 'inline_state_paths'), false)
+    assert.equal(readdirSync(join(root, 'relay')).sort().join('|'), before, 'hazard scan must stay read-only')
+
+    const healthy = mkdtempSync(join(tmpdir(), 'splitbrain-healthy-'))
+    try {
+      const clean = discoverSplitBrainChecks({ stateRoot: healthy, nowMs })
+      assert.equal(clean.findingCount, 0)
+      assert.deepEqual(clean.findings, [])
+    } finally {
+      rmSync(healthy, { recursive: true, force: true })
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('scanWorkspaceIndex delegates to the canonical progressive indexer and persists only on apply', () => {
+  const root = mkdtempSync(join(tmpdir(), 'workspace-index-delegate-'))
+  try {
+    const repo = join(root, 'repo')
+    mkdirSync(repo, { recursive: true })
+    writeFileSync(join(repo, 'a.txt'), 'alpha\n')
+    writeFileSync(join(repo, 'b.txt'), 'beta\n')
+    const indexPath = join(root, 'workspace-index.json')
+
+    const dry = scanWorkspaceIndex({ roots: [{ path: repo, readOnly: true }], indexPath, apply: false })
+    assert.equal(dry.changed, true)
+    assert.equal(dry.fileCount, 2)
+    assert.equal(existsSync(indexPath), false, 'dry-run must not persist the index')
+
+    const applied = scanWorkspaceIndex({ roots: [repo], indexPath, apply: true })
+    assert.equal(applied.changed, true)
+    const snap = JSON.parse(readFileSync(indexPath, 'utf8'))
+    assert.equal(snap.schema, 'workspace-index/v1')
+    assert.equal(snap.totalFiles, 2)
+    assert.match(snap.files['a.txt'].sha256, /^[0-9a-f]{64}$/, 'canonical sha256 index shape')
+    assert.equal(snap.entries, undefined, 'CLI adapter must not write a second index schema')
+
+    const again = scanWorkspaceIndex({ roots: [repo], indexPath, apply: true })
+    assert.equal(again.changed, false)
+    assert.equal(again.cacheHits, 2)
+
+    writeFileSync(join(repo, 'a.txt'), 'alpha-changed\n')
+    const edited = scanWorkspaceIndex({ roots: [repo], indexPath, apply: true })
+    assert.equal(edited.changed, true)
+    assert.equal(edited.hashed, 1)
+    const after = JSON.parse(readFileSync(indexPath, 'utf8'))
+    assert.notEqual(after.files['a.txt'].sha256, snap.files['a.txt'].sha256)
+
+    rmSync(join(repo, 'b.txt'))
+    const removed = scanWorkspaceIndex({ roots: [repo], indexPath, apply: false })
+    assert.equal(removed.changed, true)
+    assert.equal(removed.fileCount, 1)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('discoverExternalRoots delegates to the canonical 4-bucket classifier, read-only', () => {
+  const root = mkdtempSync(join(tmpdir(), 'external-root-delegate-'))
+  try {
+    const ext = join(root, 'projects')
+    mkdirSync(join(ext, 'repo-a'), { recursive: true })
+    writeFileSync(join(ext, 'repo-a', 'package.json'), '{"name":"a"}\n')
+    writeFileSync(join(ext, 'swarm-note.md'), '# notes\n')
+    const before = readdirSync(ext).sort().join('|')
+    const canonical = scanExternalProjects(ext)
+
+    const res = discoverExternalRoots({ externalRoots: [{ path: ext, readOnly: true }] })
+    assert.equal(res.candidateCount, 1)
+    assert.equal(res.inventories.length, 1)
+    assert.equal(res.inventories[0].fileCount, 2)
+    assert.equal(res.inventories[0].readOnly, true)
+    assert.deepEqual(res.inventories[0].buckets, { merge_private: 1, extract_public: 1 })
+    assert.deepEqual(canonical.items.map((i) => [i.name, i.bucket]), [
+      ['repo-a', 'merge_private'],
+      ['swarm-note.md', 'extract_public']
+    ])
+
+    const c = res.candidates[0]
+    assert.equal(c.readOnly, true)
+    assert.equal(c.kind, 'case')
+    assert.equal(c.source, 'external_root')
+    assert.deepEqual(c.options.map((o) => o.id), ['split', 'merge'])
+    assert.match(c.summary, /read-only split\/merge consolidation/)
+
+    assert.equal(readdirSync(ext).sort().join('|'), before, 'external root must stay untouched')
+    assert.equal(existsSync(join(ext, 'cases.sqlite')), false)
+    assert.equal(existsSync(join(ext, 'repo-a', 'cases.sqlite')), false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

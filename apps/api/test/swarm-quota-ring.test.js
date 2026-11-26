@@ -184,17 +184,19 @@ test('readLiveSqliteQuota loads live weeklyRemainingPct and conservePools from w
   assert.equal(live.source, 'sqlite')
   assert.ok(typeof live.quota['agy-gemini']?.weeklyRemainingPct === 'number')
   assert.ok(typeof live.quota['agy-claude-gpt']?.weeklyRemainingPct === 'number')
+  assert.ok(Array.isArray(live.conservePools))
+  // Deterministic budgets: live weekly percentages drift as quota refreshes.
   const budgets = loadPoolBudgets({
     countCalls: () => 0,
-    quota: live.quota,
+    quota: {
+      'agy-claude-gpt': { weeklyRemainingPct: 0 },
+      'agy-gemini': { weeklyRemainingPct: 16.65 }
+    },
     conservePools: live.conservePools
   })
-  // agy-claude-gpt is 0% weekly in live SQLite -> admitted must be false
   assert.equal(budgets['agy-claude-gpt'].weeklyRemainingPct, 0)
   assert.equal(budgets['agy-claude-gpt'].admitted, false)
   assert.equal(budgets['agy-claude-gpt'].reason, 'weekly_quota_exhausted')
-  // agy-gemini is ~16.65% weekly and aheadOfPace -> conserve=true
-  assert.ok(budgets['agy-gemini'].weeklyRemainingPct < 50)
   assert.equal(budgets['agy-gemini'].conserve, true)
 })
 
