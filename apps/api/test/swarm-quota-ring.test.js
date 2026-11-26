@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildRelayPlan } from '../../../scripts/swarm-relay.mjs'
-import { loadPoolBudgets, selectSlot, evaluateCopilotMonthly, resolveRing, poolForSibling, readLiveSqliteQuota, guestFallbackCandidates, OPENCODE_POOLS, POOL_POLICY } from '../../../scripts/swarm-quota-ring.mjs'
+import { loadPoolBudgets, selectSlot, evaluateCopilotMonthly, resolveRing, poolForSibling, readLiveSqliteQuota, guestFallbackCandidates, OPENCODE_POOLS, POOL_POLICY, ENTITY_ROSTER, ALL_ENTITIES, FILE_EDITING_ENTITIES, entityBackoffDelayMs, recordEntityFailure, recordEntitySuccess, isEntityInBackoff, allEntitiesInBackoff, filterEntitiesByJob } from '../../../scripts/swarm-quota-ring.mjs'
 import {
   GEMINI_API_ROTATION_MODELS,
   advanceGeminiApiRotation,
@@ -320,4 +320,48 @@ test('conservePools/POOL_POLICY admission stays deterministic while gemini-api r
   assert.deepEqual(shifted.map((a) => a.sibling), runA.map((a) => a.sibling))
   assert.equal(runA[1].model, 'gemini-3.8-flash')
   assert.equal(shifted[1].model, 'gemini-2.5-flash')
+})
+
+// SWARM-BACKOFF-RING-001 — unified roster, per-role capability, exponential backoff.
+test('SWARM-BACKOFF-RING-001 unified roster and build capability filtering', () => {
+  for (const e of ['hermes', 'direct', 'direct-vercel', 'gemini-api', 'cline', 'vibe', 'codex', 'opencode', 'opencode-vercel', 'opencode-google', 'opencode-nvidia', 'opencode-openrouter', 'opencode-groq', 'agy', 'agy-argon', 'agy-claude-gpt', 'copilot', 'local', 'colab', 'kaggle']) {
+    assert.ok(ALL_ENTITIES.includes(e), `${e} missing roster`)
+  }
+  assert.equal(ENTITY_ROSTER['opencode-vercel'].pool, 'vercel-ai-gateway')
+  assert.equal(ENTITY_ROSTER['direct-vercel'].pool, 'vercel-ai-gateway')
+  assert.equal(new Set(FILE_EDITING_ENTITIES).has('cline'), true)
+  assert.equal(new Set(FILE_EDITING_ENTITIES).has('agy'), false)
+  const ring = ['hermes', 'agy', 'gemini-api', 'cline']
+  assert.deepEqual(filterEntitiesByJob(ring, 'build'), ['hermes', 'gemini-api', 'cline'])
+  assert.deepEqual(filterEntitiesByJob(ring, 'case-solve'), ring)
+  const picked = selectSlot({ ring, windowIndex: 1, job: 'build', nowMs: 0 })
+  assert.equal(new Set(FILE_EDITING_ENTITIES).has(picked.sibling), true)
+  assert.notEqual(picked.sibling, 'agy')
+})
+
+test('SWARM-BACKOFF-RING-001 exponential backoff 1m->2m->4m->8m, reset on success, fail-closed', () => {
+  assert.deepEqual([1, 2, 3, 4, 5].map(entityBackoffDelayMs), [60000, 120000, 240000, 480000, 480000])
+  assert.equal(entityBackoffDelayMs(0), 0)
+  const st = {}
+  const t0 = 1_000_000
+  const first = recordEntityFailure(st, 'cline', { error: '503', nowMs: t0 })
+  assert.deepEqual(first, { backoffCount: 1, lastError: '503', lastFailureAtMs: t0, nextEligibleAtMs: t0 + 60000 })
+  assert.equal(isEntityInBackoff(st, 'cline', t0), true)
+  assert.equal(isEntityInBackoff(st, 'cline', t0 + 60000), false)
+  recordEntityFailure(st, 'cline', { nowMs: t0 })
+  assert.equal(st.cline.nextEligibleAtMs, t0 + 120000) // per-failure delay from count, not cumulative
+  assert.deepEqual(allEntitiesInBackoff(st, ['cline'], t0), { allInBackoff: true, earliestNextEligibleAtMs: t0 + 120000, earliestEntity: 'cline' })
+  assert.deepEqual(allEntitiesInBackoff(st, ['cline'], t0 + 120000), { allInBackoff: false })
+  recordEntitySuccess(st, 'cline')
+  assert.equal(st.cline.backoffCount, 0)
+  assert.equal(st.cline.nextEligibleAtMs, 0)
+  // Fail-closed selection with earliest nextEligibleAtMs.
+  const closed = {}
+  recordEntityFailure(closed, 'agy', { nowMs: 1_000_000 })
+  recordEntityFailure(closed, 'cline', { nowMs: 2_000_000 })
+  const failed = selectSlot({ ring: ['agy', 'cline'], backoff: closed, nowMs: 0 })
+  assert.equal(failed.admitted, false)
+  assert.equal(failed.reason, 'all_entities_in_backoff')
+  assert.equal(failed.earliestNextEligibleAtMs, 1_060_000)
+  assert.equal(failed.earliestEntity, 'agy')
 })

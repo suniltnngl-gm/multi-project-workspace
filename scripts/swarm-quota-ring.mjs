@@ -205,7 +205,84 @@ export function loadPoolBudgets({
   return budgets
 }
 
-/** Copilot monthly daily-budget gate (3%/day, 10% reserve by policy). */
+/** SWARM-BACKOFF-RING-001: unified all-entity roster with per-role capabilities. */
+export const ENTITY_ROSTER = Object.freeze({
+  hermes: { pool: 'nous-hermes-free', roles: ['discover', 'case-solve', 'build', 'review', 'publish'], canEdit: true },
+  direct: { pool: 'cloudflare-workers-ai', roles: ['discover', 'case-solve', 'build', 'review', 'publish'], canEdit: true },
+  'direct-vercel': { pool: 'vercel-ai-gateway', roles: ['discover', 'case-solve', 'build', 'review', 'publish'], canEdit: true },
+  'gemini-api': { pool: 'gemini-api-key', roles: ['discover', 'case-solve', 'build', 'review', 'publish'], canEdit: true },
+  cline: { pool: 'cline-free', roles: ['discover', 'case-solve', 'build', 'review', 'publish'], canEdit: true },
+  vibe: { pool: 'mistral-vibe', roles: ['discover', 'case-solve', 'build', 'review', 'publish'], canEdit: true },
+  codex: { pool: 'codex-exec', roles: ['discover', 'case-solve', 'build', 'review', 'publish'], canEdit: true },
+  opencode: { pool: 'opencode-tidepool-free', roles: ['discover', 'case-solve', 'build', 'review', 'publish'], canEdit: true },
+  'opencode-vercel': { pool: 'vercel-ai-gateway', roles: ['discover', 'case-solve', 'build', 'review', 'publish'], canEdit: true },
+  'opencode-google': { pool: 'opencode-console-google', roles: ['discover', 'case-solve', 'build', 'review', 'publish'], canEdit: true },
+  'opencode-nvidia': { pool: 'opencode-console-nvidia', roles: ['discover', 'case-solve', 'build', 'review', 'publish'], canEdit: true },
+  'opencode-openrouter': { pool: 'opencode-console-openrouter', roles: ['discover', 'case-solve', 'build', 'review', 'publish'], canEdit: true },
+  'opencode-groq': { pool: 'opencode-console-groq', roles: ['discover', 'case-solve', 'build', 'review', 'publish'], canEdit: true },
+  agy: { pool: 'agy-gemini', roles: ['discover', 'case-solve', 'review'], canEdit: false },
+  'agy-argon': { pool: 'agy-argon', roles: ['discover', 'case-solve', 'review'], canEdit: false },
+  'agy-claude-gpt': { pool: 'agy-claude-gpt', roles: ['discover', 'case-solve', 'review'], canEdit: false },
+  copilot: { pool: 'github-copilot', roles: ['discover', 'case-solve', 'review'], canEdit: false },
+  local: { pool: 'local-llama-cpp', roles: ['discover', 'case-solve', 'review'], canEdit: false },
+  colab: { pool: 'colab-free', roles: ['discover', 'case-solve', 'review'], canEdit: false },
+  kaggle: { pool: 'kaggle-free', roles: ['discover', 'case-solve', 'review'], canEdit: false },
+})
+
+export const ALL_ENTITIES = Object.freeze(Object.keys(ENTITY_ROSTER))
+export const FILE_EDITING_ENTITIES = Object.freeze(ALL_ENTITIES.filter((e) => ENTITY_ROSTER[e].canEdit))
+export const BACKOFF_BASE_MS = 60_000
+export const BACKOFF_MAX_MS = 8 * 60_000
+export const BACKOFF_CAP_COUNT = 4
+export function entityBackoffDelayMs(backoffCount = 0) {
+  const count = Number(backoffCount || 0)
+  if (!Number.isFinite(count) || count <= 0) return 0
+  const delay = BACKOFF_BASE_MS * Math.pow(2, count - 1)
+  return Math.min(delay, BACKOFF_MAX_MS)
+}
+export function createBackoffState() { return {} }
+export function recordEntityFailure(backoffState, entity, { error = null, nowMs = Date.now() } = {}) {
+  const prev = backoffState[entity] || { backoffCount: 0, lastError: null, lastFailureAtMs: null, nextEligibleAtMs: 0 }
+  const count = Number(prev.backoffCount || 0) + 1
+  const delay = entityBackoffDelayMs(count)
+  backoffState[entity] = { backoffCount: count, lastError: error ?? null, lastFailureAtMs: nowMs, nextEligibleAtMs: nowMs + delay }
+  return backoffState[entity]
+}
+export function recordEntitySuccess(backoffState, entity) {
+  backoffState[entity] = { backoffCount: 0, lastError: null, lastFailureAtMs: null, nextEligibleAtMs: 0 }
+  return backoffState[entity]
+}
+export function isEntityInBackoff(backoffState, entity, nowMs = Date.now()) {
+  const st = backoffState[entity]
+  if (!st) return false
+  return Number(st.nextEligibleAtMs || 0) > nowMs
+}
+export function filterEligibleEntities(backoffState, entities, nowMs = Date.now()) {
+  const eligible = []
+  const backedOff = []
+  for (const entity of entities) {
+    if (isEntityInBackoff(backoffState, entity, nowMs)) backedOff.push(entity)
+    else eligible.push(entity)
+  }
+  return { eligible, backedOff }
+}
+export function allEntitiesInBackoff(backoffState, entities, nowMs = Date.now()) {
+  let earliest = null
+  let earliestEntity = null
+  for (const entity of entities) {
+    const st = backoffState[entity]
+    if (!st) return { allInBackoff: false }
+    const next = Number(st.nextEligibleAtMs || 0)
+    if (next <= nowMs) return { allInBackoff: false }
+    if (earliest === null || next < earliest) { earliest = next; earliestEntity = entity }
+  }
+  return { allInBackoff: true, earliestNextEligibleAtMs: earliest, earliestEntity }
+}
+export function filterEntitiesByJob(entities, job = null) {
+  if (!job || job === 'discover' || job === 'case-solve' || job === 'review' || job === 'publish') return [...entities]
+  if (job === 'build') return entities.filter((e) => ENTITY_ROSTER[e]?.canEdit === true)
+  return [...entities]
+}
 export function evaluateCopilotMonthly({
   remainingPct = null,
   daysRemaining = null,
@@ -270,13 +347,38 @@ export function selectSlot({
   maxConserveWindows = 1,
   conserveWindowsUsed = 0,
   copilotMonthly = null,
-  copilotCadenceRound = 6
+  copilotCadenceRound = 6,
+  backoff = {},
+  nowMs = null,
+  job = null,
 } = {}) {
   const list = Array.isArray(ring) ? ring : resolveRing(ring)
   if (!list.length) throw new Error('ring_empty')
+  const now = nowMs ?? Date.now()
   const preferred = list[((windowIndex % list.length) + list.length) % list.length]
   const currentRound = round ?? (Math.floor(windowIndex / list.length) + 1)
   let conserveUsed = Number(conserveWindowsUsed) || 0
+
+  // Per-role capability filtering: W3 build restricted to file-editing entities.
+  const capable = filterEntitiesByJob(list, job)
+  const capableSet = new Set(capable)
+
+  // Fail-closed: every job-capable entity in the ring is in backoff → report earliest nextEligibleAtMs.
+  const allBackoff = allEntitiesInBackoff(backoff, capable, now)
+  if (allBackoff.allInBackoff) {
+    return {
+      sibling: null,
+      pool: null,
+      model: null,
+      substitutedFor: null,
+      conserve: false,
+      conserveWindowsUsed: conserveUsed,
+      admitted: false,
+      reason: 'all_entities_in_backoff',
+      earliestNextEligibleAtMs: allBackoff.earliestNextEligibleAtMs,
+      earliestEntity: allBackoff.earliestEntity,
+    }
+  }
 
   // Resolve virtual `guest` slot (`W5` in `k5-pipeline-ring`):
   //   1. On `copilotCadenceRound` (default Round 6, or multiples of 6), try `copilot` if admitted + monthly budget allows
@@ -285,6 +387,8 @@ export function selectSlot({
   if (preferred === 'guest') {
     const guestCandidates = guestFallbackCandidates({ list, round: currentRound, allowConserve, copilotCadenceRound })
     for (const candidate of guestCandidates) {
+      if (job === 'build' && ENTITY_ROSTER[candidate]?.canEdit !== true) continue
+      if (isEntityInBackoff(backoff, candidate, now)) continue
       const pool = poolForSibling(candidate)
       const budget = budgets[pool] || {
         pool, cap: null, callsInWindow: 0, limitKnown: false, weeklyRemainingPct: 100,
@@ -317,6 +421,8 @@ export function selectSlot({
 
   for (let step = 0; step < list.length; step += 1) {
     const sibling = list[(list.indexOf(preferred) + step) % list.length]
+    if (!capableSet.has(sibling)) continue
+    if (isEntityInBackoff(backoff, sibling, now)) continue
     const pool = poolForSibling(sibling)
     const budget = budgets[pool] || {
       pool, cap: null, callsInWindow: 0, limitKnown: false, weeklyRemainingPct: 100,
