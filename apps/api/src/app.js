@@ -35,6 +35,7 @@ import { createRunsRouter } from './routes/runs.js'
 import { createMcpRouter } from './routes/mcp.js'
 import { createProposalsRouter } from './routes/proposals.js'
 import { createSensorsRouter } from './routes/sensors.js'
+import { createSwarmLiveRouter } from './routes/swarmLive.js'
 import { createAgentBus } from './agentBus.js'
 import { createAgentsRouter } from './routes/agents.js'
 import { createSwarmRunner } from './swarmRunner.js'
@@ -196,6 +197,8 @@ export function createApp(database, {
   app.get('/health', (_request, response) => {
     response.json({ status: 'ok', service: 'api', database: 'sqlite' })
   })
+
+  app.use(createSwarmLiveRouter())
 
   app.use(createVerifyRouter({ getVerifier }))
   app.use(createTasksRouter({ database, jobStore, getTaskWorktrees }))
