@@ -46,7 +46,9 @@ import {
   readLiveSqliteQuota,
   resolveRing,
   selectSlot,
-  guestFallbackCandidates
+  guestFallbackCandidates,
+  recordEntityFailure,
+  recordEntitySuccess
 } from './swarm-quota-ring.mjs'
 import {
   DEFAULT_RING_STATE_DIR,
@@ -1053,6 +1055,8 @@ export async function runRelay(argv) {
   const windows = []
   let stopReason = 'completed'
   let conserveWindowsUsed = 0
+  // SWARM-BACKOFF-RING-001: per-entity backoff state carried across windows in this run.
+  let backoff = {}
   let roundBase = null
   const roundVerdicts = new Map()
   const roundVerdictPaths = new Map()
@@ -1103,7 +1107,9 @@ export async function runRelay(argv) {
       modelMap: plan.modelMap,
       allowConserve: opts.allowConserve,
       maxConserveWindows: nonNegativeInt(opts.maxConserveWindows, DEFAULT_MAX_CONSERVE_WINDOWS, 'maxConserveWindows'),
-      conserveWindowsUsed
+      conserveWindowsUsed,
+      backoff,
+      nowMs: Date.now()
     })
     // gemini-api primary model: durable per-window round-robin across the Free-tier
     // roster. Persisted in stateDir so restarts continue the cycle (no pile-up on
@@ -1258,6 +1264,14 @@ export async function runRelay(argv) {
       findingsPath,
       findingsWritten,
       findingsFallback
+    }
+    // SWARM-BACKOFF-RING-001: update per-entity backoff from this window's outcome.
+    // Reuse the relay's canonical success classifier so backoff stays consistent
+    // with the summary verdict when new success statuses are introduced.
+    if (isSuccessfulWindowStatus(entry.status)) {
+      recordEntitySuccess(backoff, entry.sibling)
+    } else {
+      recordEntityFailure(backoff, entry.sibling, { error: entry.error ?? null, nowMs: Date.now() })
     }
     ringState = advanceRingState(ringState, assignment, {
       model: choice.model, pool: choice.pool, findingsPath: assignment.findingsPath
