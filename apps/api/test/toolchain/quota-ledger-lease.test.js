@@ -1,10 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { recordPoolCall, ledgerLockPath } from '../../src/toolchain/dispatch/overnight-supervisor.js'
+import { buildRelayQuotaSummary } from '../../../../scripts/swarm-doctor-quota.mjs'
 import { acquireOrchestratorLock, releaseOrchestratorLock } from '../../../../scripts/swarm-orchestrator-lock.mjs'
 import { createTask } from '../../src/toolchain/dispatch/job-queue.js'
 
@@ -77,5 +78,28 @@ test('#216 swarm-queue-run fails closed when the quota-ledger lease is held else
   } finally {
     releaseOrchestratorLock({ stateDir, runId: 'relay-live', generation: res.lock.generation, resource: 'quota-ledger' })
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('#233: doctor quota reads its ledger from SWARM_STATE_DIR at call time', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'doctor-state-override-'))
+  const prev = process.env.SWARM_STATE_DIR
+  const nowMs = Date.now()
+  try {
+    mkdirSync(join(dir, 'overnight'), { recursive: true })
+    writeFileSync(
+      join(dir, 'overnight', 'pool-calls-5h.jsonl'),
+      `${JSON.stringify({ atMs: nowMs, quotaPool: 'test-pool', status: 'ok' })}\n`
+    )
+    process.env.SWARM_STATE_DIR = dir
+    const summary = buildRelayQuotaSummary({
+      budgets: { 'test-pool': { pool: 'test-pool', admitted: true, cap: 5 } },
+      nowMs
+    })
+    assert.equal(summary.pools[0].callsInWindow, 1)
+  } finally {
+    if (prev === undefined) delete process.env.SWARM_STATE_DIR
+    else process.env.SWARM_STATE_DIR = prev
+    rmSync(dir, { recursive: true, force: true })
   }
 })

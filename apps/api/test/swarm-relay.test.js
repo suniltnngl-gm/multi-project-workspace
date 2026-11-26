@@ -1048,6 +1048,21 @@ test('#207 relay report/findings paths resolve through SWARM_STATE_DIR', () => {
   }
 })
 
+test('#233: relay kill-switch path follows SWARM_STATE_DIR at plan-build time', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'relay-killswitch-override-'))
+  const prev = process.env.SWARM_STATE_DIR
+  try {
+    process.env.SWARM_STATE_DIR = dir
+    const plan = buildRelayPlan({ preset: 'k5-pipeline-ring', windows: 1, rounds: 1 })
+    assert.equal(plan.killSwitchFile, join(dir, 'overnight', 'STOP_SWARM'))
+    assert.equal(plan.reportDir, join(dir, 'reports'))
+  } finally {
+    if (prev === undefined) delete process.env.SWARM_STATE_DIR
+    else process.env.SWARM_STATE_DIR = prev
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('swarm-review state root: SWARM_STATE_DIR takes precedence over SWARM_STATE_ROOT and default', () => {
   const defaultRoot = join(homedir(), '.local', 'state', 'curl-ai-bridge')
 

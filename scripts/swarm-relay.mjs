@@ -68,8 +68,7 @@ export const DEFAULT_SOFT_WINDOW_SEC = 300
 export const DEFAULT_ROUNDS = 1
 export const DEFAULT_MAX_CONSERVE_WINDOWS = 1
 export const DEFAULT_STALL_KILL_SEC = 0
-export const DEFAULT_REPORT_DIR = join(homedir(), '.local/state/curl-ai-bridge/reports')
-/** #214/#207: the report root resolves through the single SWARM_STATE_DIR contract. */
+/** #233: report root resolves through statePaths() at call time; use defaultReportDir(). */
 export function defaultReportDir(env = process.env) {
   return statePaths(env).reportsDir
 }
@@ -463,7 +462,7 @@ export function buildRelayPlan({
     noHardKill: true,
     hardKill: false,
     killsSiblings: false,
-    killSwitchFile: join(homedir(), '.local/state/curl-ai-bridge/overnight/STOP_SWARM'),
+    killSwitchFile: statePaths().stopSwitchPath,
     summaryReportPath: join(dir, `relay-${planMode}-${stamp}-summary.json`),
     assignments
   }
@@ -822,7 +821,7 @@ export async function runRelay(argv) {
     return { ok: true, help: true }
   }
 
-  const stateDir = join(homedir(), '.local/state/curl-ai-bridge/overnight')
+  const stateDir = statePaths().overnightDir
   // #206: the orchestrator lease lives beside the ring ledger (relay/), per spec —
   // not in the overnight quota dir, so a relay run never blocks an unrelated
   // supervisor's pool ledger (and vice versa).
@@ -871,7 +870,7 @@ export async function runRelay(argv) {
     // Persist the schedule artifact for cross-session inspection ($0).
     let schedulePath = null
     if (opts.writePlan) {
-      const stateRoot = resolve(homedir(), '.local/state/curl-ai-bridge')
+      const stateRoot = resolve(statePaths().root)
       schedulePath = opts.writePlan === 'auto'
         ? join(stateRoot, 'relay', `${startedAt.replace(/[:.]/g, '-')}-schedule.json`)
         : resolve(opts.writePlan)
@@ -978,7 +977,7 @@ export async function runRelay(argv) {
   // proves planRevision/baseHeadSha are still current, then ensures the tree is safe to
   // edit. Fail-closed; both flags must be supplied together.
   // #210/#213 work-item context. Populated only when the round declares its binding.
-  const stateRoot = join(homedir(), '.local/state/curl-ai-bridge')
+  const stateRoot = statePaths().root
   const workItemRegistryDir = join(stateRoot, 'registries', 'work-items')
   let activeWorkItem = null
   let workItemWriteLease = null
@@ -1007,7 +1006,7 @@ export async function runRelay(argv) {
       planPath: resolve(opts.planFile),
       workItem,
       headSha,
-      backupRoot: join(homedir(), '.local/state/curl-ai-bridge/repo-checkpoints'),
+      backupRoot: statePaths().repoCheckpointsDir,
       allowRestore: false,
       quarantine: quarantineDirtyWorktree
     })
@@ -1051,7 +1050,7 @@ export async function runRelay(argv) {
   const roundVerdicts = new Map()
   const roundVerdictPaths = new Map()
   let roundPreExisting = []
-  const backupRoot = join(homedir(), '.local/state/curl-ai-bridge/repo-checkpoints')
+  const backupRoot = statePaths().repoCheckpointsDir
   const totalWindows = plan.rounds === 'continuous' ? Number.POSITIVE_INFINITY : plan.windows * plan.rounds
 
   // #222: W1..W4 are forbidden from committing. The scoped hook is installed at

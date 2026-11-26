@@ -11,8 +11,8 @@
  * Default state dir: ~/.local/state/curl-ai-bridge/overnight
  */
 import { existsSync, readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { statePaths } from './swarm-state-paths.mjs'
 import {
   DEFAULT_ORCHESTRATOR_RESOURCE,
   orchestratorLockPath,
@@ -23,7 +23,7 @@ const KNOWN_RESOURCES = ['orchestrator', 'relay-ring', 'quota-ledger']
 
 function parseArgs(argv) {
   const [command, ...rest] = argv
-  const options = { command, stateDir: join(homedir(), '.local/state/curl-ai-bridge/overnight'), resource: null }
+  const options = { command, stateDir: statePaths().overnightDir, resource: null }
   for (let i = 0; i < rest.length; i += 1) {
     const a = rest[i]
     if (a === '--state-dir') options.stateDir = rest[++i]

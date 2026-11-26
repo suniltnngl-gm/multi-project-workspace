@@ -7,6 +7,8 @@ import {
   emitNotification,
   diffRemoteStates,
   eventsLogPath,
+  remoteStatePath,
+  defaultStateDir,
   readUnreadEvents,
   advanceEventCursor,
   routeNotificationAction
@@ -55,6 +57,21 @@ test('readUnreadEvents + advanceEventCursor + routeNotificationAction are idempo
     advanceEventCursor(dir, e2.id)
     assert.strictEqual(readUnreadEvents(dir).length, 0)
   } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('#233: notifier state dir honours SWARM_STATE_DIR at call time', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'notifier-state-override-'))
+  const prev = process.env.SWARM_STATE_DIR
+  try {
+    process.env.SWARM_STATE_DIR = dir
+    assert.strictEqual(defaultStateDir(), dir)
+    assert.strictEqual(eventsLogPath(), join(dir, 'notifications', 'events.jsonl'))
+    assert.strictEqual(remoteStatePath(), join(dir, 'notifications', 'remote-state.json'))
+  } finally {
+    if (prev === undefined) delete process.env.SWARM_STATE_DIR
+    else process.env.SWARM_STATE_DIR = prev
     rmSync(dir, { recursive: true, force: true })
   }
 })

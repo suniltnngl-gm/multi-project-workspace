@@ -8,10 +8,10 @@
  * - Writes default to disabled (`allowWrites: false`) and always use `protectedWriteFile`
  */
 import { existsSync, readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { protectedWriteFile } from './mutation-guard.js'
+import { resolveStateRoot } from '../../../../../scripts/swarm-state-paths.mjs'
 
 const TOOL_SYSTEM_PROMPT = [
   'You have allowlisted local tools. To call a tool, reply ONLY with a JSON object:',
@@ -28,7 +28,7 @@ function safeResolve(repoDir, relPath, { allowStateRead = false } = {}) {
     return target
   }
   if (allowStateRead) {
-    const stateRoot = resolve(process.env.SWARM_STATE_ROOT || join(homedir(), '.local/state/curl-ai-bridge'))
+    const stateRoot = resolve(resolveStateRoot())
     for (const sub of ['reports', 'handoffs', 'relay']) {
       const allowedDir = resolve(stateRoot, sub)
       if (target === allowedDir || target.startsWith(`${allowedDir}${sep}`)) {

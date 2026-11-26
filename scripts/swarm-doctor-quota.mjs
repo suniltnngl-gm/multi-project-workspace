@@ -12,6 +12,7 @@
  */
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { statePaths } from './swarm-state-paths.mjs'
 import { countPoolCallsInWindow } from '../apps/api/src/toolchain/dispatch/overnight-supervisor.js'
 
 /** Short, stable reason code per pool (keeps the doctor line greppable). */
@@ -48,7 +49,7 @@ export function buildRelayQuotaSummary({
   nowMs = Date.now(),
   maxPools = 4
 } = {}) {
-  const dir = stateDir || join(process.env.SWARM_STATE_ROOT || join(process.env.HOME || '', '.local/state/curl-ai-bridge'), 'overnight')
+  const dir = stateDir || statePaths().overnightDir
 
   const entries = Object.values(budgets).map((b) => {
     const callsInWindow = typeof countCalls === 'function'
@@ -129,7 +130,7 @@ async function main() {
   const argv = process.argv.slice(2)
   const allowConserve = argv.includes('--allow-conserve')
   const json = argv.includes('--json')
-  const stateRoot = process.env.SWARM_STATE_ROOT || join(process.env.HOME || '', '.local/state/curl-ai-bridge')
+  const stateRoot = statePaths().root
 
   let summary
   try {

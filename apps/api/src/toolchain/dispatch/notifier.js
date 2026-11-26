@@ -6,18 +6,21 @@
  * - Edge-triggered remote state diffing (`diffRemoteStates`) for Kaggle, Colab, and GitHub CI
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
+import { statePaths } from '../../../../../scripts/swarm-state-paths.mjs'
 
-const DEFAULT_STATE_DIR = join(homedir(), '.local/state/curl-ai-bridge')
+/** #233: resolve the notifier state dir at call time (SWARM_STATE_DIR wins). */
+export function defaultStateDir(env = process.env) {
+  return statePaths(env).root
+}
 
-export function eventsLogPath(stateDir = DEFAULT_STATE_DIR) {
+export function eventsLogPath(stateDir = defaultStateDir()) {
   return join(stateDir, 'notifications', 'events.jsonl')
 }
 
-export function remoteStatePath(stateDir = DEFAULT_STATE_DIR) {
+export function remoteStatePath(stateDir = defaultStateDir()) {
   return join(stateDir, 'notifications', 'remote-state.json')
 }
 
@@ -26,7 +29,7 @@ export function emitNotification({
   body,
   severity = 'info',
   source = 'swarm',
-  stateDir = DEFAULT_STATE_DIR,
+  stateDir = defaultStateDir(),
   desktop = true,
   dryRun = false
 }) {
@@ -73,13 +76,13 @@ export function diffRemoteStates(prev = {}, next = {}) {
   return transitions
 }
 
-export function loadRemoteState(stateDir = DEFAULT_STATE_DIR) {
+export function loadRemoteState(stateDir = defaultStateDir()) {
   const p = remoteStatePath(stateDir)
   if (!existsSync(p)) return {}
   try { return JSON.parse(readFileSync(p, 'utf8')) } catch { return {} }
 }
 
-export function saveRemoteState(stateDir = DEFAULT_STATE_DIR, state = {}) {
+export function saveRemoteState(stateDir = defaultStateDir(), state = {}) {
   const dir = join(stateDir, 'notifications')
   mkdirSync(dir, { recursive: true, mode: 0o700 })
   const target = remoteStatePath(stateDir)
@@ -89,11 +92,11 @@ export function saveRemoteState(stateDir = DEFAULT_STATE_DIR, state = {}) {
   return target
 }
 
-export function consumerCursorPath(stateDir = DEFAULT_STATE_DIR) {
+export function consumerCursorPath(stateDir = defaultStateDir()) {
   return join(stateDir, 'notifications', 'consumer-cursor.json')
 }
 
-export function readUnreadEvents(stateDir = DEFAULT_STATE_DIR) {
+export function readUnreadEvents(stateDir = defaultStateDir()) {
   const p = eventsLogPath(stateDir)
   if (!existsSync(p)) return []
   const cursorFile = consumerCursorPath(stateDir)
@@ -109,7 +112,7 @@ export function readUnreadEvents(stateDir = DEFAULT_STATE_DIR) {
   return idx >= 0 ? all.slice(idx + 1) : all
 }
 
-export function advanceEventCursor(stateDir = DEFAULT_STATE_DIR, lastEventId) {
+export function advanceEventCursor(stateDir = defaultStateDir(), lastEventId) {
   if (!lastEventId) return null
   const dir = join(stateDir, 'notifications')
   mkdirSync(dir, { recursive: true, mode: 0o700 })

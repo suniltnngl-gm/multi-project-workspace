@@ -12,8 +12,8 @@
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, rmSync, statSync } from 'node:fs'
-import { homedir } from 'os'
 import { isAbsolute, join, resolve } from 'node:path'
+import { statePaths } from './swarm-state-paths.mjs'
 import { evaluateDeterministicDiff } from './swarm-review.mjs'
 import { checkpointPassingDiff, protectedWriteFile, undoLastEdit } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
 
@@ -193,7 +193,7 @@ export function applyPublishGate({ verdict, repoDir, baseSha, reportDir, sibling
       category: 'self-improvement',
       sibling,
       quotaPool,
-      backupRoot: backupRoot || join(homedir(), '.local/state/curl-ai-bridge/repo-checkpoints'),
+      backupRoot: backupRoot || statePaths().repoCheckpointsDir,
       push,
       // Provenance: only an ACCEPT artifact from this round authorizes the commit.
       gate: (verdictArtifactPath || verdict.source)

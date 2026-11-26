@@ -12,9 +12,9 @@
  * Defaults to --dry-run (safe simulation, zero LLM spawns). Pass --execute for live ticks.
  */
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { statePaths } from './swarm-state-paths.mjs'
 import { gatherTelemetry } from '../apps/api/src/toolchain/dispatch/host-telemetry.js'
 import { evaluateResourceGate } from '../apps/api/src/toolchain/dispatch/resource-gate.js'
 import { readQueue, selectNextTask, queueStats } from '../apps/api/src/toolchain/dispatch/job-queue.js'
@@ -56,12 +56,20 @@ if (argv.includes('--help') || argv.includes('-h')) {
 `)
   process.exit(0)
 }
+// #233: path defaults resolve from statePaths() at every read, so an explicit
+// --state-dir override or a changed SWARM_STATE_DIR is never frozen at load time.
+const pathOverrides = {}
 const opts = {
-  stateDir: join(homedir(), '.local/state/curl-ai-bridge/overnight'),
-  queueDir: join(homedir(), '.local/state/curl-ai-bridge/queue/active'),
-  caseDir: join(homedir(), '.local/state/curl-ai-bridge/queue/cases'),
-  registry: join(homedir(), '.local/state/curl-ai-bridge/sessions/swarm-sessions.json'),
-  sessionsDir: join(homedir(), '.local/state/curl-ai-bridge/sessions'),
+  get stateDir() { return pathOverrides.stateDir ?? statePaths().overnightDir },
+  set stateDir(value) { pathOverrides.stateDir = value },
+  get queueDir() { return pathOverrides.queueDir ?? statePaths().queueActiveDir },
+  set queueDir(value) { pathOverrides.queueDir = value },
+  get caseDir() { return pathOverrides.caseDir ?? statePaths().casesDir },
+  set caseDir(value) { pathOverrides.caseDir = value },
+  get registry() { return pathOverrides.registry ?? join(statePaths().sessionsDir, 'swarm-sessions.json') },
+  set registry(value) { pathOverrides.registry = value },
+  get sessionsDir() { return pathOverrides.sessionsDir ?? statePaths().sessionsDir },
+  set sessionsDir(value) { pathOverrides.sessionsDir = value },
   maxTicks: 10,
   maxMinutes: 480,
   maxFailures: 3,

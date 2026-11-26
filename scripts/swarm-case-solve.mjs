@@ -9,9 +9,9 @@
  *   `swarm-direct.mjs --provider cloudflare`) and marks the case `resolved` when `--apply`.
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { statePaths } from './swarm-state-paths.mjs'
 import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
 
 const UNRECOVERABLE_RE = /\b(billing|fund|credits?|force[- ]?push|push\s+--force|reset\s+--hard|drop\s+table|gcloud\s+.*delete|rm\s+-rf)\b/i
@@ -93,7 +93,7 @@ if (isMain) {
     process.exit(0)
   }
   const flag = (n, fb) => { const i = argv.indexOf(n); return i >= 0 && i + 1 < argv.length ? argv[i + 1] : fb }
-  const defaultDir = join(process.env.SWARM_STATE_ROOT || join(homedir(), '.local/state/curl-ai-bridge'), 'queue/cases')
+  const defaultDir = statePaths().casesDir
   const caseDir = resolve(flag('--case-dir', defaultDir))
   const apply = argv.includes('--apply')
   const res = solveOpenCases(caseDir, { apply })

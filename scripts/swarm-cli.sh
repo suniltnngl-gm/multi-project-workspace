@@ -2,6 +2,8 @@
 set -euo pipefail
 
 MPW_DIR="${MPW_DIR:-$HOME/Code/multi-project-workspace}"
+# Resolve this script's own directory: MPW_DIR can be relocated by isolated HOME tests.
+SWARM_CLI_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 # SWARM-PORTABLE-001: one env contract for every state path. SWARM_STATE_DIR wins so a
 # clone/container/CI runner never writes into the developer's real state tree.
 STATE_ROOT="${SWARM_STATE_DIR:-${SWARM_STATE_ROOT:-$HOME/.local/state/curl-ai-bridge}}"
@@ -165,9 +167,11 @@ case "$cmd" in
       # SWARM-HEALTH-001: machine-readable rollup (read-only).
       exec node "$MPW_DIR/scripts/swarm-health.mjs" --json
     fi
-    node -e '
-      const fs = require("fs"), path = require("path");
-      const root = process.env.SWARM_STATE_ROOT || path.join(process.env.HOME, ".local/state/curl-ai-bridge");
+    node --input-type=module -e '
+      import fs from "node:fs";
+      import path from "node:path";
+      import { resolveStateRoot } from "'"$SWARM_CLI_DIR"'/swarm-state-paths.mjs";
+      const root = resolveStateRoot();
       const reg = JSON.parse(fs.readFileSync(path.join(root, "sessions/swarm-sessions.json"), "utf8"));
       const pools = new Set(reg.sessions.map(s => s.quotaPool)).size;
       const idle = reg.sessions.filter(s => s.status === "idle" || s.status === "active").length;
@@ -185,9 +189,11 @@ case "$cmd" in
     node "$MPW_DIR/scripts/swarm-entry-drift.mjs" || true
     # Resolve the script path before any cd: callers may invoke `swarm` from any cwd.
     SWARM_CLI_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-    node -e '
-      const fs = require("fs"), path = require("path");
-      const root = process.env.SWARM_STATE_ROOT || path.join(process.env.HOME, ".local/state/curl-ai-bridge");
+    node --input-type=module -e '
+      import fs from "node:fs";
+      import path from "node:path";
+      import { resolveStateRoot } from "'"$SWARM_CLI_DIR"'/swarm-state-paths.mjs";
+      const root = resolveStateRoot();
       const ov = path.join(root, "overnight");
       const stop = fs.existsSync(path.join(ov, "STOP_SWARM"));
       const lp = path.join(ov, "pool-calls-5h.jsonl");
@@ -225,9 +231,11 @@ case "$cmd" in
     echo "=== GIT DELTA ($SINCE_SHA..HEAD) ==="
     git -C "$MPW_DIR" log --oneline -n 10 "$SINCE_SHA..HEAD" 2>/dev/null || git -C "$MPW_DIR" log --oneline -n 5
     echo "=== TOP QUEUE & CASES ==="
-    node -e '
-      const fs = require("fs"), path = require("path");
-      const root = process.env.SWARM_STATE_ROOT || path.join(process.env.HOME, ".local/state/curl-ai-bridge");
+    node --input-type=module -e '
+      import fs from "node:fs";
+      import path from "node:path";
+      import { resolveStateRoot } from "'"$SWARM_CLI_DIR"'/swarm-state-paths.mjs";
+      const root = resolveStateRoot();
       const list = (sub) => {
         const d = path.join(root, sub);
         if (!fs.existsSync(d)) return [];
