@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildRelayPlan } from '../../../scripts/swarm-relay.mjs'
-import { loadPoolBudgets, selectSlot, evaluateCopilotMonthly, resolveRing, poolForSibling, readLiveSqliteQuota, guestFallbackCandidates } from '../../../scripts/swarm-quota-ring.mjs'
+import { loadPoolBudgets, selectSlot, evaluateCopilotMonthly, resolveRing, poolForSibling, readLiveSqliteQuota, guestFallbackCandidates, OPENCODE_POOLS, POOL_POLICY } from '../../../scripts/swarm-quota-ring.mjs'
 import {
   GEMINI_API_ROTATION_MODELS,
   advanceGeminiApiRotation,
@@ -196,6 +196,21 @@ test('readLiveSqliteQuota loads live weeklyRemainingPct and conservePools from w
   // agy-gemini is ~16.65% weekly and aheadOfPace -> conserve=true
   assert.ok(budgets['agy-gemini'].weeklyRemainingPct < 50)
   assert.equal(budgets['agy-gemini'].conserve, true)
+})
+
+test('#240: all 6 OpenCode pools (incl. opencode-vercel-ai-gateway) and codex-exec are registered in POOL_POLICY and DEFAULT_SIBLING_POOL', () => {
+  assert.equal(OPENCODE_POOLS.length, 6)
+  assert.ok(OPENCODE_POOLS.includes('opencode-vercel-ai-gateway'))
+  for (const pool of OPENCODE_POOLS) {
+    assert.ok(POOL_POLICY[pool], `missing POOL_POLICY entry for ${pool}`)
+  }
+  assert.equal(poolForSibling('opencode-vercel'), 'opencode-vercel-ai-gateway')
+  assert.equal(poolForSibling('codex'), 'codex-exec')
+  assert.ok(POOL_POLICY['codex-exec'])
+  const budgets = loadPoolBudgets({ countCalls: () => 0 })
+  for (const pool of [...OPENCODE_POOLS, 'codex-exec']) {
+    assert.equal(budgets[pool].eligible, true, `expected ${pool} eligible`)
+  }
 })
 
 test('gemini-api rotation roster is the four-model Free-tier cycle with a deterministic single alternate', () => {

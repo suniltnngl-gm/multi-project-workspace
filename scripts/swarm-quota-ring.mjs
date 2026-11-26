@@ -40,6 +40,11 @@ export const DEFAULT_SIBLING_POOL = Object.freeze({
   'direct-vercel': 'vercel-ai-gateway',
   'gemini-api': 'gemini-api-key',
   opencode: 'opencode-tidepool-free',
+  'opencode-google': 'opencode-console-google',
+  'opencode-nvidia': 'opencode-console-nvidia',
+  'opencode-openrouter': 'opencode-console-openrouter',
+  'opencode-groq': 'opencode-console-groq',
+  'opencode-vercel': 'opencode-vercel-ai-gateway',
   agy: 'agy-gemini',
   copilot: 'github-copilot',
   local: 'local-llama-cpp',
@@ -48,6 +53,16 @@ export const DEFAULT_SIBLING_POOL = Object.freeze({
   vibe: 'mistral-vibe',
   codex: 'codex-exec'
 })
+
+/** All 6 OpenCode quota pools (in rotation order). */
+export const OPENCODE_POOLS = Object.freeze([
+  'opencode-tidepool-free',
+  'opencode-console-google',
+  'opencode-console-nvidia',
+  'opencode-console-openrouter',
+  'opencode-console-groq',
+  'opencode-vercel-ai-gateway'
+])
 
 /**
  * Per-pool policy. `cap5h` mirrors DEFAULT_FIVE_HOUR_CAPS; `limitKnown: false` means
@@ -62,6 +77,11 @@ export const POOL_POLICY = Object.freeze({
   'vercel-ai-gateway': { cap5h: null, limitKnown: false },
   'gemini-api-key': { cap5h: null, limitKnown: true, dailyLimit: 50 },
   'opencode-tidepool-free': { cap5h: null, limitKnown: true, dailyLimit: 100 },
+  'opencode-console-google': { cap5h: null, limitKnown: true, dailyLimit: 100 },
+  'opencode-console-nvidia': { cap5h: null, limitKnown: false },
+  'opencode-console-openrouter': { cap5h: null, limitKnown: false },
+  'opencode-console-groq': { cap5h: null, limitKnown: false },
+  'opencode-vercel-ai-gateway': { cap5h: null, limitKnown: false },
   'nous-hermes-free': { cap5h: null, limitKnown: false },
   'local-llama-cpp': { cap5h: null, limitKnown: false },
   // Added in #205 after live headless validation (sibling-validation matrix, 2026-11-24):
