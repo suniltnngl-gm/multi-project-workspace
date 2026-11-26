@@ -1,11 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { handleParentOffload } from '../../src/toolchain/dispatch/parent-offload-gateway.js'
 import { simulateCaseOptions } from '../../src/toolchain/dispatch/case-sandbox.js'
 import { createWorkItem } from '../../src/toolchain/dispatch/case-task-lifecycle.js'
+import { solveCaseWithSandbox } from '../../../../scripts/swarm-case-solve.mjs'
 
 test('#242: parent-mediated $0 offload gateway mediates translate, pack, summarize, and precheck via active parent slot', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'parent-offload-'))
@@ -98,4 +100,36 @@ test('#243: case simulation sandbox picks clear winner in isolated temp dirs and
   assert.equal(blocked.ok, false)
   assert.equal(blocked.action, 'pause_operator')
   assert.match(blocked.reason, /^unrecoverable_option_detected:nuke:/)
+})
+
+test('#244: CLI wiring — swarm-ask --offload translate and swarm-case-solve solveCaseWithSandbox run end-to-end', async () => {
+  const askScript = resolve(new URL('../../../../scripts/swarm-ask.mjs', import.meta.url).pathname)
+  const out = execFileSync(
+    process.execPath,
+    [askScript, '--parent-slot', 'parent1', '--offload', 'translate', '--json', 'fix orgestration for opencode-versal-ai-gateway on #244'],
+    { encoding: 'utf8' }
+  )
+  const parsed = JSON.parse(out)
+  assert.equal(parsed.ok, true)
+  assert.equal(parsed.action, 'translate')
+  assert.equal(parsed.shadowCallsBlocked, true)
+  assert.match(parsed.result.normalized, /opencode-vercel-ai-gateway/)
+  assert.deepEqual(parsed.result.taskIds, ['#244'])
+
+  const kase = createWorkItem({
+    id: 'case-cli-sandbox',
+    title: 'CLI sandbox wiring test',
+    options: [
+      { id: 'fast', label: 'Fast path' },
+      { id: 'slow', label: 'Slow path' }
+    ]
+  })
+  kase.findings = {
+    fast: { ok: true, score: 95, notes: 'fast' },
+    slow: { ok: true, score: 40, notes: 'slow' }
+  }
+  const res = await solveCaseWithSandbox(kase)
+  assert.equal(res.ok, true)
+  assert.equal(res.action, 'select_winner')
+  assert.equal(res.selectedOption, 'fast')
 })

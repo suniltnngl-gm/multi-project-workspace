@@ -34,12 +34,12 @@ test('buildRelayQuotaSummary counts eligible vs CONSERVE pools and emits a grepp
   assert.equal(summary.ok, true)
   assert.equal(summary.source, 'sqlite')
   // agy-gemini/argon/claude-gpt are CONSERVE-excluded (not weekly-exhausted here).
-  // #205 registered cline-free / mistral-vibe / codex-exec, so the pin is 13 pools, 10 eligible.
-  assert.equal(summary.total, 13)
-  assert.equal(summary.eligibleCount, 10)
+  // #205 registered cline-free / mistral-vibe / codex-exec (+3), #240 added 5 OpenCode console/vercel pools (+5) -> 18 pools, 15 eligible.
+  assert.equal(summary.total, 18)
+  assert.equal(summary.eligibleCount, 15)
   assert.equal(summary.conserveCount, 3)
   assert.equal(summary.totalCalls, 14)
-  assert.match(summary.headline, /^relay_quota: 10\/13 eligible pools \(14 calls\/5h\)$/)
+  assert.match(summary.headline, /^relay_quota: 15\/18 eligible pools \(14 calls\/5h\)$/)
   // Top lanes are eligible and sorted by weekly remaining desc.
   assert.equal(summary.top.length <= 4, true)
   assert.ok(summary.top.every((b) => b.eligible))

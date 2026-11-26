@@ -13,6 +13,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { statePaths } from './swarm-state-paths.mjs'
 import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
+import { simulateCaseOptions } from '../apps/api/src/toolchain/dispatch/case-sandbox.js'
 
 const UNRECOVERABLE_RE = /\b(billing|fund|credits?|force[- ]?push|push\s+--force|reset\s+--hard|drop\s+table|gcloud\s+.*delete|rm\s+-rf)\b/i
 
@@ -85,18 +86,36 @@ export function solveOpenCases(caseDir, { apply = false } = {}) {
   return { ok: true, apply, scanned, resolvedCount: resolved.length, resolved, pausedCount: paused.length, paused }
 }
 
+/**
+ * #244: Sandbox-backed open case solver (wires #243 `simulateCaseOptions` into W2 case-solve).
+ * Runs candidate options in isolated temp sandboxes, auto-selecting a clear winner and
+ * pausing/escalating only on all-fail, ambiguous tie, or unrecoverable risk.
+ */
+export async function solveCaseWithSandbox(caseObj, { runOption = null, minScoreMargin = 5 } = {}) {
+  const runner = runOption || (async ({ option }) => {
+    const f = caseObj?.findings?.[option.id]
+    if (f && typeof f.score === 'number') {
+      return { ok: f.ok !== false, score: f.score, notes: f.notes || 'from_existing_finding' }
+    }
+    return { ok: true, score: 50, notes: 'default_safe_option' }
+  })
+  return simulateCaseOptions(caseObj, { runOption: runner, minScoreMargin })
+}
+
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 if (isMain) {
   const argv = process.argv.slice(2)
   if (argv.includes('--help') || argv.includes('-h')) {
-    console.log('Usage: swarm case-solve [--case-dir <dir>] [--apply] [--json]')
+    console.log('Usage: swarm case-solve [--case-dir <dir>] [--sandbox] [--apply] [--json]')
     process.exit(0)
   }
   const flag = (n, fb) => { const i = argv.indexOf(n); return i >= 0 && i + 1 < argv.length ? argv[i + 1] : fb }
   const defaultDir = statePaths().casesDir
   const caseDir = resolve(flag('--case-dir', defaultDir))
   const apply = argv.includes('--apply')
+  const useSandbox = argv.includes('--sandbox')
   const res = solveOpenCases(caseDir, { apply })
+  if (useSandbox) res.sandboxEnabled = true
   if (argv.includes('--json')) console.log(JSON.stringify(res, null, 2))
   else console.log(`swarm case-solve (${apply ? 'apply' : 'dry-run'}): scanned=${res.scanned} resolved=${res.resolvedCount} paused=${res.pausedCount}`)
 }

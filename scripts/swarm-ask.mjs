@@ -26,9 +26,13 @@ import {
   readRingState,
   resolveSlot
 } from './swarm-ring-state.mjs'
+import {
+  OFFLOAD_ACTIONS,
+  handleParentOffload
+} from '../apps/api/src/toolchain/dispatch/parent-offload-gateway.js'
 
 const argv = process.argv.slice(2)
-const valueFlags = new Set(['--session', '--mode', '--cli', '--timeout', '--max-matches', '--transcript', '--handoff-dir', '--pool', '--state-dir', '--parent-slot', '--ring-state-dir'])
+const valueFlags = new Set(['--session', '--mode', '--cli', '--timeout', '--max-matches', '--transcript', '--handoff-dir', '--pool', '--state-dir', '--parent-slot', '--ring-state-dir', '--offload', '--files', '--max-chars', '--max-lines'])
 const flag = (name, fallback = null) => {
   const i = argv.indexOf(name)
   return i >= 0 && i + 1 < argv.length ? argv[i + 1] : fallback
@@ -50,6 +54,8 @@ Options:
   --session <id>           Target session/conversation ID
   --all                    Search across ALL handoff cards and AGY transcripts ($0 grep)
   --parent-slot <slot>     Query a relay ring slot (parent1..parentK / siblingN / CLI name)
+  --offload <action>       Parent-mediated $0 offload (translate|pack|summarize|precheck)
+  --files <csv>            Comma-separated file paths for --offload pack
   --ring-state-dir <dir>   Ring ledger directory (default: ~/.local/state/curl-ai-bridge/relay)
   --mode <grep|llm>        Query mode: grep ($0 default) or llm (bounded READ-ONLY headless)
   --cli <agy>              CLI backend for --mode llm (default: agy)
@@ -66,6 +72,10 @@ Options:
 
 const sessionId = flag('--session', null)
 const parentSlotKey = flag('--parent-slot', null)
+const offloadAction = flag('--offload', null)
+const offloadFilesRaw = flag('--files', null)
+const offloadMaxChars = Number(flag('--max-chars', '4000')) || 4000
+const offloadMaxLines = Number(flag('--max-lines', '8')) || 8
 const ringStateDir = flag('--ring-state-dir', DEFAULT_RING_STATE_DIR)
 const mode = flag('--mode', 'grep')
 const cli = flag('--cli', 'agy')
@@ -91,6 +101,33 @@ for (let i = 0; i < argv.length; i += 1) {
 }
 const question = positionals.join(' ').trim()
 const searchAll = has('--all')
+
+if (offloadAction) {
+  if (!OFFLOAD_ACTIONS.includes(offloadAction)) {
+    console.error(`swarm ask: unsupported --offload '${offloadAction}' (expected ${OFFLOAD_ACTIONS.join('|')})`)
+    process.exit(1)
+  }
+  const files = offloadFilesRaw ? offloadFilesRaw.split(',').map((s) => s.trim()).filter(Boolean) : []
+  const payload = offloadAction === 'pack'
+    ? { files, maxChars: offloadMaxChars }
+    : offloadAction === 'summarize'
+      ? { text: question, maxLines: offloadMaxLines }
+      : offloadAction === 'precheck'
+        ? { diffText: question }
+        : { prompt: question }
+  const res = await handleParentOffload({
+    action: offloadAction,
+    payload,
+    parentSlot: parentSlotKey,
+    ringStateDir
+  })
+  if (has('--json')) {
+    console.log(JSON.stringify(res, null, 2))
+  } else {
+    console.log(`swarm ask [offload:${offloadAction}]: parent=${res.mediatedBy.parentSlot || 'none'} ok=${res.ok}`)
+  }
+  process.exit(res.ok ? 0 : 1)
+}
 
 if ((!sessionId && !searchAll && !parentSlotKey) || !question) {
   console.error('swarm ask: (--session <id> | --all | --parent-slot <slot>) and "<question>" are required')
