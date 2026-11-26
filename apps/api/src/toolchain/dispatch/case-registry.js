@@ -1,52 +1,98 @@
 /**
- * SP-009 Case Registry: atomic store for multi-option cases, per-option sandbox
- * simulation findings (temp/worktree/sandbox), and evidence-based promotion to task.
+ * SP-009 / #235 Case Registry: unified SQLite-backed store (`case_registry_records` in
+ * `apps/api/data/workspace.sqlite` or a directory-scoped `cases.sqlite` for isolated tests)
+ * for multi-option cases, per-option sandbox findings, and governed promotion authority.
+ *
+ * Legacy `.json` case files are rejected fail-closed (`legacy_json_case_files_unsupported`)
+ * so there is never a split-brain second JSON case home.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { DatabaseSync } from 'node:sqlite'
 import { statePaths } from '../../../../../scripts/swarm-state-paths.mjs'
 
 function nowIso() {
   return new Date().toISOString()
 }
 
-/** #231: the one canonical cases directory, derived from the state-root contract. */
+/** #231/#235: canonical cases directory derived from the state-root contract. */
 export function canonicalCasesDir(env = process.env) {
   return statePaths(env).casesDir
 }
 
-function casePath(dir, id) {
-  return join(dir, `${id}.json`)
+function assertNoLegacyJsonCases(dir) {
+  if (!dir || !existsSync(dir)) return
+  const legacy = readdirSync(dir).filter((f) => f.endsWith('.json'))
+  if (legacy.length > 0) {
+    throw new Error(`legacy_json_case_files_unsupported:${dir}:${legacy.join(',')}`)
+  }
+}
+
+function openCaseStore(dir) {
+  const rootDir = dir ?? canonicalCasesDir()
+  assertNoLegacyJsonCases(rootDir)
+  mkdirSync(rootDir, { recursive: true })
+  const dbPath = join(rootDir, 'cases.sqlite')
+  const db = new DatabaseSync(dbPath)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS case_registry_records (
+      case_id TEXT PRIMARY KEY,
+      payload_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `)
+  return { db, dbPath }
 }
 
 export function readCases(dir = canonicalCasesDir()) {
-  if (!existsSync(dir)) return []
-  return readdirSync(dir)
-    .filter((f) => f.endsWith('.json'))
-    .sort()
-    .map((f) => JSON.parse(readFileSync(join(dir, f), 'utf8')))
+  const rootDir = dir ?? canonicalCasesDir()
+  assertNoLegacyJsonCases(rootDir)
+  const dbPath = join(rootDir, 'cases.sqlite')
+  if (!existsSync(dbPath)) return []
+  const { db } = openCaseStore(rootDir)
+  try {
+    const rows = db.prepare('SELECT payload_json FROM case_registry_records ORDER BY case_id ASC').all()
+    return rows.map((r) => JSON.parse(r.payload_json))
+  } finally {
+    db.close()
+  }
 }
 
 export function readCase(dir, id) {
-  const p = casePath(dir ?? canonicalCasesDir(), id)
-  if (!existsSync(p)) return null
-  return JSON.parse(readFileSync(p, 'utf8'))
+  const rootDir = dir ?? canonicalCasesDir()
+  assertNoLegacyJsonCases(rootDir)
+  const dbPath = join(rootDir, 'cases.sqlite')
+  if (!existsSync(dbPath)) return null
+  const { db } = openCaseStore(rootDir)
+  try {
+    const row = db.prepare('SELECT payload_json FROM case_registry_records WHERE case_id = ?').get(String(id))
+    return row ? JSON.parse(row.payload_json) : null
+  } finally {
+    db.close()
+  }
 }
 
 export function writeCase(dir, record) {
   const rootDir = dir ?? canonicalCasesDir()
-  mkdirSync(rootDir, { recursive: true })
-  const target = casePath(rootDir, record.id)
-  const next = {
-    ...record,
-    findings: record.findings || {},
-    registry: { path: target, updatedAt: nowIso(), revision: (record.registry?.revision ?? 0) + 1 }
+  const { db, dbPath } = openCaseStore(rootDir)
+  try {
+    const updatedAt = nowIso()
+    const next = {
+      ...record,
+      findings: record.findings || {},
+      registry: { path: dbPath, store: 'sqlite', updatedAt, revision: (record.registry?.revision ?? 0) + 1 }
+    }
+    db.prepare(`
+      INSERT INTO case_registry_records (case_id, payload_json, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(case_id) DO UPDATE SET
+        payload_json = excluded.payload_json,
+        updated_at = excluded.updated_at
+    `).run(String(record.id), JSON.stringify(next), updatedAt)
+    return next
+  } finally {
+    db.close()
   }
-  const tmp = `${target}.tmp-${randomUUID()}`
-  writeFileSync(tmp, JSON.stringify(next, null, 2))
-  renameSync(tmp, target)
-  return next
 }
 
 /** Record a sandbox/worktree/temp simulation finding for one option of a case. */

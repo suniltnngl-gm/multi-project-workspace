@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWorkItem } from '../../src/toolchain/dispatch/case-task-lifecycle.js'
@@ -61,4 +61,16 @@ test('#231: file registry delegates promotion to the governed promoter only', ()
 
 test('#231: canonical cases directory comes from the single state-root contract', () => {
   assert.equal(canonicalCasesDir({ SWARM_STATE_DIR: '/custom/state' }), join('/custom/state', 'queue', 'cases'))
+})
+
+test('#235: case-registry stores records in SQLite and fails closed on legacy .json case files', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'case-reg-legacy-'))
+  try {
+    writeFileSync(join(dir, 'legacy-case.json'), JSON.stringify({ id: 'legacy-case', title: 'Old JSON' }), 'utf8')
+    assert.throws(() => readCases(dir), /legacy_json_case_files_unsupported/)
+    assert.throws(() => readCase(dir, 'legacy-case'), /legacy_json_case_files_unsupported/)
+    assert.throws(() => writeCase(dir, { id: 'new-case', title: 'New' }), /legacy_json_case_files_unsupported/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

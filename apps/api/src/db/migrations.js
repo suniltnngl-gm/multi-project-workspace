@@ -946,6 +946,16 @@ export function runMigrations(connection, { rootDir, databasePath, defaultDataba
     );
   `)
 
+  // #235: single-store registry records for compact multi-option work items.
+  // This lives inside the governed cases store, not a second JSON case home.
+  connection.exec(`
+    CREATE TABLE IF NOT EXISTS case_registry_records (
+      case_id TEXT PRIMARY KEY,
+      payload_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `)
+
   // Case Registry (v1.0): decision-only governance layer ahead of the Task Board.
   // Additive only; existing tables are neither rebuilt nor modified.
   connection.exec(`
