@@ -5,17 +5,22 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { promoteCaseToTask } from './case-task-lifecycle.js'
+import { statePaths } from '../../../../../scripts/swarm-state-paths.mjs'
 
 function nowIso() {
   return new Date().toISOString()
+}
+
+/** #231: the one canonical cases directory, derived from the state-root contract. */
+export function canonicalCasesDir(env = process.env) {
+  return statePaths(env).casesDir
 }
 
 function casePath(dir, id) {
   return join(dir, `${id}.json`)
 }
 
-export function readCases(dir) {
+export function readCases(dir = canonicalCasesDir()) {
   if (!existsSync(dir)) return []
   return readdirSync(dir)
     .filter((f) => f.endsWith('.json'))
@@ -24,14 +29,15 @@ export function readCases(dir) {
 }
 
 export function readCase(dir, id) {
-  const p = casePath(dir, id)
+  const p = casePath(dir ?? canonicalCasesDir(), id)
   if (!existsSync(p)) return null
   return JSON.parse(readFileSync(p, 'utf8'))
 }
 
 export function writeCase(dir, record) {
-  mkdirSync(dir, { recursive: true })
-  const target = casePath(dir, record.id)
+  const rootDir = dir ?? canonicalCasesDir()
+  mkdirSync(rootDir, { recursive: true })
+  const target = casePath(rootDir, record.id)
   const next = {
     ...record,
     findings: record.findings || {},
@@ -72,10 +78,12 @@ export function recordOptionFinding(caseRecord, {
 }
 
 /**
- * Pick the highest-scoring passing (`ok: true`) option from recorded findings
- * and promote the case to a task. Fails closed if no passing finding exists.
+ * Pick the highest-scoring passing (`ok: true`) option and hand the decision to a
+ * governed promoter. The file registry never creates tasks itself: promotion
+ * authority lives in the governed SQLite case store (#231). Fails closed when no
+ * passing finding exists or no promoter is supplied.
  */
-export function selectBestOptionAndPromote(caseRecord) {
+export function selectBestOptionAndPromote(caseRecord, { promote = null } = {}) {
   const passing = Object.values(caseRecord.findings || {})
     .filter((f) => f && f.ok === true)
     .sort((a, b) => (b.score - a.score) || ((a.latencyMs ?? Infinity) - (b.latencyMs ?? Infinity)) || a.optionId.localeCompare(b.optionId))
@@ -83,8 +91,11 @@ export function selectBestOptionAndPromote(caseRecord) {
   if (!passing.length) {
     throw new Error(`no_passing_option_finding:${caseRecord.id}`)
   }
+  if (typeof promote !== 'function') {
+    throw new Error('case_promotion_authority_required')
+  }
   const winner = passing[0]
-  return promoteCaseToTask(caseRecord, winner.optionId, {
+  return promote(caseRecord, winner.optionId, {
     reason: `best_sandbox_finding:score=${winner.score},sandbox=${winner.sandboxType}`
   })
 }

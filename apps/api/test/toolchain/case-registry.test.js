@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWorkItem } from '../../src/toolchain/dispatch/case-task-lifecycle.js'
 import {
+  canonicalCasesDir,
   writeCase,
   readCase,
   readCases,
@@ -33,11 +34,31 @@ test('case registry stores multi-option cases, records sandbox findings, and pro
     kase = writeCase(dir, kase)
 
     const loaded = readCase(dir, 'case-opencode-nvidia')
-    const promoted = selectBestOptionAndPromote(loaded)
-    assert.strictEqual(promoted.kind, 'task')
-    assert.strictEqual(promoted.state, 'queued')
-    assert.strictEqual(promoted.selectedOption.id, 'keep-parked')
+    assert.throws(() => selectBestOptionAndPromote(loaded), /case_promotion_authority_required/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('#231: file registry delegates promotion to the governed promoter only', () => {
+  const kase = createWorkItem({
+    id: 'case-authority-check',
+    title: 'Promotion authority belongs to the governed store',
+    options: [{ id: 'keep', label: 'Keep parked' }]
+  })
+  const withFindings = recordOptionFinding(kase, { optionId: 'keep', ok: true, score: 50, sandboxType: 'temp' })
+  let call = null
+  const promoted = selectBestOptionAndPromote(withFindings, {
+    promote: (record, optionId, meta) => {
+      call = { record, optionId, meta }
+      return { kind: 'task', id: record.id, selectedOption: optionId }
+    }
+  })
+  assert.equal(promoted.kind, 'task')
+  assert.equal(call.optionId, 'keep')
+  assert.match(call.meta.reason, /^best_sandbox_finding:score=50,sandbox=temp$/)
+})
+
+test('#231: canonical cases directory comes from the single state-root contract', () => {
+  assert.equal(canonicalCasesDir({ SWARM_STATE_DIR: '/custom/state' }), join('/custom/state', 'queue', 'cases'))
 })
