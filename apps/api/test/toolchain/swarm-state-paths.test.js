@@ -51,3 +51,17 @@ test('bootstrap dir list is relative and idempotent-safe (no absolute segments)'
   assert.ok(BOOTSTRAP_DIRS.includes('registries/work-items'))
   assert.ok(BOOTSTRAP_DIRS.every((d) => !d.startsWith('/')))
 })
+
+test('statePaths() emits well-known paths under the override root by default', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'state-default-'))
+  try {
+    const paths = statePaths({})
+    assert.equal(paths.root, DEFAULT_STATE_ROOT)
+    assert.equal(paths.reportsDir, join(DEFAULT_STATE_ROOT, 'reports'))
+    assert.equal(paths.overnightDir, join(DEFAULT_STATE_ROOT, 'overnight'))
+    assert.equal(paths.relayDir, join(DEFAULT_STATE_ROOT, 'relay'))
+    assert.equal(paths.repoCheckpointsDir, join(DEFAULT_STATE_ROOT, 'repo-checkpoints'))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

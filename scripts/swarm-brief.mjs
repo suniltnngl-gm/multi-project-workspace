@@ -11,6 +11,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { statePaths } from './swarm-state-paths.mjs'
 import {
   grepAllSessionTranscripts,
   readLatestHandoff,
@@ -19,7 +20,7 @@ import {
 
 export function buildExecutiveBrief({
   goal = '',
-  stateRoot = process.env.SWARM_STATE_ROOT || join(homedir(), '.local/state/curl-ai-bridge'),
+  stateRoot = statePaths().root,
   mpwDir = process.env.MPW_DIR || resolve(new URL('..', import.meta.url).pathname),
   handoffDir = resolveDefaultHandoffDir(),
   homeDir = homedir(),
