@@ -49,8 +49,10 @@ export function statePaths(env = process.env) {
     lifecycleTransitionsPath: join(root, 'lifecycle-transitions.jsonl'),
     poolCallsPath: join(root, 'overnight', 'pool-calls-5h.jsonl'),
     rotationPath: join(root, 'overnight', 'gemini-model-rotation.json'),
+    workspaceIndexPath: join(root, 'relay', 'workspace-index.json'),
     stopSwitchPath: join(root, 'overnight', 'STOP_SWARM'),
-    translationRegistryPath: join(root, 'translation-registry.json')
+    translationRegistryPath: join(root, 'translation-registry.json'),
+    workspaceIndexPath: join(root, 'workspace-index.json')
   }
 }
 
