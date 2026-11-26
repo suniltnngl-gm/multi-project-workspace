@@ -1,0 +1,62 @@
+{
+  "taskId": "238",
+  "state": "queued",
+  "priority": "P2",
+  "blocker": false,
+  "unblocksCount": 1,
+  "costTier": "daily",
+  "maxReplans": 2,
+  "replanCount": 0,
+  "pinned": null,
+  "jobs": [
+    {
+      "id": "j1",
+      "type": "plan",
+      "status": "pending",
+      "attempts": 0,
+      "timeoutMs": 180000,
+      "result": {},
+      "verdict": null,
+      "reason": null,
+      "reviewedAt": null
+    },
+    {
+      "id": "j2",
+      "type": "build",
+      "status": "pending",
+      "attempts": 0,
+      "timeoutMs": 300000,
+      "result": {},
+      "verdict": null,
+      "reason": null,
+      "reviewedAt": null
+    },
+    {
+      "id": "j3",
+      "type": "review",
+      "status": "pending",
+      "attempts": 0,
+      "timeoutMs": 120000,
+      "result": {},
+      "verdict": null,
+      "reason": null,
+      "reviewedAt": null
+    },
+    {
+      "id": "j4",
+      "type": "publish",
+      "status": "pending",
+      "attempts": 0,
+      "timeoutMs": 180000,
+      "result": {},
+      "verdict": null,
+      "reason": null,
+      "reviewedAt": null
+    }
+  ],
+  "queue": {
+    "path": "apps/api/data/queue/238.json",
+    "updatedAt": "2026-11-26T06:41:01.943Z",
+    "revision": 1
+  }
+}
