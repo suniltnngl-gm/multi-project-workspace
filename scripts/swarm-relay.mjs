@@ -977,7 +977,10 @@ export async function runRelay(argv) {
     return res
   }
   let failure = null
-  for (const [resource, dir] of [['relay-ring', lockDir], ['quota-ledger', stateDir]]) {
+  // MC-206-LOCK-SCOPE: the shared orchestrator lease comes first (consistent
+  // ordering with overnight/run/queue-run/case-solve prevents ABBA deadlock),
+  // giving full cross-entrypoint mutual exclusion.
+  for (const [resource, dir] of [['orchestrator', statePaths().root], ['relay-ring', lockDir], ['quota-ledger', stateDir]]) {
     const res = acquireResource(resource, dir)
     if (!res.ok) { failure = res; break }
   }

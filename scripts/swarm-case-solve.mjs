@@ -12,6 +12,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { statePaths } from './swarm-state-paths.mjs'
+import { acquireOrchestratorLock, releaseOrchestratorLock } from './swarm-orchestrator-lock.mjs'
 import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
 import { simulateCaseOptions } from '../apps/api/src/toolchain/dispatch/case-sandbox.js'
 
@@ -114,6 +115,30 @@ if (isMain) {
   const caseDir = resolve(flag('--case-dir', defaultDir))
   const apply = argv.includes('--apply')
   const useSandbox = argv.includes('--sandbox')
+  // MC-206-LOCK-SCOPE: only --apply mutates the case registry, so only --apply takes
+  // the shared orchestrator lease; dry-runs stay lease-free. Live holder -> exit 3.
+  let solveLease = null
+  const solveLeaseRunId = `case-solve-${process.pid}-${Date.now()}`
+  if (apply) {
+    const orchRes = acquireOrchestratorLock({
+      stateDir: statePaths().root,
+      runId: solveLeaseRunId,
+      resource: 'orchestrator',
+      holder: 'swarm-case-solve',
+      auditDir: statePaths().root
+    })
+    if (!orchRes.ok) {
+      process.stderr.write(`swarm case-solve: ${orchRes.reason}: orchestrator held by ${orchRes.holder} runId=${orchRes.runId}\n`)
+      process.exit(3)
+    }
+    solveLease = orchRes
+    process.on('exit', () => {
+      try {
+        releaseOrchestratorLock({ stateDir: statePaths().root, runId: solveLeaseRunId, generation: solveLease.lock.generation, resource: 'orchestrator' })
+      } catch { /* already released */ }
+    })
+    for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(130))
+  }
   const res = solveOpenCases(caseDir, { apply })
   if (useSandbox) res.sandboxEnabled = true
   if (argv.includes('--json')) console.log(JSON.stringify(res, null, 2))

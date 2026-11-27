@@ -117,6 +117,45 @@ try {
   createLeaseStore({ stateDir: opts.queueDir }).reap()
 } catch {}
 
+// MC-206-LOCK-SCOPE: --execute holds the shared orchestrator lease for the whole
+// run (heartbeated), so overnight cannot mutate alongside relay/run/queue-run/
+// case-solve. Dry-runs stay lease-free. The queue-run child inherits the lease
+// via SWARM_ORCHESTRATOR_LEASE_PARENT instead of re-acquiring (no self-deadlock).
+let overnightLease = null
+const overnightLeaseRunId = `overnight-${startedAtMs}`
+if (opts.execute) {
+  const orchRes = acquireOrchestratorLock({
+    stateDir: statePaths().root,
+    runId: overnightLeaseRunId,
+    resource: 'orchestrator',
+    holder: 'swarm-overnight',
+    auditDir: statePaths().root
+  })
+  if (!orchRes.ok) {
+    process.stderr.write(`swarm-overnight: ${orchRes.reason}: orchestrator held by ${orchRes.holder} runId=${orchRes.runId}\n`)
+    process.exit(3)
+  }
+  overnightLease = orchRes
+  const renewOrchestratorHeartbeat = setInterval(() => {
+    renewOrchestratorLock({
+      stateDir: statePaths().root, runId: overnightLeaseRunId, generation: overnightLease.lock.generation,
+      pid: overnightLease.lock.pid, resource: 'orchestrator'
+    })
+  }, Math.max(60_000, Math.floor(DEFAULT_ORCHESTRATOR_LOCK_TTL_MS / 3)))
+  renewOrchestratorHeartbeat.unref?.()
+  const releaseOrchestratorLease = () => {
+    if (!overnightLease) return
+    try {
+      releaseOrchestratorLock({
+        stateDir: statePaths().root, runId: overnightLeaseRunId, generation: overnightLease.lock.generation, resource: 'orchestrator'
+      })
+    } catch { /* already released */ }
+    overnightLease = null
+  }
+  process.on('exit', releaseOrchestratorLease)
+  for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { releaseOrchestratorLease(); process.exit(130) })
+}
+
 function reconcileStaleTasks() {
   try {
     const liveCandidates = discoverCandidates({ repoDir })
@@ -225,7 +264,7 @@ while (true) {
   const res = spawnSync(
     process.execPath,
     [queueRunner, '--queue-dir', opts.queueDir, '--registry', opts.registry, '--quota-pool', pool, '--calls-in-window', String(capCheck.callsInWindow), '--json'],
-    { cwd: resolve(new URL('..', import.meta.url).pathname), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 300_000 }
+    { cwd: resolve(new URL('..', import.meta.url).pathname), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 300_000, env: { ...process.env, SWARM_ORCHESTRATOR_LEASE_PARENT: overnightLeaseRunId } }
   )
   const ok = res.status === 0
   // Heartbeat at the write boundary, then record and release.

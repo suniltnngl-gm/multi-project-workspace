@@ -18,6 +18,8 @@ import {
   exitCodeForPlans
 } from '../apps/api/src/toolchain/dispatch/session-pool-dispatcher.js'
 import { createLeaseStore, resolveDispatchStateDir } from '../apps/api/src/toolchain/dispatch/lease-store.js'
+import { acquireOrchestratorLock, releaseOrchestratorLock } from './swarm-orchestrator-lock.mjs'
+import { statePaths } from './swarm-state-paths.mjs'
 import { normalizeExecutionRequest } from '../apps/api/src/toolchain/dispatch/execution-request-adapter.js'
 import { runDispatch } from '../apps/api/src/toolchain/dispatch/dispatch-executor.js'
 import { resolveGateConfig, evaluateResourceGate } from '../apps/api/src/toolchain/dispatch/resource-gate.js'
@@ -194,6 +196,35 @@ async function main() {
   const stateDir = opts['state-dir'] || resolveDispatchStateDir({ env: process.env })
   const now = opts.now ? (() => parseIsoStrict(opts.now)) : (() => Date.now())
   if (opts.now && now() === null) fail(`--now must be ISO-8601 with Z or offset, got: ${opts.now}`)
+
+  // MC-206-LOCK-SCOPE: --execute holds the shared orchestrator lease for the whole
+  // run so it cannot mutate alongside relay/overnight/queue-run/case-solve.
+  // Dry-runs stay lease-free. A live holder fails closed with exit 3.
+  const runLeaseRunId = `swarm-run-${process.pid}-${Date.now()}`
+  let runLease = null
+  if (opts.execute) {
+    const orchRes = acquireOrchestratorLock({
+      stateDir: statePaths().root,
+      runId: runLeaseRunId,
+      resource: 'orchestrator',
+      holder: 'swarm-run',
+      auditDir: statePaths().root
+    })
+    if (!orchRes.ok) {
+      process.stderr.write(`swarm-run: ${orchRes.reason}: orchestrator held by ${orchRes.holder} runId=${orchRes.runId}\n`)
+      process.exit(3)
+    }
+    runLease = orchRes
+    const releaseRunLease = () => {
+      if (!runLease) return
+      try {
+        releaseOrchestratorLock({ stateDir: statePaths().root, runId: runLeaseRunId, generation: runLease.lock.generation, resource: 'orchestrator' })
+      } catch { /* already released */ }
+      runLease = null
+    }
+    process.on('exit', releaseRunLease)
+    for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { releaseRunLease(); process.exit(130) })
+  }
 
   const store = createLeaseStore({ stateDir, now })
   const snapshot = store.snapshot()

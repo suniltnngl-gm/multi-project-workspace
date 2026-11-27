@@ -2,10 +2,11 @@
 /**
  * Orchestrator mutual exclusion (#206).
  *
- * Scope (#206): wired into `swarm-relay --execute` only. The other mutating
- * entrypoints (`run`, `overnight`, `queue-run`, `case-solve`) do NOT take this lock
- * yet, so cross-entrypoint exclusion is partial — tracked as case MC-206-LOCK-SCOPE.
- * Within relay, two `--execute` runs cannot mutate ring state / ledgers / artifacts
+ * Scope (MC-206-LOCK-SCOPE, closes the #206 gap): every mutating entrypoint takes
+ * the shared `orchestrator` lease — `swarm-relay --execute`, `swarm-run --execute`,
+ * `swarm overnight --execute`, `swarm queue-run`, and `swarm case-solve --apply`.
+ * The overnight supervisor holds it for the whole run; its queue-run child inherits
+ * it via the SWARM_ORCHESTRATOR_LEASE_PARENT env instead of re-acquiring. Within relay, two `--execute` runs cannot mutate ring state / ledgers / artifacts
  * at once — the split-brain this prevents.
  *
  * Contract:

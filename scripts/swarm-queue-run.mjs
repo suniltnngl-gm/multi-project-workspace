@@ -178,6 +178,44 @@ async function main() {
     }
   }
 
+  // MC-206-LOCK-SCOPE: the shared orchestrator lease fences every mutating
+  // entrypoint. A queue-run spawned by overnight inherits the parent's lease via
+  // SWARM_ORCHESTRATOR_LEASE_PARENT instead of re-acquiring (no self-deadlock).
+  const parentLeaseRunId = process.env.SWARM_ORCHESTRATOR_LEASE_PARENT || null
+  const orchRunId = `queue-run-${process.pid}-${Date.now()}`
+  let orchLease = null
+  if (!parentLeaseRunId) {
+    const orchRes = acquireOrchestratorLock({
+      stateDir: statePaths().root,
+      runId: orchRunId,
+      resource: 'orchestrator',
+      holder: 'swarm-queue-run',
+      auditDir: statePaths().root
+    })
+    if (!orchRes.ok) {
+      if (opts.json) {
+        process.stdout.write(`${JSON.stringify({ tick: 'deferred_orchestrator_lease', resource: 'orchestrator', reason: orchRes.reason, holder: orchRes.holder, runId: orchRes.runId }, null, 2)}\n`)
+      } else {
+        process.stderr.write(`swarm-queue-run: ${orchRes.reason}: orchestrator held by ${orchRes.holder}\n`)
+      }
+      process.exit(3)
+    }
+    orchLease = orchRes
+  }
+  const releaseOrchestrator = () => {
+    if (!orchLease) return
+    try {
+      releaseOrchestratorLock({
+        stateDir: statePaths().root, runId: orchRunId, generation: orchLease.lock.generation, resource: 'orchestrator'
+      })
+    } catch { /* already released */ }
+    orchLease = null
+  }
+  if (orchLease) {
+    process.on('exit', releaseOrchestrator)
+    for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { releaseOrchestrator(); process.exit(130) })
+  }
+
   // #216: this runner mutates the job queue and drives pool spend, so it must hold the
   // quota-ledger lease for the duration of the bounded job. A live holder fails closed.
   const ledgerRunId = `queue-run-${process.pid}-${Date.now()}`
@@ -189,8 +227,9 @@ async function main() {
     auditDir: statePaths().root
   })
   if (!ledgerRes.ok) {
+    releaseOrchestrator()
     if (opts.json) {
-      process.stdout.write(`${JSON.stringify({ tick: 'deferred_orchestrator_lease', reason: ledgerRes.reason, holder: ledgerRes.holder, runId: ledgerRes.runId }, null, 2)}\n`)
+      process.stdout.write(`${JSON.stringify({ tick: 'deferred_orchestrator_lease', resource: 'quota-ledger', reason: ledgerRes.reason, holder: ledgerRes.holder, runId: ledgerRes.runId }, null, 2)}\n`)
     } else {
       process.stderr.write(`swarm-queue-run: ${ledgerRes.reason}: quota-ledger held by ${ledgerRes.holder}\n`)
     }
