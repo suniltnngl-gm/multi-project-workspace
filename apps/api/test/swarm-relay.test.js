@@ -6,7 +6,7 @@ import { homedir, tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Database from 'better-sqlite3'
-import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus, w5CleanupReportPath, headDriftReason, installForbidCommitHook, removeForbidCommitHook, evaluateReviewGate, reviewGateReason, computeHorizonDeadlineMs, effectiveWindowBudgetMs, parseSiblingVerdict, buildReviewBrief, pickFocusedTest, buildBuildBrief, applyPublishGate, roundBaseSha, resolveNextTaskId, advanceTaskAfterCheckpoint } from '../../../scripts/swarm-relay.mjs'
+import { buildRelayPlan, buildSiblingCommand, buildAssignment, buildSiblingPrompt, parseModelMap, resolveWindowStatus, isSuccessfulWindowStatus, w5CleanupReportPath, headDriftReason, installForbidCommitHook, removeForbidCommitHook, evaluateReviewGate, reviewGateReason, computeHorizonDeadlineMs, effectiveWindowBudgetMs, parseSiblingVerdict, buildReviewBrief, pickFocusedTest, buildBuildBrief, applyPublishGate, roundBaseSha, resolveNextTaskId, advanceTaskAfterCheckpoint, classifyFailure, classifyFailureTail, runChild } from '../../../scripts/swarm-relay.mjs'
 import { computeEvidenceFingerprint, reconcileStaleDiscoveredTasks, parseSeedPayload, discoverSplitBrainChecks, scanWorkspaceIndex, discoverExternalRoots } from '../../../scripts/swarm-discover.mjs'
 import { scanExternalProjects, scanSplitBrainHazards } from '../../../apps/api/src/toolchain/dispatch/split-brain-scanner.js'
 import { buildExecutiveBrief } from '../../../scripts/swarm-brief.mjs'
@@ -461,6 +461,34 @@ test('#220: an empty round diff reports no_modified_files, never the passing det
   assert.equal(reviewGateReason({ modifiedCount: 1 }), 'deterministic_gate_failed')
 })
 
+test('#278: classifyFailure distinguishes RPM throttling from real sibling failures', () => {
+  assert.equal(classifyFailure({ exitCode: 1, stderr: 'Error: 429 RESOURCE_EXHAUSTED, quota exceeded' }), 'rpm_throttled')
+  assert.equal(classifyFailure({ exitCode: 1, stderr: 'Too Many Requests: rate limit reached' }), 'rpm_throttled')
+  assert.equal(classifyFailure({ exitCode: 1, stderr: '401 UNAUTHENTICATED: invalid api key' }), 'auth_failure')
+  assert.equal(classifyFailure({ exitCode: 1, stderr: '503 UNAVAILABLE: connection reset by peer' }), 'transient')
+  assert.equal(classifyFailure({ exitCode: 1, stderr: 'panic: unexpected internal state' }), 'real_failure')
+  assert.equal(classifyFailure({ exitCode: 1, stderr: '' }), 'real_failure')
+  assert.equal(classifyFailure({ exitCode: 0, stderr: '' }), null)
+})
+
+test('#278: runChild captures sibling stderr while still streaming it through', async () => {
+  const res = await runChild({
+    command: process.execPath,
+    args: ['-e', 'process.stderr.write("boom-throttle-429\\n"); process.exit(1)'],
+    cwd: tmpdir(), env: { ...process.env }, stallKillSec: 10, windowStartMs: Date.now(), echoStdout: false
+  })
+  assert.equal(res.status, 1)
+  assert.match(res.stderr, /boom-throttle-429/)
+  assert.equal(classifyFailure({ exitCode: res.status, stderr: res.stderr }), 'rpm_throttled')
+})
+
+test('#278: classifyFailureTail truncates stderr to a bounded telemetry snippet', () => {
+  const long = 'x'.repeat(5000) + 'RESOURCE_EXHAUSTED'
+  const tail = classifyFailureTail({ exitCode: 1, stderr: long })
+  assert.ok(tail.length <= 400)
+  assert.match(tail, /RESOURCE_EXHAUSTED/)
+})
+
 test('#221: W5 cleanup report path is a string, never the plan object', () => {
   assert.equal(w5CleanupReportPath({ assignment: { reportPath: '/tmp/w5.json' }, plan: { mode: 'pipeline' } }), '/tmp/w5.json')
   assert.throws(() => w5CleanupReportPath({ assignment: { reportPath: { mode: 'pipeline' } } }), /w5_cleanup_report_path_required/)
@@ -678,33 +706,62 @@ test('W4 verdict recovery: stdout parser ignores fake tool JSON, gate falls back
 })
 
 test('W3 build brief pins the requested board task and is injected into the build prompt', () => {
-  const repoRoot = resolve(fileURLToPath(new URL('../../../', import.meta.url)))
-  const all = buildBuildBrief({ repoDir: repoRoot })
-  assert.match(all, /## Board target\(s\)/)
-  assert.ok(all.length <= 5000)
-
-  // Pin whatever the board actually lists instead of a hardcoded task id: the old
-  // assertion on #191 broke the moment that (delivered) task was closed.
-  const listed = [...all.matchAll(/^#(\d+) /gm)].map((m) => m[1])
-  assert.ok(listed.length >= 2, `need >=2 in-progress board targets to prove pinning, got ${listed.length}`)
-  const pinnedId = listed[0]
-  const otherId = listed.find((id) => id !== pinnedId)
-
-  const pinned = buildBuildBrief({ repoDir: repoRoot, taskId: pinnedId })
-  assert.ok(pinned.includes(`#${pinnedId} `), `pinned task #${pinnedId} missing from brief`)
-  assert.ok(!pinned.includes(`#${otherId} `), `unpinned task #${otherId} leaked into a pinned brief`)
-
-  const prompt = buildSiblingPrompt({
-    mode: 'pipeline',
-    job: 'build',
-    window: 3,
-    windows: 5,
-    sibling: 'hermes',
-    reportPath: '/tmp/relay-build-findings.json',
-    buildBrief: pinned
+  // #278: self-seed two in_progress tasks in an isolated board instead of
+  // depending on live board state (a reconcile to zero in_progress broke this).
+  const workspaceCli = resolve(fileURLToPath(new URL('../../../workspace', import.meta.url)))
+  const dbPath = join(mkdtempSync(join(tmpdir(), 'relay-pin-')), 'board.sqlite')
+  const seedEnv = { ...process.env, DATABASE_PATH: dbPath }
+  const seededIds = ['pin-test-a', 'pin-test-b'].map((title) => {
+    const out = spawnSync(workspaceCli, ['task', 'create', title], { encoding: 'utf8', env: seedEnv, timeout: 15000 })
+    return String(JSON.parse(String(out.stdout).trim()).id)
   })
-  assert.match(prompt, new RegExp(`#${pinnedId} `))
-  assert.match(prompt, /smallest verified fix set/)
+
+  try {
+    const repoRoot = resolve(fileURLToPath(new URL('../../../', import.meta.url)))
+    const prevDbPath = process.env.DATABASE_PATH
+    process.env.DATABASE_PATH = dbPath
+    let all
+    try {
+      all = buildBuildBrief({ repoDir: repoRoot })
+    } finally {
+      if (prevDbPath === undefined) delete process.env.DATABASE_PATH
+      else process.env.DATABASE_PATH = prevDbPath
+    }
+    assert.match(all, /## Board target\(s\)/)
+    assert.ok(all.length <= 5000)
+
+    const listed = [...all.matchAll(/^#(\d+) /gm)].map((m) => m[1])
+    assert.ok(listed.length >= 2, `need >=2 in-progress board targets to prove pinning, got ${listed.length}`)
+    const pinnedId = listed[0]
+    const otherId = listed.find((id) => id !== pinnedId)
+
+    let pinned
+    try {
+      process.env.DATABASE_PATH = dbPath
+      pinned = buildBuildBrief({ repoDir: repoRoot, taskId: pinnedId })
+    } finally {
+      if (prevDbPath === undefined) delete process.env.DATABASE_PATH
+      else process.env.DATABASE_PATH = prevDbPath
+    }
+    assert.ok(pinned.includes(`#${pinnedId} `), `pinned task #${pinnedId} missing from brief`)
+    assert.ok(!pinned.includes(`#${otherId} `), `unpinned task #${otherId} leaked into a pinned brief`)
+
+    const prompt = buildSiblingPrompt({
+      mode: 'pipeline',
+      job: 'build',
+      window: 3,
+      windows: 5,
+      sibling: 'hermes',
+      reportPath: '/tmp/relay-build-findings.json',
+      buildBrief: pinned
+    })
+    assert.match(prompt, new RegExp(`#${pinnedId} `))
+    assert.match(prompt, /smallest verified fix set/)
+  } finally {
+    for (const id of seededIds) {
+      spawnSync(workspaceCli, ['task', 'done', id, '--notes', 'pin-test cleanup'], { env: seedEnv, timeout: 15000 })
+    }
+  }
 })
 
 // --- gemini-api 1-hop model rotation (#203) ------------------------------------------

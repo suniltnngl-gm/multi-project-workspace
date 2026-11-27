@@ -666,7 +666,32 @@ function writeReport(path, payload) {
  * Run one child. No routine timer: `stallKillSec` defaults to 0 (disabled) so a normal
  * turn is never interrupted. When enabled, a runaway turn is killed at the stall limit.
  */
-function runChild({ command, args, cwd, env, stallKillSec, windowStartMs, horizonDeadlineMs = null, echoStdout = true }) {
+// #278: sibling failure telemetry — a bare exit code (CLI_OUTCOME_FAILED) masks
+// RPM throttling and transient backend errors. Classify from the child's stderr
+// so relay reports can distinguish quota pressure from real failures.
+const RPM_THROTTLE_PATTERN = /429|resource_exhausted|rate.?limit|too many requests|quota.*(exceed|exhaust)|exhausted.*quota/i
+const AUTH_FAILURE_PATTERN = /401|403|unauthenticated|unauthorized|invalid api key|api key (not valid|expired|invalid)/i
+const TRANSIENT_PATTERN = /500|502|503|504|unavailable|timeout|timed out|connection reset|econnreset|socket hang up|internal error/i
+
+export function classifyFailure({ exitCode, stderr = '', stdout = '' }) {
+  if (exitCode === 0 || exitCode === null) return null
+  const text = `${stderr}\n${stdout}`
+  if (RPM_THROTTLE_PATTERN.test(text)) return 'rpm_throttled'
+  if (AUTH_FAILURE_PATTERN.test(text)) return 'auth_failure'
+  if (TRANSIENT_PATTERN.test(text)) return 'transient'
+  return 'real_failure'
+}
+
+const FAILURE_TAIL_MAX_CHARS = 400
+
+export function classifyFailureTail({ exitCode, stderr = '', stdout = '' }) {
+  if (exitCode === 0 || exitCode === null) return ''
+  const text = `${stderr}\n${stdout}`.trim()
+  if (!text) return ''
+  return text.length <= FAILURE_TAIL_MAX_CHARS ? text : text.slice(-FAILURE_TAIL_MAX_CHARS)
+}
+
+export function runChild({ command, args, cwd, env, stallKillSec, windowStartMs, horizonDeadlineMs = null, echoStdout = true }) {
   return new Promise((resolvePromise) => {
     // Cooperative caps: an explicit stall bound and/or the run horizon. Both are opt-in.
     const limits = []
@@ -681,10 +706,13 @@ function runChild({ command, args, cwd, env, stallKillSec, windowStartMs, horizo
     }
     const limitMs = limits.length ? Math.min(...limits) : 0
 
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'inherit'], cwd, env, detached: true })
+    // #278: stderr is piped (was 'inherit') so failure output reaches the telemetry;
+    // it still streams through to the relay log, unchanged for humans.
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd, env, detached: true })
     let settled = false
     let timer = null
     let stdoutText = ''
+    let stderrText = ''
     // Capture the sibling's stdout (single-shot CLIs print tool-call JSON instead of
     // writing files), while still streaming it through to the relay log.
     child.stdout?.on('data', (chunk) => {
@@ -692,11 +720,16 @@ function runChild({ command, args, cwd, env, stallKillSec, windowStartMs, horizo
       stdoutText += text
       if (echoStdout) { try { process.stdout.write(text) } catch { /* log stream closed */ } }
     })
+    child.stderr?.on('data', (chunk) => {
+      const text = String(chunk)
+      stderrText += text
+      if (echoStdout) { try { process.stderr.write(text) } catch { /* log stream closed */ } }
+    })
     const finish = (status, signal, error, stallKilled) => {
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
-      resolvePromise({ status, signal, error, stallKilled, elapsedMs: Date.now() - windowStartMs, stdout: stdoutText })
+      resolvePromise({ status, signal, error, stallKilled, elapsedMs: Date.now() - windowStartMs, stdout: stdoutText, stderr: stderrText })
     }
     if (limitMs > 0 && child.pid) {
       timer = setTimeout(() => {
@@ -1418,11 +1451,21 @@ export async function runRelay(argv) {
     const windowTelemetry = {
       primaryModel: rotation ? rotation.primaryModel : (choice.model || null),
       attemptedModels: [],
-      answeredModel: null
+      answeredModel: null,
+      // #278: prompt size per attempt makes SIBLING_PROMPT_LIMITS measurable from reports.
+      promptChars: prompt.length
     }
-    const recordAttempt = ({ model, status, exitCode = null, signal = null, error = null }) => {
+    const recordAttempt = ({ model, status, exitCode = null, signal = null, error = null, res = null }) => {
       const attempt = { model: model ?? null, status, exitCode: exitCode ?? null, signal: signal ?? null }
       if (error) attempt.error = String(error)
+      if (res && exitCode !== 0) {
+        const failureClass = classifyFailure({ exitCode, stderr: res.stderr || '', stdout: res.stdout || '' })
+        if (failureClass) {
+          attempt.failureClass = failureClass
+          const tail = classifyFailureTail({ exitCode, stderr: res.stderr || '', stdout: res.stdout || '' })
+          if (tail) attempt.stderrTail = tail
+        }
+      }
       windowTelemetry.attemptedModels.push(attempt)
       if (choice.pool) {
         recordPoolCall(stateDir, {
@@ -1457,7 +1500,8 @@ export async function runRelay(argv) {
         status: `exit_${exitCode ?? 'null'}`,
         exitCode,
         signal: res.signal || null,
-        error: res.error ? String(res.error.code || res.error.message) : null
+        error: res.error ? String(res.error.code || res.error.message) : null,
+        res
       })
 
       // Exactly ONE alternate gemini-api model per window, then straight to hermes.
@@ -1488,7 +1532,8 @@ export async function runRelay(argv) {
           status: `exit_${altCode ?? 'null'}`,
           exitCode: altCode,
           signal: altRes.signal || null,
-          error: altRes.error ? String(altRes.error.code || altRes.error.message) : null
+          error: altRes.error ? String(altRes.error.code || altRes.error.message) : null,
+          res: altRes
         })
       }
 
@@ -1504,7 +1549,14 @@ export async function runRelay(argv) {
       })
       const fbCode = typeof fbRes.status === 'number' ? fbRes.status : null
       // Account the call against the pool that actually ran, and attribute the slot to it.
-      recordPoolCall(stateDir, { quotaPool: fbPool, taskId: `relay-w${assignment.window}`, status: !fbRes.error && fbCode === 0 ? 'ok' : `exit_${fbCode ?? 'null'}`, lease: quotaLedgerLease() })
+      const fbFailureClass = classifyFailure({ exitCode: fbCode, stderr: fbRes.stderr || '', stdout: fbRes.stdout || '' })
+      recordPoolCall(stateDir, {
+        quotaPool: fbPool,
+        taskId: `relay-w${assignment.window}`,
+        status: !fbRes.error && fbCode === 0 ? 'ok' : `exit_${fbCode ?? 'null'}`,
+        lease: quotaLedgerLease(),
+        ...(fbFailureClass ? { failureClass: fbFailureClass, stderrTail: classifyFailureTail({ exitCode: fbCode, stderr: fbRes.stderr || '', stdout: fbRes.stdout || '' }) } : {})
+      })
       ringState.slots[assignment.siblingSlot] = {
         ...(ringState.slots[assignment.siblingSlot] || {}),
         cli: fallbackSibling,
