@@ -158,3 +158,44 @@ test('ai swarm dispatch requires Bash and routes through mandatory entrypoint',(
   assert.equal(args[1],'status')
  } finally {rmSync(base,{recursive:true,force:true})}
 })
+
+function taskCliDatabase() {
+  const base = temporaryDirectory('workspace-task-cli-')
+  const databasePath = join(base, 'workspace.sqlite')
+  const original = new Database(databasePath)
+  runMigrations(original, { rootDir: base })
+  original.close()
+  return { env: { ...process.env, DATABASE_PATH: databasePath }, base, databasePath }
+}
+
+test('task create --help prints usage and creates no task', () => {
+  const { env, base } = taskCliDatabase()
+  try {
+    const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'workspace-cli.mjs'), 'task', 'create', '--help'], { cwd: ROOT, encoding: 'utf8', env })
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /task create <title>/)
+    const isolated = new Database(env.DATABASE_PATH, { readonly: true })
+    try {
+      assert.equal(isolated.prepare("SELECT id FROM tasks WHERE title = '--help'").get(), undefined)
+    } finally { isolated.close() }
+  } finally { rmSync(base, { recursive: true, force: true }) }
+})
+
+test('task create rejects unknown flags instead of swallowing them into the title', () => {
+  const { env, base } = taskCliDatabase()
+  try {
+    const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'workspace-cli.mjs'), 'task', 'create', 'Real title', '--unknown-flag'], { cwd: ROOT, encoding: 'utf8', env })
+    assert.equal(result.status, 2)
+    assert.match(result.stderr, /Unknown task create option: --unknown-flag/)
+    const isolated = new Database(env.DATABASE_PATH, { readonly: true })
+    try {
+      assert.equal(isolated.prepare("SELECT id FROM tasks WHERE title = 'Real title'").get(), undefined)
+    } finally { isolated.close() }
+  } finally { rmSync(base, { recursive: true, force: true }) }
+})
+
+test('task --help prints usage at the subcommand level', () => {
+  const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'workspace-cli.mjs'), 'task', '--help'], { cwd: ROOT, encoding: 'utf8' })
+  assert.equal(result.status, 0)
+  assert.match(result.stdout, /task create <title>/)
+})

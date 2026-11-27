@@ -549,6 +549,12 @@ async function taskWorktree(args) {
   )
 }
 
+const TASK_USAGE =
+  'Usage: ./workspace task create <title> [--project P] [--type T] [--priority P] [--status S]\n' +
+  '       ./workspace task done <id> [--notes "..."]\n' +
+  '       ./workspace task list [--status S]\n' +
+  '       ./workspace task worktree <id>'
+
 async function taskCreate(args) {
   let project = 'multi-project-workspace'
   let taskType = 'feature'
@@ -556,8 +562,18 @@ async function taskCreate(args) {
   let status = 'in_progress'
   let description = ''
   const titleParts = []
+  const knownFlags = new Set(['--project', '--type', '--priority', '--status', '--description'])
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i]
+    if (arg === '--help' || arg === '-h') {
+      log(TASK_USAGE)
+      return 0
+    }
+    // Reject unknown flags instead of silently swallowing them into the title:
+    // `task create --help` must never create a task titled "--help".
+    if (arg.startsWith('--') && !knownFlags.has(arg)) {
+      fail(`Unknown task create option: ${arg}\n${TASK_USAGE}`, 2)
+    }
     if (arg === '--project' && args[i + 1]) { project = args[++i]; continue }
     if (arg === '--type' && args[i + 1]) { taskType = args[++i]; continue }
     if (arg === '--priority' && args[i + 1]) { priority = args[++i]; continue }
@@ -1192,16 +1208,16 @@ async function dispatch(argv) {
     }
     case 'task': {
       const subcommand = rest[0] ?? ''
+      if (subcommand === '--help' || subcommand === '-h' || subcommand === 'help') {
+        log(TASK_USAGE)
+        return 0
+      }
       if (subcommand === 'create') return taskCreate(rest.slice(1))
       if (subcommand === 'done') return taskDone(rest.slice(1))
       if (subcommand === 'list') return taskList(rest.slice(1))
       if (subcommand === 'worktree') return taskWorktree(rest.slice(1))
       fail(
-        `Unknown task subcommand: ${subcommand}\n` +
-        'Usage: ./workspace task create <title> [--project P] [--type T] [--priority P] [--status S]\n' +
-        '       ./workspace task done <id> [--notes "..."]\n' +
-        '       ./workspace task list [--status S]\n' +
-        '       ./workspace task worktree <id>',
+        `Unknown task subcommand: ${subcommand}\n` + TASK_USAGE,
         2
       )
       break
