@@ -76,12 +76,18 @@ function shouldRedactValue(value) {
   return hasCredentialEntropy(value)
 }
 
+function shouldRedactDsnPassword(value) {
+  if (!value || isPlaceholderValue(value) || isCodeOrSchemaValue(value)) return false
+  if (value.length < 4) return false
+  return /[0-9]/.test(value) || (/[A-Z]/.test(value) && /[a-z]/.test(value)) || /[+/=._~-]/.test(value)
+}
+
 function redactLine(line) {
   let out = line
   out = out.replace(PRIVATE_KEY_PATTERN, '[REDACTED]')
   out = out.replace(TOKEN_PREFIX_PATTERN, '[REDACTED]')
   out = out.replace(BEARER_PATTERN, (match, prefix, token) => shouldRedactValue(token) ? `${prefix}[REDACTED]` : match)
-  out = out.replace(DSN_PASSWORD_PATTERN, (match, prefix, password, suffix) => `${prefix}[REDACTED]${suffix}`)
+  out = out.replace(DSN_PASSWORD_PATTERN, (match, prefix, password, suffix) => shouldRedactDsnPassword(password) ? `${prefix}[REDACTED]${suffix}` : match)
   out = out.replace(SECRET_ASSIGNMENT_PATTERN, (match, prefix, value) => shouldRedactValue(value) ? `${prefix}[REDACTED]` : match)
   return out
 }

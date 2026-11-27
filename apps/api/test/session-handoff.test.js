@@ -234,6 +234,7 @@ test('redactSecrets ignores fixture, schema, prose and identifier false positive
     'changeme',
     'placeholder',
     '"pattern": "^secret://[A-Za-z0-9/_-]{1,200}$"',
+    `assert.ok(validate({ endpoint: 'https://user:' + 'pass' + '@user-service.example.com/mcp' }))`,
     "schema_version: 1, credential_ref: 'secret://provider/main', owner_ref: principal.owner_ref,",
     'const apiKey = validateApiKeyEnv(args.api_key_env);',
     '- Existing shared bearer authentication remains unchanged.',
