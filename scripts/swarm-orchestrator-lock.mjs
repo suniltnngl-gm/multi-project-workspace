@@ -18,10 +18,19 @@
  */
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, appendFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { appendLifecycleTransition } from '../apps/api/src/toolchain/dispatch/lifecycle-audit.js'
 
 export const ORCHESTRATOR_LOCK_SCHEMA = 'orchestrator-lock/v1'
 export const DEFAULT_ORCHESTRATOR_LOCK_TTL_MS = 30 * 60 * 1000
 export const DEFAULT_ORCHESTRATOR_RESOURCE = 'orchestrator'
+
+/** #259: best-effort telemetry; a logging failure must never change a lock verdict. */
+function auditRefusal(auditDir, event) {
+  if (!auditDir) return
+  try {
+    appendLifecycleTransition(auditDir, event)
+  } catch { /* telemetry is best-effort */ }
+}
 
 /**
  * Resolve a resource-scoped lease path: `<stateDir>/<resource>.lock.json`.
@@ -89,7 +98,8 @@ export function acquireOrchestratorLock({
   killFn = process.kill,
   readFileSync: readFn = readFileSync,
   writeFileSync: writeFn = writeFileSync,
-  unlinkSync: unlinkFn = unlinkSync
+  unlinkSync: unlinkFn = unlinkSync,
+  auditDir = null
 } = {}) {
   const path = orchestratorLockPath(stateDir, { resource })
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
@@ -107,6 +117,15 @@ export function acquireOrchestratorLock({
 
   const refuse = (existing) => {
     const startedMs = Date.parse(existing.startedAt)
+    auditRefusal(auditDir, {
+      event: 'orchestrator_lock_held',
+      reason: 'orchestrator_lock_held',
+      resource,
+      runId,
+      holder: existing.holder ?? null,
+      pid: existing.pid ?? null,
+      lockPath: path
+    })
     return {
       ok: false,
       reason: 'orchestrator_lock_held',

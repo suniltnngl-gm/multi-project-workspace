@@ -932,7 +932,13 @@ export async function runRelay(argv) {
     }
   }
   const acquireResource = (resource, dir) => {
-    const res = acquireOrchestratorLock({ stateDir: dir, runId: plan.runId, resource, holder: 'swarm-relay' })
+    const res = acquireOrchestratorLock({
+      stateDir: dir,
+      runId: plan.runId,
+      resource,
+      holder: 'swarm-relay',
+      auditDir: statePaths().root
+    })
     if (!res.ok) return res
     held.push({ resource, dir, lock: res.lock })
     return res
@@ -1017,7 +1023,8 @@ export async function runRelay(argv) {
       headSha,
       backupRoot: statePaths().repoCheckpointsDir,
       allowRestore: false,
-      quarantine: quarantineDirtyWorktree
+      quarantine: quarantineDirtyWorktree,
+      auditDir: statePaths().root
     })
     if (!guard.ok) {
       process.stderr.write(`swarm-relay: pre_build_guard:${guard.reason} workItem=${opts.workItemId}\n`)

@@ -30,6 +30,14 @@ import { rankTasks, scoreTask } from '../apps/api/src/toolchain/dispatch/task-pr
 import { createWorkItem } from '../apps/api/src/toolchain/dispatch/case-task-lifecycle.js'
 import { readCases, writeCase } from '../apps/api/src/toolchain/dispatch/case-registry.js'
 import { isReconcilable } from '../apps/api/src/toolchain/dispatch/cas-state.js'
+import { appendLifecycleTransition } from '../apps/api/src/toolchain/dispatch/lifecycle-audit.js'
+
+function auditDuplicate(auditDir, event) {
+  if (!auditDir) return
+  try {
+    appendLifecycleTransition(auditDir, event)
+  } catch { /* telemetry is best-effort; discovery results are unchanged */ }
+}
 
 export function computeEvidenceFingerprint({ source = 'unknown', summary = '', headSha = '' } = {}) {
   return createHash('sha256').update(`${source}|${headSha}|${String(summary).trim()}`).digest('hex').slice(0, 16)
@@ -300,7 +308,7 @@ export function reconcileStaleDiscoveredTasks(queueDir, candidates, { apply = fa
   return { expiredCount: expired.length, expired }
 }
 
-export function syncDiscoveredToQueue(queueDir, candidates, { apply = false, caseDir = null } = {}) {
+export function syncDiscoveredToQueue(queueDir, candidates, { apply = false, caseDir = null, auditDir = null } = {}) {
   const reconciled = reconcileStaleDiscoveredTasks(queueDir, candidates, { apply })
   const existing = readQueue(queueDir)
   const existingIds = new Set(existing.map((t) => t.taskId))
@@ -319,6 +327,12 @@ export function syncDiscoveredToQueue(queueDir, candidates, { apply = false, cas
     const fp = c.fingerprint || c.evidenceFingerprint
     if (fp && knownFingerprints.has(fp)) {
       skipped.push(`${c.taskId}:duplicate_fingerprint`)
+      auditDuplicate(auditDir, {
+        event: 'duplicate_fingerprint',
+        reason: 'duplicate_fingerprint',
+        fingerprint: fp,
+        taskId: c.taskId ?? null
+      })
       continue
     }
     if (c.kind === 'case') {
@@ -442,7 +456,13 @@ if (isMain) {
       apply: opts.apply
     })
     : null
-  const sync = opts.queueDir ? syncDiscoveredToQueue(opts.queueDir, candidates, { apply: opts.apply, caseDir: opts.caseDir }) : null
+  const sync = opts.queueDir
+    ? syncDiscoveredToQueue(opts.queueDir, candidates, {
+      apply: opts.apply,
+      caseDir: opts.caseDir,
+      auditDir: statePaths().root
+    })
+    : null
   const payload = {
     ok: true,
     mode: opts.mode,

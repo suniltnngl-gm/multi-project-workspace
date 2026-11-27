@@ -11,6 +11,7 @@
  */
 import { readFileSync, existsSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { statePaths } from './swarm-state-paths.mjs'
 import { spawn } from 'node:child_process'
 import {
   readQueue,
@@ -181,7 +182,11 @@ async function main() {
   // quota-ledger lease for the duration of the bounded job. A live holder fails closed.
   const ledgerRunId = `queue-run-${process.pid}-${Date.now()}`
   const ledgerRes = acquireOrchestratorLock({
-    stateDir: leaseStateDir, runId: ledgerRunId, resource: 'quota-ledger', holder: 'swarm-queue-run'
+    stateDir: leaseStateDir,
+    runId: ledgerRunId,
+    resource: 'quota-ledger',
+    holder: 'swarm-queue-run',
+    auditDir: statePaths().root
   })
   if (!ledgerRes.ok) {
     if (opts.json) {

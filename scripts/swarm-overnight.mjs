@@ -202,7 +202,8 @@ while (true) {
     stateDir: opts.stateDir,
     runId: ledgerRunId,
     resource: 'quota-ledger',
-    holder: 'swarm-overnight'
+    holder: 'swarm-overnight',
+    auditDir: statePaths().root
   })
   if (!ledgerLease.ok) {
     ticks.push({

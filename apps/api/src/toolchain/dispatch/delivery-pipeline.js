@@ -16,8 +16,10 @@ import {
   demoteTaskToCaseRecord
 } from './registry-lattice.js'
 import { verifyPlanBinding } from './plan-binding.js'
-import { readFileSync as defaultReadFileSync, appendFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync as defaultReadFileSync } from 'node:fs'
+import { appendLifecycleTransition } from './lifecycle-audit.js'
+
+export { appendLifecycleTransition }
 
 export const STAGE_VERDICTS = Object.freeze({
   PLAN_APPROVE: 'APPROVE_BUILD',
@@ -90,17 +92,6 @@ export function adjacentTierDemotion({ workItem, options = null, ctx = {} }) {
   return { ok: true, trail, job: asJob, task: asTask, case: asCase }
 }
 
-/** Audit line for lifecycle transitions; best-effort, never blocks the transition. */
-export function appendLifecycleTransition(stateDir, event) {
-  try {
-    const path = join(String(stateDir), 'lifecycle-transitions.jsonl')
-    appendFileSync(path, `${JSON.stringify({ ...event, at: new Date().toISOString() })}\n`, { encoding: 'utf8', mode: 0o600 })
-    return true
-  } catch {
-    return false
-  }
-}
-
 /**
  * W2 verdict handler (#213). Within budget: bump replanCount and planRevision so any plan
  * artifact carrying the old revision is rejected by verifyPlanBinding. Over budget: walk
@@ -160,6 +151,7 @@ export function preBuildGuard({
   backupRoot = null,
   allowRestore = false,
   quarantine = null,
+  auditDir = null,
   readFile = defaultReadFileSync
 } = {}) {
   if (planPath && workItem) {
@@ -169,7 +161,7 @@ export function preBuildGuard({
     } catch (err) {
       return { ok: false, reason: 'plan_unreadable', detail: String(err?.message || err) }
     }
-    const binding = verifyPlanBinding({ plan, workItem, headSha })
+    const binding = verifyPlanBinding({ plan, workItem, headSha, auditDir })
     if (!binding.ok) return { ok: false, reason: binding.reason, detail: binding }
   }
 

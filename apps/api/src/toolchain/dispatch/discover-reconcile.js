@@ -12,9 +12,17 @@
  *      exists on a resting record attaches its evidence to that id instead of creating a
  *      second, contradictory task/case.
  *
- * Pure module.
+ * Verdict logic stays pure; optional `auditDir` adds best-effort telemetry only.
  */
 import { isReconcilable } from './cas-state.js'
+import { appendLifecycleTransition } from './lifecycle-audit.js'
+
+function auditDuplicate(auditDir, event) {
+  if (!auditDir) return
+  try {
+    appendLifecycleTransition(auditDir, event)
+  } catch { /* telemetry is best-effort; reconciliation is unchanged */ }
+}
 
 /** Fold later records with an identical fingerprint into the first one as duplicates. */
 export function dedupeByFingerprint(items = []) {
@@ -49,7 +57,8 @@ export function dedupeByFingerprint(items = []) {
 export function reconcileDiscovered({
   candidates = [],
   existing = [],
-  stateOf = (record) => record.state
+  stateOf = (record) => record.state,
+  auditDir = null
 } = {}) {
   const byFingerprint = new Map()
   const active = []
@@ -70,7 +79,15 @@ export function reconcileDiscovered({
   for (const candidate of candidates) {
     const fp = String(candidate?.fingerprint ?? '')
     if (fp && byFingerprint.has(fp)) {
-      attached.push({ existingId: byFingerprint.get(fp).id ?? null, candidate, fingerprint: fp })
+      const existingId = byFingerprint.get(fp).id ?? null
+      attached.push({ existingId, candidate, fingerprint: fp })
+      auditDuplicate(auditDir, {
+        event: 'duplicate_fingerprint',
+        reason: 'duplicate_fingerprint',
+        fingerprint: fp,
+        existingId,
+        candidateId: candidate?.id ?? candidate?.taskId ?? null
+      })
       continue
     }
     created.push(candidate)
