@@ -27,18 +27,68 @@ export function sanitizeSessionId(sessionId) {
     .slice(0, 80)
 }
 
-const SECRET_REDACT_PATTERNS = [
-  /\b(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{20,})\b/g,
-  /(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}/gi,
-  /((?:api[_-]?key|token|secret|password)\s*[:=]\s*['"]?)[^\s'",;]{8,}/gi
-]
+const DUMMY_SECRET_VALUES = new Set([
+  'secret-value',
+  'transport-secret',
+  'must-not-be-copied',
+  'not-a-real-secret',
+  'changeme',
+  'change-me',
+  'placeholder',
+  'example',
+  'sample',
+  'dummy',
+  'redacted',
+  'your-key',
+  'your-api-key',
+  'your-token',
+  'test-value',
+  'xxx'
+])
 
-export function redactSecrets(text) {
-  let out = String(text || '')
-  for (const re of SECRET_REDACT_PATTERNS) {
-    out = out.replace(re, (m, p1) => (p1 && !re.source.startsWith('\\b(') ? `${p1}[REDACTED]` : '[REDACTED]'))
-  }
+const PRIVATE_KEY_PATTERN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g
+const TOKEN_PREFIX_PATTERN = /\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{20,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})\b/g
+const DSN_PASSWORD_PATTERN = /(:\/\/[^:\s/@]+:)([^@\s/]+)(@)/g
+const BEARER_PATTERN = /(Bearer\s+)([A-Za-z0-9._~+/=-]{16,})/gi
+const SECRET_ASSIGNMENT_PATTERN = /\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|secret|password|passwd|pwd)\s*[:=]\s*['"]?)([^\s'",;]+)/gi
+
+function isPlaceholderValue(value) {
+  const normalized = value.replace(/^['"]|['"]$/g, '').toLowerCase()
+  if (DUMMY_SECRET_VALUES.has(normalized)) return true
+  return /^(?:<[^>]+>|\$\{[^}]+\}|\{\{[^}]+\}\}|x{3,}|\*{3,})$/.test(normalized)
+}
+
+function isCodeOrSchemaValue(value) {
+  if (value.startsWith('//')) return true
+  if (/[()[\]{}]/.test(value)) return true
+  return /\b(?:validate|assert|String|JSON|process|require|import)\b/.test(value)
+}
+
+function hasCredentialEntropy(value) {
+  if (value.length < 12) return false
+  if (/[A-Z]/.test(value) && /[a-z]/.test(value)) return true
+  if (/[0-9]/.test(value) && /[A-Za-z]/.test(value)) return true
+  return /[+/=]/.test(value) && /[A-Za-z0-9]/.test(value)
+}
+
+function shouldRedactValue(value) {
+  if (!value || isPlaceholderValue(value) || isCodeOrSchemaValue(value)) return false
+  return hasCredentialEntropy(value)
+}
+
+function redactLine(line) {
+  let out = line
+  out = out.replace(PRIVATE_KEY_PATTERN, '[REDACTED]')
+  out = out.replace(TOKEN_PREFIX_PATTERN, '[REDACTED]')
+  out = out.replace(BEARER_PATTERN, (match, prefix, token) => shouldRedactValue(token) ? `${prefix}[REDACTED]` : match)
+  out = out.replace(DSN_PASSWORD_PATTERN, (match, prefix, password, suffix) => `${prefix}[REDACTED]${suffix}`)
+  out = out.replace(SECRET_ASSIGNMENT_PATTERN, (match, prefix, value) => shouldRedactValue(value) ? `${prefix}[REDACTED]` : match)
   return out
+}
+
+/** Redact credential-shaped values without flagging fixtures, schemas, identifiers or prose. */
+export function redactSecrets(text) {
+  return String(text || '').replace(/[^\r\n]+/g, redactLine)
 }
 
 function toBullets(items, maxItems = 5) {

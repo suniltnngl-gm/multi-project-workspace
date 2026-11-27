@@ -12,7 +12,8 @@ import {
   retireSession,
   grepSessionTranscript,
   grepAllSessionTranscripts,
-  buildReadOnlyAskCommand
+  buildReadOnlyAskCommand,
+  redactSecrets
 } from '../src/toolchain/dispatch/session-handoff.js'
 import { evaluateSessionCompaction } from '../src/toolchain/dispatch/session-compactor.js'
 import { shouldHarvestTimeoutArtifact } from '../src/toolchain/dispatch/job-queue.js'
@@ -196,6 +197,52 @@ test('recordPoolCall increments checkPoolFiveHourAdmission for the swarm-ask poo
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('redactSecrets still redacts genuine credentials', () => {
+  // Constructed at runtime so synthetic credentials never appear literally in the diff.
+  const skKey = 'sk-' + 'abcdefghijklmnopqrstuvwxyz123456'
+  const ghToken = 'ghp_' + '1234567890123456789012345678901234567890'
+  const slackToken = 'xoxb-' + '123456789012' + '-1234567890123-abcdefghijklmnopqrstuvwxyz'
+  const dsn = 'postgres://svc:' + 'S3cr3tP' + '@ssw0rd@db.example.com:5432/app'
+  const pemHeader = '-----BEGIN ' + 'RSA PRIVATE KEY-----'
+  const bearer = 'Bearer ' + 'eyJhbGciOiJIUzI1NiJ9.' + 'eyJzdWIiOiIxIn0.AbCd1234EfGh5678'
+  const passwordLine = 'password: "' + 'Sup3r' + 'S3cr3tValue' + '"'
+  const secretLines = [
+    `const key = '${skKey}';`,
+    ghToken,
+    slackToken,
+    dsn,
+    pemHeader,
+    `Authorization: ${bearer}`,
+    passwordLine
+  ]
+  for (const line of secretLines) {
+    assert.notEqual(redactSecrets(line), line, `must redact: ${line}`)
+    assert.match(redactSecrets(line), /\[REDACTED\]/, `must emit marker: ${line}`)
+  }
+})
+
+test('redactSecrets ignores fixture, schema, prose and identifier false positives', () => {
+  const benignLines = [
+    'FOO_API_KEY=\nBAR=not-a-secret',
+    'api_key: \'secret-value\'',
+    "assert.ok(validate({ ...capabilities, api_key: 'secret-value' }, schemas.capabilities))",
+    "const secret = 'transport-secret';",
+    "secret: 'must-not-be-copied'",
+    '<example>',
+    'changeme',
+    'placeholder',
+    '"pattern": "^secret://[A-Za-z0-9/_-]{1,200}$"',
+    "schema_version: 1, credential_ref: 'secret://provider/main', owner_ref: principal.owner_ref,",
+    'const apiKey = validateApiKeyEnv(args.api_key_env);',
+    '- Existing shared bearer authentication remains unchanged.',
+    'Changing the existing shared bearer authentication or HTTP/MCP transport'
+  ]
+  for (const line of benignLines) {
+    assert.equal(redactSecrets(line), line, `must not redact: ${line}`)
+  }
+  assert.equal(redactSecrets('api_key: secret-value\r\nnext'), 'api_key: secret-value\r\nnext')
 })
 
 test('swarm handoff/ask state root honours SWARM_STATE_DIR then SWARM_STATE_ROOT then default', () => {
