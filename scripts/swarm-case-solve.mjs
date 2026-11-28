@@ -181,7 +181,10 @@ if (isMain) {
   // the shared orchestrator lease; dry-runs stay lease-free. Live holder -> exit 3.
   let solveLease = null
   const solveLeaseRunId = `case-solve-${process.pid}-${Date.now()}`
-  if (apply) {
+  // Inherited lease (e.g. spawned inside overnight's full cycle): the parent already
+  // holds the shared orchestrator lease, so re-acquiring would self-deadlock.
+  const leaseInherited = Boolean(process.env.SWARM_ORCHESTRATOR_LEASE_PARENT)
+  if (apply && !leaseInherited) {
     const orchRes = acquireOrchestratorLock({
       stateDir: statePaths().root,
       runId: solveLeaseRunId,

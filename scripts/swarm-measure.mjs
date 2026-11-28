@@ -25,15 +25,24 @@ export function measureLedgerPath(caseDir) {
   return join(resolve(caseDir, '..'), 'measurements', 'decision-outcomes.jsonl')
 }
 
-function readMeasuredCaseIds(ledgerPath) {
-  const ids = new Set()
-  if (!existsSync(ledgerPath)) return ids
+function measuredKey(row) {
+  // A case may be resolved, measured, reopened, and re-resolved: the ledger key is
+  // the (caseId, resolution instant) pair so each decision is measured exactly once.
+  return `${row.caseId}|${row.decisionAt || ''}`
+}
+
+function readMeasuredKeys(ledgerPath) {
+  const keys = new Set()
+  if (!existsSync(ledgerPath)) return keys
   for (const line of readFileSync(ledgerPath, 'utf8').split('\n')) {
     const t = line.trim()
     if (!t) continue
-    try { ids.add(String(JSON.parse(t).caseId)) } catch { /* skip corrupt row */ }
+    try {
+      const row = JSON.parse(t)
+      keys.add(`${row.caseId}|${row.decisionAt || ''}`)
+    } catch { /* skip corrupt row */ }
   }
-  return ids
+  return keys
 }
 
 export async function measureResolvedCases(caseDir, { apply = false } = {}) {
@@ -41,7 +50,7 @@ export async function measureResolvedCases(caseDir, { apply = false } = {}) {
     return { ok: true, apply, scannedCases: 0, measuredCount: 0, measured: [], ledgerPath: null }
   }
   const ledgerPath = measureLedgerPath(caseDir)
-  const measuredCaseIds = apply ? readMeasuredCaseIds(ledgerPath) : new Set()
+  const measuredCaseIds = apply ? readMeasuredKeys(ledgerPath) : new Set()
   const measured = []
   let scannedCases = 0
   let pausedCases = 0
@@ -54,14 +63,17 @@ export async function measureResolvedCases(caseDir, { apply = false } = {}) {
       if (c.state === 'paused_case' || (Array.isArray(c.history) && c.history.some((h) => h.event === 'pause_operator'))) pausedCases += 1
       return
     }
-    if (measuredCaseIds.has(String(c.id))) return
+    if (measuredCaseIds.has(`${String(c.id)}|${(Array.isArray(c.history) ? c.history.filter((h) => h.event === 'auto_resolved_by_swarm').pop()?.at : null) || ''}`)) return
     // Evidence check: the decision's recorded findings for the selected option.
     const finding = c.findings?.[c.selectedOption] || c.findings?.[String(c.selectedOption).replaceAll('-', '_')]
     const evidenceScore = typeof finding?.score === 'number' ? finding.score : null
     const evidenceOk = finding ? finding.ok !== false : null
     const row = {
       caseId: c.id,
-      decision: 'resolved',
+      // SOLVE-004: a decision whose own evidence says it failed is measured as a
+      // reopen — the case returns to open_case with the failing finding intact so
+      // the next Decide pass decides on real evidence, not the heuristic.
+      decision: evidenceOk === false ? 'reopen' : 'resolved',
       selectedOption: c.selectedOption ?? null,
       evidenceScore,
       evidenceOk,
@@ -73,6 +85,18 @@ export async function measureResolvedCases(caseDir, { apply = false } = {}) {
     if (!apply) return
     mkdirSync(join(ledgerPath, '..'), { recursive: true, mode: 0o700 })
     appendFileSync(ledgerPath, `${JSON.stringify(row)}\n`, { mode: 0o600 })
+    if (row.decision === 'reopen') {
+      persist({
+        ...c,
+        state: 'open_case',
+        selectedOption: null,
+        history: [
+          ...(Array.isArray(c.history) ? c.history : []),
+          { event: 'reopened_by_measurement', evidenceScore, evidenceOk, failedOption: c.selectedOption, at: row.measuredAt }
+        ]
+      })
+      return
+    }
     persist({
       ...c,
       history: [

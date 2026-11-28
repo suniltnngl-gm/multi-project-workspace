@@ -16,6 +16,7 @@ import { measureResolvedCases, aggregateRelayTelemetry } from '../../../scripts/
 const MEASURE_CLI = resolve(new URL('../../../scripts/swarm-measure.mjs', import.meta.url).pathname)
 const DISCOVER_CLI = resolve(new URL('../../../scripts/swarm-discover.mjs', import.meta.url).pathname)
 const CASE_SOLVE_CLI = resolve(new URL('../../../scripts/swarm-case-solve.mjs', import.meta.url).pathname)
+const OVERNIGHT_CLI = resolve(new URL('../../../scripts/swarm-overnight.mjs', import.meta.url).pathname)
 
 function seedResolvedCase(dir, { id = 'case-measure-check', score = 55 } = {}) {
   const casesDir = join(dir, 'queue', 'cases')
@@ -114,6 +115,67 @@ test('MEASURE: swarm measure CLI runs read-only against an isolated state dir', 
     assert.equal(out.ledgerPath, null, 'dry-run persists no ledger')
     const rec = readCase(join(dir, 'queue', 'cases'), 'case-measure-check')
     assert.ok(!(rec.history || []).some((h) => h.event === 'measured_by_swarm'), 'dry-run must not mark measured')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('SOLVE-004: measure reopens a resolved case whose decision failed its evidence', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'measure-reopen-'))
+  try {
+    const casesDir = join(dir, 'queue', 'cases')
+    mkdirSync(casesDir, { recursive: true })
+    // Resolve a case whose selected option's evidence says it FAILED (ok: false).
+    const { writeCase } = await import('../../../apps/api/src/toolchain/dispatch/case-registry.js')
+    writeCase(casesDir, {
+      id: 'case-failed-decision',
+      title: 'Decision that did not hold',
+      kind: 'case',
+      state: 'resolved',
+      priority: 'P3',
+      options: [{ id: 'opt-1', label: 'safe option' }, { id: 'opt-2', label: 'another option' }],
+      selectedOption: 'opt-1',
+      findings: { 'opt-1': { ok: false, score: 0, notes: 'decision_did_not_hold' } },
+      history: [{ event: 'auto_resolved_by_swarm', selectedOption: 'opt-1', score: 0, at: '2026-11-28T00:00:00.000Z' }]
+    })
+
+    const res = await measureResolvedCases(casesDir, { apply: true })
+    assert.equal(res.measuredCount, 1)
+    assert.equal(res.measured[0].decision, 'reopen', 'a failed decision is measured as a reopen')
+    assert.equal(res.measured[0].evidenceOk, false)
+
+    const rec = readCase(casesDir, 'case-failed-decision')
+    assert.equal(rec.state, 'open_case', 'failed decision must reopen the case')
+    assert.equal(rec.selectedOption, null, 'reopened case must clear the selection')
+    assert.ok((rec.history || []).some((h) => h.event === 'reopened_by_measurement'))
+    // The failing finding survives so the next Decide pass uses it as evidence.
+    assert.equal(rec.findings['opt-1'].ok, false)
+
+    // Idempotent: the reopened (open) case is not re-measured.
+    const again = await measureResolvedCases(casesDir, { apply: true })
+    assert.equal(again.measuredCount, 0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('SOLVE-004: overnight --full-cycle --execute runs decide+measure phases into the report', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'overnight-fullcycle-'))
+  try {
+    mkdirSync(join(dir, 'queue', 'active'), { recursive: true })
+    mkdirSync(join(dir, 'queue', 'cases'), { recursive: true })
+    mkdirSync(join(dir, 'overnight'), { recursive: true })
+    const res = spawnSync(process.execPath, [OVERNIGHT_CLI, '--execute', '--max-ticks', '1', '--full-cycle', '--json'], {
+      encoding: 'utf8',
+      env: { ...process.env, SWARM_STATE_DIR: dir }
+    })
+    assert.equal(res.status, 0, `exit ${res.status}: ${res.stderr}`)
+    const out = JSON.parse(res.stdout)
+    assert.equal(out.fullCycle, true)
+    assert.ok(out.fullCyclePhases, 'full-cycle phases must be reported')
+    assert.equal(out.fullCyclePhases.caseSolve?.sandboxEnabled, true)
+    assert.ok(out.fullCyclePhases.measure, 'measure phase result must be in the report')
+    assert.equal(out.fullCyclePhases.measure.mode, 'apply')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

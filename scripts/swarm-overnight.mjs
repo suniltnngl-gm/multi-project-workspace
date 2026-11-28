@@ -75,6 +75,7 @@ const opts = {
   maxFailures: 3,
   tickIntervalSec: 0,
   autoDiscover: false,
+  fullCycle: false,
   lessonSync: true,
   autoCompact: true,
   selfImprove: true,
@@ -88,6 +89,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--execute') opts.execute = true
   else if (a === '--dry-run') opts.execute = false
   else if (a === '--auto-discover') opts.autoDiscover = true
+  else if (a === '--full-cycle') { opts.fullCycle = true; opts.autoDiscover = true }
   else if (a === '--lesson-sync') opts.lessonSync = true
   else if (a === '--no-lesson-sync') opts.lessonSync = false
   else if (a === '--auto-compact') opts.autoCompact = true
@@ -319,6 +321,29 @@ if (opts.selfImprove) {
   }
 }
 
+// SOLVE-004 full cycle: after the tick loop, run the Decide (case-solve --sandbox)
+// and Measure phases so unattended runs close the Discover -> Decide -> Measure loop.
+const fullCyclePhases = {}
+if (opts.fullCycle && opts.execute) {
+  const caseSolveCli = resolve(new URL('./swarm-case-solve.mjs', import.meta.url).pathname)
+  const csRes = spawnSync(
+    process.execPath,
+    [caseSolveCli, '--sandbox', '--apply', '--json'],
+    { cwd: resolve(new URL('..', import.meta.url).pathname), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 300_000, env: { ...process.env, SWARM_ORCHESTRATOR_LEASE_PARENT: overnightLeaseRunId } }
+  )
+  try { fullCyclePhases.caseSolve = JSON.parse(String(csRes.stdout || '{}')) } catch { fullCyclePhases.caseSolve = { ok: false, error: 'unparseable_output' } }
+  if (csRes.status !== 0) fullCyclePhases.caseSolve = { ...(fullCyclePhases.caseSolve || {}), exitCode: csRes.status }
+
+  const measureCli = resolve(new URL('./swarm-measure.mjs', import.meta.url).pathname)
+  const mRes = spawnSync(
+    process.execPath,
+    [measureCli, '--apply', '--json'],
+    { cwd: resolve(new URL('..', import.meta.url).pathname), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 300_000, env: { ...process.env, SWARM_ORCHESTRATOR_LEASE_PARENT: overnightLeaseRunId } }
+  )
+  try { fullCyclePhases.measure = JSON.parse(String(mRes.stdout || '{}')) } catch { fullCyclePhases.measure = { ok: false, error: 'unparseable_output' } }
+  if (mRes.status !== 0) fullCyclePhases.measure = { ...(fullCyclePhases.measure || {}), exitCode: mRes.status }
+}
+
 const report = {
   ok: true,
   mode: opts.execute ? 'execute' : 'dry-run',
@@ -326,6 +351,8 @@ const report = {
   ticksExecuted: ticks.length,
   consecutiveFailures,
   autoDiscover: opts.autoDiscover,
+  fullCycle: Boolean(opts.fullCycle),
+  fullCyclePhases: Object.keys(fullCyclePhases).length ? fullCyclePhases : undefined,
   lessonSyncRan,
   autoCompact: { enabled: opts.autoCompact, results: autoCompactResults },
   selfImprove: { enabled: opts.selfImprove, staleArchived: reapedEntries, lessonsRecorded: selfImproveLessons },
