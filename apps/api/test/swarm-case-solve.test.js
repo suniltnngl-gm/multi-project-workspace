@@ -173,3 +173,31 @@ test('SOLVE-005: the default runner penalizes options referencing siblings with 
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('W3 (#290): cold-start lesson penalty — a previously failed option class loses with zero telemetry', async () => {
+  const { solveCaseWithSandbox } = await import('../../../scripts/swarm-case-solve.mjs')
+  const dir = mkdtempSync(join(tmpdir(), 'case-lesson-'))
+  try {
+    const lessonsDir = join(dir, 'lessons')
+    mkdirSync(lessonsDir, { recursive: true })
+    writeFileSync(join(lessonsDir, 'decision-lessons.jsonl'), `${JSON.stringify({
+      lessonId: 'LES-DECISION-CASE-X-OPT-1', category: 'decision-reopen', caseId: 'case-x',
+      failedOption: 'opt-1', failedLabel: 'Retry with gemini-api directly',
+      tags: ['gemini-api', 'retry'], recordedAt: '2026-11-28T00:00:00.000Z'
+    })}\n`)
+    const caseObj = {
+      id: 'case-lesson-cold',
+      state: 'open_case',
+      options: [
+        { id: 'opt-1', label: 'Retry with gemini-api directly' },
+        { id: 'opt-2', label: 'Switch to hermes lane' }
+      ],
+      findings: {}
+    }
+    const verdict = await solveCaseWithSandbox(caseObj, { reportsDir: join(dir, 'no-reports'), lessonsDir })
+    assert.equal(verdict.action, 'select_winner')
+    assert.equal(verdict.selectedOption, 'opt-2', 'the lesson-failed sibling must lose on lessons alone: ' + JSON.stringify(verdict.results))
+    const notes = verdict.caseRecord?.findings?.['opt-1']?.notes || ''
+    assert.match(notes, /lesson_penalty\(15\)/)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})

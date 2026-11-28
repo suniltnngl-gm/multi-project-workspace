@@ -25,6 +25,63 @@ export function measureLedgerPath(caseDir) {
   return join(resolve(caseDir, '..'), 'measurements', 'decision-outcomes.jsonl')
 }
 
+/**
+ * W3 (#290): a measured reopen is a failed decision — emit it as a durable
+ * LES-DECISION-* lesson so future Decide passes can penalize the failed option
+ * class even with zero relay telemetry (cold-start). Append-only JSONL, 0600.
+ */
+export function recordReopenLesson(lessonsDir, row, caseObj, { now = () => new Date().toISOString() } = {}) {
+  if (!lessonsDir) return null
+  const lessonId = `LES-DECISION-${String(row.caseId).toUpperCase().replace(/[^A-Z0-9-]/g, '-')}-${String(row.selectedOption || 'na').toUpperCase().replace(/[^A-Z0-9-]/g, '-')}`
+  const failedOption = (caseObj?.options || []).find((o) => o.id === row.selectedOption)
+  const lesson = {
+    lessonId,
+    category: 'decision-reopen',
+    caseId: row.caseId,
+    failedOption: row.selectedOption,
+    failedLabel: failedOption?.label || null,
+    evidenceScore: row.evidenceScore,
+    evidenceSource: row.evidenceSource,
+    // Tags = failed-label word tokens (lowercase, >=4 chars), minus generic routing
+    // words that appear in almost every option label ('route', 'via', ...) — a
+    // tag must be distinctive enough to attribute a future option to the failure.
+    tags: [...new Set(String(failedOption?.label || row.selectedOption || '').toLowerCase().match(/[a-z0-9][a-z0-9-]{3,}/g) || [])]
+      .filter((t) => !['route', 'via', 'with', 'instead', 'retry', 'option', 'then', 'when', 'fallback'].includes(t)),
+    recordedAt: now()
+  }
+  mkdirSync(lessonsDir, { recursive: true, mode: 0o700 })
+  appendFileSync(join(lessonsDir, 'decision-lessons.jsonl'), `${JSON.stringify(lesson)}\n`, { mode: 0o600 })
+  return lesson
+}
+
+/** Load all decision-reopen lessons ($0, tolerate corrupt lines). */
+export function loadDecisionLessons(lessonsDir) {
+  const path = join(lessonsDir || '', 'decision-lessons.jsonl')
+  if (!lessonsDir || !existsSync(path)) return []
+  const lessons = []
+  for (const line of readFileSync(path, 'utf8').split('\n')) {
+    const t = line.trim()
+    if (!t) continue
+    try { const j = JSON.parse(t); if (j?.category === 'decision-reopen') lessons.push(j) } catch {}
+  }
+  return lessons
+}
+
+/** W3 cold-start penalty: 15 per lesson whose tags overlap the option text (cap 30). */
+export function decisionLessonPenalty(lessons, text, { maxPenalty = 30 } = {}) {
+  const lower = String(text || '').toLowerCase()
+  let penalty = 0
+  for (const l of lessons) {
+    for (const tag of l.tags || []) {
+      if (lower.includes(tag)) {
+        penalty += 15
+        break
+      }
+    }
+  }
+  return Math.min(penalty, maxPenalty)
+}
+
 function measuredKey(row) {
   // A case may be resolved, measured, reopened, and re-resolved: the ledger key is
   // the (caseId, resolution instant) pair so each decision is measured exactly once.
@@ -45,7 +102,7 @@ function readMeasuredKeys(ledgerPath) {
   return keys
 }
 
-export async function measureResolvedCases(caseDir, { apply = false } = {}) {
+export async function measureResolvedCases(caseDir, { apply = false, lessonsDir = statePaths().lessonsDir } = {}) {
   if (!caseDir || !existsSync(caseDir)) {
     return { ok: true, apply, scannedCases: 0, measuredCount: 0, measured: [], ledgerPath: null }
   }
@@ -86,6 +143,8 @@ export async function measureResolvedCases(caseDir, { apply = false } = {}) {
     mkdirSync(join(ledgerPath, '..'), { recursive: true, mode: 0o700 })
     appendFileSync(ledgerPath, `${JSON.stringify(row)}\n`, { mode: 0o600 })
     if (row.decision === 'reopen') {
+      // W3 (#290): the failed decision becomes a lesson for future Decide passes.
+      try { recordReopenLesson(lessonsDir, row, c) } catch { /* lesson emission never blocks measure */ }
       persist({
         ...c,
         state: 'open_case',

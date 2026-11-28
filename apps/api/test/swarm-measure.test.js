@@ -180,3 +180,41 @@ test('SOLVE-004: overnight --full-cycle --execute runs decide+measure phases int
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('W3 (#290): a measured reopen emits a LES-DECISION lesson with option-label tags', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'measure-lesson-'))
+  try {
+    const casesDir = join(dir, 'queue', 'cases')
+    const lessonsDir = join(dir, 'lessons')
+    mkdirSync(casesDir, { recursive: true })
+    const reg = await import('../../../scripts/swarm-registry-seed-helper.mjs').catch(() => null)
+    // Seed directly: a resolved case whose selected option's own evidence failed.
+    const { writeCase } = await import('../../../apps/api/src/toolchain/dispatch/case-registry.js')
+    writeCase(casesDir, {
+      id: 'case-lesson-reopen',
+      title: 'Lesson reopen check',
+      state: 'resolved',
+      selectedOption: 'opt-1',
+      options: [{ id: 'opt-1', label: 'Route via gemini-api directly' }, { id: 'opt-2', label: 'Route via hermes instead' }],
+      findings: { 'opt-1': { optionId: 'opt-1', ok: false, score: 0, notes: 'sandbox: exit 1' } },
+      history: [{ event: 'auto_resolved_by_swarm', selectedOption: 'opt-1', at: '2026-11-28T00:00:00.000Z' }]
+    })
+    const res = await measureResolvedCases(casesDir, { apply: true, lessonsDir })
+    assert.equal(res.measuredCount, 1)
+    assert.equal(res.measured[0].decision, 'reopen')
+    const lessonPath = join(lessonsDir, 'decision-lessons.jsonl')
+    assert.ok(existsSync(lessonPath), 'reopen must emit a lesson')
+    const lesson = JSON.parse(readFileSync(lessonPath, 'utf8').trim())
+    assert.match(lesson.lessonId, /^LES-DECISION-CASE-LESSON-REOPEN-OPT-1/)
+    assert.equal(lesson.category, 'decision-reopen')
+    assert.equal(lesson.failedOption, 'opt-1')
+    assert.ok(lesson.tags.includes('gemini-api'), 'tags include sibling token')
+    assert.ok(!lesson.tags.includes('route'), 'generic routing words are stoplisted from tags')
+    // The solver can read it back and penalize matching options.
+    const { loadDecisionLessons, decisionLessonPenalty } = await import('../../../scripts/swarm-measure.mjs')
+    const lessons = loadDecisionLessons(lessonsDir)
+    assert.equal(lessons.length, 1)
+    assert.equal(decisionLessonPenalty(lessons, 'Route via gemini-api directly'), 15)
+    assert.equal(decisionLessonPenalty(lessons, 'Route via hermes instead'), 0)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
