@@ -1314,3 +1314,10 @@ test('#300: progress-aware stall watchdog re-arms on output; silent child still 
   assert.equal(silent.stallKilled, true, 'a true stall must still be killed')
   assert.ok(silent.elapsedMs < 4000, `stall kill must be prompt, took ${silent.elapsedMs}ms`)
 })
+
+test('MEAS-C-312: classifyFailureTail captures stdout-only failure reasons (empty stderr)', () => {
+  // hermes-style failure: exit 2, empty stderr, reason printed on stdout.
+  const tail = classifyFailureTail({ exitCode: 2, stderr: '', stdout: 'hermes: daily quota exhausted\nok\n' })
+  assert.ok(tail.length > 0, 'unclassified stdout-only failures must still carry evidence')
+  assert.match(tail, /daily quota exhausted/)
+})

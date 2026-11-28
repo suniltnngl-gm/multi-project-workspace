@@ -1478,15 +1478,16 @@ export async function runRelay(argv) {
       promptChars: prompt.length
     }
     const recordAttempt = ({ model, status, exitCode = null, signal = null, error = null, res = null }) => {
-      const attempt = { model: model ?? null, status, exitCode: exitCode ?? null, signal: signal ?? null }
+      const attempt = { model: model ?? null, status, exitCode: exitCode ?? null, signal: res?.signal ?? signal ?? null }
       if (error) attempt.error = String(error)
-      if (res && exitCode !== 0) {
+      if (res && (exitCode !== 0 || status !== 'ok')) {
+        // Record evidence unconditionally: even an unclassified failure must
+        // carry its tail, or the exit stays unmeasurable (the 20 hermes exit_2s
+        // had empty stderr and zero recorded evidence).
         const failureClass = classifyFailure({ exitCode, stderr: res.stderr || '', stdout: res.stdout || '' })
-        if (failureClass) {
-          attempt.failureClass = failureClass
-          const tail = classifyFailureTail({ exitCode, stderr: res.stderr || '', stdout: res.stdout || '' })
-          if (tail) attempt.stderrTail = tail
-        }
+        if (failureClass) attempt.failureClass = failureClass
+        const tail = classifyFailureTail({ exitCode, stderr: res.stderr || '', stdout: res.stdout || '' })
+        if (tail) attempt.stderrTail = tail
       }
       windowTelemetry.attemptedModels.push(attempt)
       if (choice.pool) {
