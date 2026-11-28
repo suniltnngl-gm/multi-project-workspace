@@ -117,26 +117,41 @@ export async function measureResolvedCases(caseDir, { apply = false, lessonsDir 
   const measureOne = (c, persist) => {
     scannedCases += 1
     if (c.state === 'open_case') openCases += 1
-    if (c.state !== 'resolved') {
-      if (c.state === 'paused_case' || (Array.isArray(c.history) && c.history.some((h) => h.event === 'pause_operator'))) pausedCases += 1
-      return
-    }
-    if (measuredCaseIds.has(`${String(c.id)}|${(Array.isArray(c.history) ? c.history.filter((h) => h.event === 'auto_resolved_by_swarm').pop()?.at : null) || ''}`)) return
+    if (c.state === 'paused_case' || (Array.isArray(c.history) && c.history.some((h) => h.event === 'pause_operator'))) pausedCases += 1
+    // #309: governed-registry cases reach 'decided' then 'closed'; both carry a
+    // completed decision and both are measurable (only when a decision exists —
+    // a closed/rejected case without one is not a measurable outcome).
+    const measurable = c.state === 'resolved'
+      || ((c.state === 'decided' || c.state === 'closed') && c.decision)
+    if (!measurable) return
+    const decisionAt = (Array.isArray(c.history) ? c.history.filter((h) => h.event === 'auto_resolved_by_swarm').pop()?.at : null)
+      ?? c.decision?.decided_at ?? null
+    if (measuredCaseIds.has(`${String(c.id)}|${decisionAt || ''}`)) return
     // Evidence check: the decision's recorded findings for the selected option.
     const finding = c.findings?.[c.selectedOption] || c.findings?.[String(c.selectedOption).replaceAll('-', '_')]
     const evidenceScore = typeof finding?.score === 'number' ? finding.score : null
     const evidenceOk = finding ? finding.ok !== false : null
+    // #309 post-decision evidence capture: cases decided through the governed
+    // sqlite registry carry no sandbox findings — their recorded evidence is
+    // the decision rationale. Measure that instead of 'no_recorded_finding'.
+    const selectedOption = c.selectedOption ?? c.decision?.selected_option ?? null
+    let recordedEvidence = finding?.notes || null
+    if (!recordedEvidence && c.decision && String(c.decision.selected_option || '') === String(selectedOption || '')) {
+      let rationale = c.decision.decision_rationale || ''
+      try { const j = JSON.parse(rationale); if (j && typeof j.rationale === 'string') rationale = j.rationale } catch { /* plain text rationale */ }
+      if (String(rationale).trim()) recordedEvidence = `decision_rationale:${String(rationale).trim().slice(0, 300)}`
+    }
     const row = {
       caseId: c.id,
       // SOLVE-004: a decision whose own evidence says it failed is measured as a
       // reopen — the case returns to open_case with the failing finding intact so
       // the next Decide pass decides on real evidence, not the heuristic.
       decision: evidenceOk === false ? 'reopen' : 'resolved',
-      selectedOption: c.selectedOption ?? null,
+      selectedOption: selectedOption ?? null,
       evidenceScore,
       evidenceOk,
-      evidenceSource: finding?.notes || 'no_recorded_finding',
-      decisionAt: (Array.isArray(c.history) ? c.history.filter((h) => h.event === 'auto_resolved_by_swarm').pop()?.at : null) ?? null,
+      evidenceSource: recordedEvidence || 'no_recorded_finding',
+      decisionAt: decisionAt ?? null,
       measuredAt: new Date().toISOString()
     }
     measured.push(row)

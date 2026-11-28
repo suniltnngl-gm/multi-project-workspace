@@ -241,3 +241,36 @@ test('W3 (#290): a measured reopen emits a LES-DECISION lesson with option-label
     assert.equal(decisionLessonPenalty(lessons, 'Route via hermes instead'), 0)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
+
+test('MEASURE #309: decided registry cases are measured with their decision rationale as evidence', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'measure-decided-'))
+  try {
+    const casesDir = join(dir, 'queue', 'cases')
+    mkdirSync(casesDir, { recursive: true })
+    // A governed-registry case: decided via decide, no sandbox findings.
+    const { writeCase } = await import('../../../apps/api/src/toolchain/dispatch/case-registry.js')
+    writeCase(casesDir, {
+      id: 'CASE-DEC-001',
+      title: 'Decided case',
+      state: 'decided',
+      selectedOption: null,
+      findings: {},
+      decision: {
+        selected_option: 'opt-1',
+        decision_rationale: JSON.stringify({ rationale: 'implemented and live-proven on task #151' }),
+        decided_by: 'sunilkr',
+        decided_at: '2026-11-28T13:16:23.934Z'
+      }
+    })
+    const res = await measureResolvedCases(casesDir, { apply: true, lessonsDir: join(dir, 'lessons') })
+    assert.equal(res.measuredCount, 1)
+    const row = res.measured[0]
+    assert.equal(row.selectedOption, 'opt-1')
+    assert.match(row.evidenceSource, /^decision_rationale:/)
+    assert.match(row.evidenceSource, /live-proven on task #151/)
+    assert.equal(row.decisionAt, '2026-11-28T13:16:23.934Z')
+    // Idempotent across re-measure.
+    const again = await measureResolvedCases(casesDir, { apply: true, lessonsDir: join(dir, 'lessons') })
+    assert.equal(again.measuredCount, 0)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})

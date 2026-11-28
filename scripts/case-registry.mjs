@@ -346,6 +346,33 @@ async function main(argv) {
         actorRole: options.role,
         expectedVersion: parsePositiveInt(options['expected-version'], 'case_expected_version_invalid')
       })
+      // #309 split-brain bridge: the governance store (workspace DB) is not the
+      // operational registry the swarm runtime (measure/case-solve/discover)
+      // reads. Mirror the decision into the canonical state-dir registry so
+      // post-decision evidence capture sees it. Bridge failure never fails the
+      // decision itself (governance record is authoritative).
+      try {
+        const { writeCase } = await import('../apps/api/src/toolchain/dispatch/case-registry.js')
+        const governed = typeof db.getCase === 'function' ? db.getCase(caseId) : null
+        const decision = governed?.decision ?? result?.decision ?? {
+          selected_option: options.option,
+          decision_rationale: decisionRationale,
+          decided_by: options.actor,
+          decision_authorization_ref: options['authorization-ref'],
+          decided_at: new Date().toISOString()
+        }
+        writeCase(null, {
+          id: caseId,
+          title: governed?.title ?? caseId,
+          state: 'decided',
+          selectedOption: options.option,
+          findings: {},
+          decision
+        })
+        result = { ...result, mirrored_to: 'state-registry' }
+      } catch (e) {
+        result = { ...result, mirror_error: String(e?.message || e) }
+      }
     } else if (command === 'reopen') {
       const rationale = await readStdinUtf8()
       result = db.reopenCase({
