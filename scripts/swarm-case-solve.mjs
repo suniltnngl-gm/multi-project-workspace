@@ -15,6 +15,7 @@ import { statePaths } from './swarm-state-paths.mjs'
 import { acquireOrchestratorLock, releaseOrchestratorLock } from './swarm-orchestrator-lock.mjs'
 import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
 import { readCases, writeCase } from '../apps/api/src/toolchain/dispatch/case-registry.js'
+import { classifyMutationRisk } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
 import { simulateCaseOptions } from '../apps/api/src/toolchain/dispatch/case-sandbox.js'
 
 const UNRECOVERABLE_RE = /\b(billing|fund|credits?|force[- ]?push|push\s+--force|reset\s+--hard|drop\s+table|gcloud\s+.*delete|rm\s+-rf)\b/i
@@ -54,34 +55,39 @@ export function evaluateOpenCase(caseObj) {
   }
 }
 
-export function solveOpenCases(caseDir, { apply = false } = {}) {
-  if (!caseDir || !existsSync(caseDir)) return { ok: true, apply, scanned: 0, resolved: [], paused: [] }
+/**
+ * SOLVE-002: $0 default evidence runner. Discovery ranks options best-first, so a
+ * safe option's heuristic score decays with its list position; existing findings
+ * (recorded by a real sandbox run) always take precedence. Unrecoverable options
+ * fail outright so the sandbox pauses instead of ever selecting them.
+ */
+function defaultEvidenceRunner() {
+  return async ({ option, index }) => {
+    const risk = classifyMutationRisk(`${option.label || ''} ${option.command || ''}`)
+    if (!risk.allowed) return { ok: false, score: 0, notes: `unrecoverable:${risk.rule}` }
+    return { ok: true, score: 55 - 5 * Number(index || 0), notes: 'heuristic_safe_option' }
+  }
+}
+
+export async function solveOpenCases(caseDir, { apply = false, sandbox = false, minScoreMargin } = {}) {
+  if (!caseDir || !existsSync(caseDir)) return { ok: true, apply, sandbox, sandboxEnabled: Boolean(sandbox), scanned: 0, resolved: [], paused: [] }
   const files = readdirSync(caseDir).filter((f) => f.endsWith('.json')).filter((f) => f !== 'seed.json').sort()
   const resolved = []
   const paused = []
   let scanned = 0
 
-  const handleCase = (c, persist) => {
-    if (c.state !== 'open_case') return
-    scanned += 1
-    const decision = evaluateOpenCase(c)
-    if (decision.action === 'pause_operator') {
-      paused.push({ id: c.id, reason: decision.reason })
-      return
-    }
-    if (decision.action === 'resolve') {
-      resolved.push({ id: c.id, selectedOption: decision.selectedOption, score: decision.score })
-      if (apply) {
-        persist({
-          ...c,
-          state: 'resolved',
-          selectedOption: decision.selectedOption,
-          history: [
-            ...(Array.isArray(c.history) ? c.history : []),
-            { event: 'auto_resolved_by_swarm', selectedOption: decision.selectedOption, score: decision.score, at: new Date().toISOString() }
-          ]
-        })
-      }
+  const persistResolved = (c, decision, persist) => {
+    resolved.push({ id: c.id, selectedOption: decision.selectedOption, score: decision.score })
+    if (apply) {
+      persist({
+        ...c,
+        state: 'resolved',
+        selectedOption: decision.selectedOption,
+        history: [
+          ...(Array.isArray(c.history) ? c.history : []),
+          { event: 'auto_resolved_by_swarm', selectedOption: decision.selectedOption, score: decision.score, at: new Date().toISOString() }
+        ]
+      })
     }
   }
 
@@ -89,7 +95,24 @@ export function solveOpenCases(caseDir, { apply = false } = {}) {
     const fp = join(caseDir, f)
     let c
     try { c = JSON.parse(readFileSync(fp, 'utf8')) } catch { continue }
-    handleCase(c, (next) => protectedWriteFile(fp, `${JSON.stringify(next, null, 2)}\n`))
+    if (c.state !== 'open_case') continue
+    scanned += 1
+    if (sandbox) {
+      const verdict = await solveCaseWithSandbox(c, { minScoreMargin })
+      if (verdict.action === 'select_winner') {
+        persistResolved(verdict.caseRecord, { selectedOption: verdict.selectedOption, score: verdict.results?.find((r) => r.optionId === verdict.selectedOption)?.score ?? 50 }, (next) => protectedWriteFile(fp, `${JSON.stringify(next, null, 2)}\n`))
+      } else {
+        paused.push({ id: c.id, reason: verdict.reason })
+        if (apply) protectedWriteFile(fp, `${JSON.stringify(verdict.caseRecord, null, 2)}\n`)
+      }
+      continue
+    }
+    const decision = evaluateOpenCase(c)
+    if (decision.action === 'pause_operator') {
+      paused.push({ id: c.id, reason: decision.reason })
+      continue
+    }
+    if (decision.action === 'resolve') persistResolved(c, decision, (next) => protectedWriteFile(fp, `${JSON.stringify(next, null, 2)}\n`))
   }
 
   // Canonical sqlite case registry (skipped when legacy .json files coexist —
@@ -97,11 +120,28 @@ export function solveOpenCases(caseDir, { apply = false } = {}) {
   try {
     const registryCases = readCases(caseDir)
     for (const c of registryCases) {
-      handleCase(c, (next) => { writeCase(caseDir, next) })
+      if (c.state !== 'open_case') continue
+      scanned += 1
+      if (sandbox) {
+        const verdict = await solveCaseWithSandbox(c, { minScoreMargin })
+        if (verdict.action === 'select_winner') {
+          persistResolved(verdict.caseRecord, { selectedOption: verdict.selectedOption, score: verdict.results?.find((r) => r.optionId === verdict.selectedOption)?.score ?? 50 }, (next) => { writeCase(caseDir, next) })
+        } else {
+          paused.push({ id: c.id, reason: verdict.reason })
+          if (apply) writeCase(caseDir, verdict.caseRecord)
+        }
+        continue
+      }
+      const decision = evaluateOpenCase(c)
+      if (decision.action === 'pause_operator') {
+        paused.push({ id: c.id, reason: decision.reason })
+        continue
+      }
+      if (decision.action === 'resolve') persistResolved(c, decision, (next) => { writeCase(caseDir, next) })
     }
   } catch { /* legacy dir layout: the loose-file pass already covered it */ }
 
-  return { ok: true, apply, scanned, resolvedCount: resolved.length, resolved, pausedCount: paused.length, paused }
+  return { ok: true, apply, sandbox, sandboxEnabled: Boolean(sandbox), scanned, resolvedCount: resolved.length, resolved, pausedCount: paused.length, paused }
 }
 
 /**
@@ -115,7 +155,12 @@ export async function solveCaseWithSandbox(caseObj, { runOption = null, minScore
     if (f && typeof f.score === 'number') {
       return { ok: f.ok !== false, score: f.score, notes: f.notes || 'from_existing_finding' }
     }
-    return { ok: true, score: 50, notes: 'default_safe_option' }
+    // SOLVE-002 $0 heuristic evidence: discovery ranks options best-first, so the
+    // heuristic score decays with list position; unrecoverable options fail outright.
+    const risk = classifyMutationRisk(`${option.label || ''} ${option.command || ''}`)
+    if (!risk.allowed) return { ok: false, score: 0, notes: `unrecoverable:${risk.rule}` }
+    const idx = (caseObj?.options || []).findIndex((o) => o.id === option.id)
+    return { ok: true, score: 55 - 5 * Math.max(0, idx), notes: 'heuristic_safe_option' }
   })
   return simulateCaseOptions(caseObj, { runOption: runner, minScoreMargin })
 }
@@ -156,8 +201,7 @@ if (isMain) {
     })
     for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(130))
   }
-  const res = solveOpenCases(caseDir, { apply })
-  if (useSandbox) res.sandboxEnabled = true
+  const res = await solveOpenCases(caseDir, { apply, sandbox: useSandbox })
   if (argv.includes('--json')) console.log(JSON.stringify(res, null, 2))
   else console.log(`swarm case-solve (${apply ? 'apply' : 'dry-run'}): scanned=${res.scanned} resolved=${res.resolvedCount} paused=${res.pausedCount}`)
 }

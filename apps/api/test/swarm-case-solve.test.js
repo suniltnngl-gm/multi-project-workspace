@@ -13,6 +13,84 @@ function readCaseState(casesDir, id) {
   return readCase(casesDir, id)?.state ?? null
 }
 
+test('SOLVE-002: --sandbox gathers findings and auto-resolves a clear winner on --apply', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'case-solve-sandbox-'))
+  try {
+    const casesDir = join(dir, 'queue', 'cases')
+    mkdirSync(casesDir, { recursive: true })
+    const seed = {
+      multi_option_cases: [{
+        id: 'case-sandbox-check',
+        title: 'Sandbox-decided case',
+        state: 'open_case',
+        priority: 'P3',
+        options: [{ id: 'opt-1', label: 'Recommended safe option' }, { id: 'opt-2', label: 'Alternative safe option' }],
+        findings: {}
+      }]
+    }
+    writeFileSync(join(dir, 'seed.json'), JSON.stringify(seed))
+    const discover = resolve(new URL('../../../scripts/swarm-discover.mjs', import.meta.url).pathname)
+    const reg = spawnSync(process.execPath, [discover, '--mode', 'discover', '--queue-dir', join(dir, 'queue', 'active'), '--case-dir', casesDir, '--seed-json', join(dir, 'seed.json'), '--apply'], { encoding: 'utf8', env: { ...process.env, SWARM_STATE_DIR: dir } })
+    assert.equal(reg.status, 0, reg.stderr)
+
+    // Dry-run: decision previewed, nothing persisted.
+    const dry = spawnSync(process.execPath, [CLI, '--sandbox', '--json'], { encoding: 'utf8', env: { ...process.env, SWARM_STATE_DIR: dir } })
+    assert.equal(dry.status, 0, dry.stderr)
+    const dryOut = JSON.parse(dry.stdout)
+    assert.equal(dryOut.sandboxEnabled, true)
+    assert.equal(dryOut.scanned, 1)
+    const dryRecord = readCase(casesDir, 'case-sandbox-check')
+    assert.equal(dryRecord.state, 'open_case', 'dry-run must not persist')
+    assert.deepEqual(dryRecord.findings?.opt_1 ?? dryRecord.findings?.['opt-1'] ?? {}, {}, 'dry-run must not persist findings')
+
+    // Apply: findings recorded for every option, winner resolved with history.
+    const applied = spawnSync(process.execPath, [CLI, '--sandbox', '--apply', '--json'], { encoding: 'utf8', env: { ...process.env, SWARM_STATE_DIR: dir } })
+    assert.equal(applied.status, 0, applied.stderr)
+    const out = JSON.parse(applied.stdout)
+    assert.equal(out.resolvedCount, 1)
+    const rec = readCase(casesDir, 'case-sandbox-check')
+    assert.equal(rec.state, 'resolved')
+    assert.equal(rec.selectedOption, 'opt-1', `expected first-ranked winner: ${JSON.stringify(rec.findings)}`)
+    const findingKeys = Object.keys(rec.findings || {})
+    assert.ok(findingKeys.length >= 2, `findings must cover all options: ${findingKeys}`)
+    assert.ok((rec.history || []).some((h) => h.event === 'auto_resolved_by_swarm'))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('SOLVE-002: --sandbox pauses on unrecoverable options and records the reason', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'case-solve-sandbox-ur-'))
+  try {
+    const casesDir = join(dir, 'queue', 'cases')
+    mkdirSync(casesDir, { recursive: true })
+    const seed = {
+      multi_option_cases: [{
+        id: 'case-unrecoverable-check',
+        title: 'Case with an unrecoverable option',
+        state: 'open_case',
+        priority: 'P3',
+        options: [{ id: 'opt-1', label: 'safe option' }, { id: 'opt-2', label: 'clean up by running rm -rf / on the build host' }],
+        findings: {}
+      }]
+    }
+    writeFileSync(join(dir, 'seed.json'), JSON.stringify(seed))
+    const discover = resolve(new URL('../../../scripts/swarm-discover.mjs', import.meta.url).pathname)
+    const reg = spawnSync(process.execPath, [discover, '--mode', 'discover', '--queue-dir', join(dir, 'queue', 'active'), '--case-dir', casesDir, '--seed-json', join(dir, 'seed.json'), '--apply'], { encoding: 'utf8', env: { ...process.env, SWARM_STATE_DIR: dir } })
+    assert.equal(reg.status, 0, reg.stderr)
+
+    const applied = spawnSync(process.execPath, [CLI, '--sandbox', '--apply', '--json'], { encoding: 'utf8', env: { ...process.env, SWARM_STATE_DIR: dir } })
+    assert.equal(applied.status, 0, applied.stderr)
+    const out = JSON.parse(applied.stdout)
+    assert.equal(out.pausedCount, 1)
+    assert.match(out.paused[0].reason, /unrecoverable_option_detected/)
+    const rec = readCase(casesDir, 'case-unrecoverable-check')
+    assert.equal(rec.state, 'open_case', 'a paused case must stay open')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('MC-206+: case-solve scans open cases from the sqlite case registry (and resolves on --apply)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'case-solve-registry-'))
   try {
