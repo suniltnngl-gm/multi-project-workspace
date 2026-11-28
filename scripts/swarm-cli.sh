@@ -42,6 +42,7 @@ Commands:
   stop                 Arm graceful kill-switch (STOP_SWARM)
   resume               Clear kill-switch (STOP_SWARM)
   measure [args]       Measure phase: decision-outcome ledger + relay telemetry aggregation
+  workflow [args]      Reusable workflow registry: list / run declarative workflows
   status               Show registry, queue, cases, and kill-switch status
   doctor               Check guardrails: kill-switch, 5h ledger, overnight report, git cleanliness
   wakeup [since_sha]   Emit portable zero-LLM wakeup brief after a short/long break
@@ -67,6 +68,7 @@ case "$cmd" in
   overnight) exec node "$MPW_DIR/scripts/swarm-overnight.mjs" "$@" ;;
   relay)        exec node "$MPW_DIR/scripts/swarm-relay.mjs" "$@" ;;
   lessons)      exec node "$MPW_DIR/scripts/swarm-lesson-sync.mjs" "$@" ;;
+  workflow)     exec node "$MPW_DIR/scripts/swarm-workflow.mjs" "$@" ;;
   compact)      exec node "$MPW_DIR/scripts/swarm-compact.mjs" "$@" ;;
   handoff)      exec node "$MPW_DIR/scripts/swarm-handoff.mjs" "$@" ;;
   retire)       exec node "$MPW_DIR/scripts/swarm-handoff.mjs" --retire "$@" ;;

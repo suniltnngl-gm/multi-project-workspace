@@ -53,6 +53,7 @@ export function statePaths(env = process.env) {
     stopSwitchPath: join(root, 'overnight', 'STOP_SWARM'),
     translationRegistryPath: join(root, 'translation-registry.json'),
     translationUsagePath: join(root, 'translation-usage.jsonl'),
+    workflowsDir: join(root, 'workflows'),
     workspaceIndexPath: join(root, 'workspace-index.json')
   }
 }
