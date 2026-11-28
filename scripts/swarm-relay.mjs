@@ -692,7 +692,7 @@ export function classifyFailureTail({ exitCode, stderr = '', stdout = '' }) {
   return text.length <= FAILURE_TAIL_MAX_CHARS ? text : text.slice(-FAILURE_TAIL_MAX_CHARS)
 }
 
-export function runChild({ command, args, cwd, env, stallKillSec, windowStartMs, horizonDeadlineMs = null, echoStdout = true }) {
+export function runChild({ command, args, cwd, env, stallKillSec, windowStartMs, horizonDeadlineMs = null, echoStdout = true, progressAwareStall = true }) {
   return new Promise((resolvePromise) => {
     // Cooperative caps: an explicit stall bound and/or the run horizon. Both are opt-in.
     const limits = []
@@ -714,25 +714,13 @@ export function runChild({ command, args, cwd, env, stallKillSec, windowStartMs,
     let timer = null
     let stdoutText = ''
     let stderrText = ''
-    // Capture the sibling's stdout (single-shot CLIs print tool-call JSON instead of
-    // writing files), while still streaming it through to the relay log.
-    child.stdout?.on('data', (chunk) => {
-      const text = String(chunk)
-      stdoutText += text
-      if (echoStdout) { try { process.stdout.write(text) } catch { /* log stream closed */ } }
-    })
-    child.stderr?.on('data', (chunk) => {
-      const text = String(chunk)
-      stderrText += text
-      if (echoStdout) { try { process.stderr.write(text) } catch { /* log stream closed */ } }
-    })
-    const finish = (status, signal, error, stallKilled) => {
-      if (settled) return
-      settled = true
+
+    // #300 progress-aware stall watchdog: output activity re-arms the stall timer,
+    // so a chatty-but-healthy child is never killed mid-stream. A true stall (no
+    // output for the full bound) still terminates it. Horizon stays absolute.
+    const armStallTimer = () => {
+      if (!limitMs || !child.pid || settled) return
       if (timer) clearTimeout(timer)
-      resolvePromise({ status, signal, error, stallKilled, elapsedMs: Date.now() - windowStartMs, stdout: stdoutText, stderr: stderrText })
-    }
-    if (limitMs > 0 && child.pid) {
       timer = setTimeout(() => {
         // Graceful first, hard kill 5s later; never a routine hard kill.
         try { process.kill(-child.pid, 'SIGTERM') } catch { try { child.kill('SIGTERM') } catch { /* already gone */ } }
@@ -742,6 +730,28 @@ export function runChild({ command, args, cwd, env, stallKillSec, windowStartMs,
         finish(null, 'SIGTERM', null, true)
       }, limitMs)
     }
+
+    // Capture the sibling's stdout (single-shot CLIs print tool-call JSON instead of
+    // writing files), while still streaming it through to the relay log.
+    child.stdout?.on('data', (chunk) => {
+      const text = String(chunk)
+      stdoutText += text
+      if (progressAwareStall) armStallTimer()
+      if (echoStdout) { try { process.stdout.write(text) } catch { /* log stream closed */ } }
+    })
+    child.stderr?.on('data', (chunk) => {
+      const text = String(chunk)
+      stderrText += text
+      if (progressAwareStall) armStallTimer()
+      if (echoStdout) { try { process.stderr.write(text) } catch { /* log stream closed */ } }
+    })
+    const finish = (status, signal, error, stallKilled) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolvePromise({ status, signal, error, stallKilled, elapsedMs: Date.now() - windowStartMs, stdout: stdoutText, stderr: stderrText })
+    }
+    armStallTimer()
     child.on('error', (err) => finish(null, null, err, false))
     child.on('close', (code, signal) => finish(code, signal, null, false))
   })

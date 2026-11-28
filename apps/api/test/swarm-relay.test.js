@@ -1295,3 +1295,22 @@ test('direct-graphn sibling routes through swarm-direct --provider graphn', () =
   assert.equal(cmd.args[cmd.args.indexOf('--provider') + 1], 'graphn')
   assert.equal(cmd.args[cmd.args.indexOf('--prompt') + 1], 'hello')
 })
+
+test('#300: progress-aware stall watchdog re-arms on output; silent child still killed', async () => {
+  // Chatty child: emits a line every 200ms; with a 0.5s stall bound it must survive 1.2s.
+  const chatty = await runChild({
+    command: 'node', args: ['-e', 'setInterval(() => console.log("tick"), 200); setTimeout(() => process.exit(0), 1200)'],
+    cwd: tmpdir(), env: { ...process.env }, stallKillSec: 0.5, windowStartMs: Date.now(), echoStdout: false
+  })
+  assert.equal(chatty.stallKilled, false, 'healthy output stream must never be stall-killed')
+  assert.equal(chatty.status, 0)
+  assert.ok(chatty.stdout.includes('tick'))
+
+  // Silent child: no output at all; killed once the bound elapses.
+  const silent = await runChild({
+    command: 'node', args: ['-e', 'setTimeout(() => process.exit(0), 5000)'],
+    cwd: tmpdir(), env: { ...process.env }, stallKillSec: 0.5, windowStartMs: Date.now(), echoStdout: false
+  })
+  assert.equal(silent.stallKilled, true, 'a true stall must still be killed')
+  assert.ok(silent.elapsedMs < 4000, `stall kill must be prompt, took ${silent.elapsedMs}ms`)
+})
