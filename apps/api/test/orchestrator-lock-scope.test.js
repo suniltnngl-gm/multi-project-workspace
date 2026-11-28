@@ -152,3 +152,25 @@ test('MC-206: swarm case-solve --apply fails closed exit 3; dry-run stays lease-
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('#301: swarm-discover --apply fails closed exit 3 when the orchestrator lease is held; dry-run stays lease-free', () => {
+  const root = setupRoot()
+  const lease = holdSharedOrchestratorLease(root, 'run-other')
+  const DISCOVER_SCRIPT = resolve(new URL('../../../scripts/swarm-discover.mjs', import.meta.url).pathname)
+  try {
+    const held = spawnSync(process.execPath, [DISCOVER_SCRIPT, '--mode', 'discover', '--queue-dir', join(root, 'queue'), '--apply'], {
+      encoding: 'utf8', env: { ...process.env, SWARM_STATE_DIR: root }
+    })
+    assert.equal(held.status, 3, `expected exit 3, got ${held.status}: ${held.stdout} ${held.stderr}`)
+    assert.match(held.stderr, /orchestrator_lock_held|lease_active|held by other-entrypoint/)
+
+    // Dry-run must stay lease-free even while the lease is held.
+    const dry = spawnSync(process.execPath, [DISCOVER_SCRIPT, '--mode', 'discover', '--queue-dir', join(root, 'queue')], {
+      encoding: 'utf8', env: { ...process.env, SWARM_STATE_DIR: root }
+    })
+    assert.equal(dry.status, 0, `dry-run must not take the lease: ${dry.stderr}`)
+  } finally {
+    releaseOrchestratorLock({ stateDir: sharedLockDir(root), runId: 'run-other', generation: lease.lock.generation, resource: 'orchestrator' })
+    rmSync(root, { recursive: true, force: true })
+  }
+})

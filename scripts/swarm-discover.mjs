@@ -436,6 +436,34 @@ if (isMain) {
     }
   }
 
+  // #301: only --apply mutates the queue/case registries, so only --apply takes
+  // the shared orchestrator lease — continuous discovery cycles (cron) can never
+  // split-work with relay/run/overnight/queue-run/case-solve. Dry-runs stay lease-free.
+  let discoverLease = null
+  const discoverLeaseRunId = `swarm-discover-${process.pid}-${Date.now()}`
+  const leaseInherited = Boolean(process.env.SWARM_ORCHESTRATOR_LEASE_PARENT)
+  if (opts.apply && !leaseInherited) {
+    const { acquireOrchestratorLock, releaseOrchestratorLock } = await import('./swarm-orchestrator-lock.mjs')
+    const orchRes = acquireOrchestratorLock({
+      stateDir: statePaths().root,
+      runId: discoverLeaseRunId,
+      resource: 'orchestrator',
+      holder: 'swarm-discover',
+      auditDir: statePaths().root
+    })
+    if (!orchRes.ok) {
+      process.stderr.write(`swarm discover: ${orchRes.reason}: orchestrator held by ${orchRes.holder} runId=${orchRes.runId}\n`)
+      process.exit(3)
+    }
+    discoverLease = orchRes
+    process.on('exit', () => {
+      try {
+        releaseOrchestratorLock({ stateDir: statePaths().root, runId: discoverLeaseRunId, generation: discoverLease.lock.generation, resource: 'orchestrator' })
+      } catch { /* already released */ }
+    })
+    for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(130))
+  }
+
   let seedTasks = []
   if (opts.seedJson && existsSync(opts.seedJson)) {
     const parsed = JSON.parse(readFileSync(opts.seedJson, 'utf8'))
