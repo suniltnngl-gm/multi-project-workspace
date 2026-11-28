@@ -142,3 +142,89 @@ export function evaluateAuthorization({
 
   return { authorized: true, reason: 'delegation_active', subjectId: subject, actionClass }
 }
+
+/**
+ * S3 (#305) — supervisor sessions. A supervisor session is a short-lived,
+ * session-scoped credential derived from an authorization verdict. Stored in a
+ * separate sessions document (protected write) with an append-only audit trail.
+ */
+export function supervisorSessionsPath(env = process.env) {
+  return `${statePaths(env).root}/identity/supervisor-sessions.json`
+}
+
+function loadSessions({ sessionsPath = null, env = process.env, readFileImpl = fsReadFileSync } = {}) {
+  const path = sessionsPath || supervisorSessionsPath(env)
+  if (!existsSync(path)) return { ok: true, path, doc: { schema: 'auth-supervisor-sessions/v1', sessions: [] } }
+  try {
+    const doc = JSON.parse(readFileImpl(path, 'utf8'))
+    if (!doc || doc.schema !== 'auth-supervisor-sessions/v1') return { ok: false, reason: 'sessions_schema_mismatch', path }
+    return { ok: true, path, doc }
+  } catch {
+    return { ok: false, reason: 'sessions_corrupt', path }
+  }
+}
+
+const randomId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
+
+/**
+ * Issue a supervisor session for a subject. The issuer must hold `admin`
+ * authorization (operator or an admin delegation). Fail closed.
+ */
+export function issueSupervisorSession({
+  subjectId,
+  actionClass = 'mutate',
+  ttlMs = 30 * 60 * 1000,
+  issuedBy,
+  now = new Date(),
+  env = process.env,
+  sessionsPath = null
+} = {}) {
+  const verdict = evaluateAuthorization({ subjectId: issuedBy, actionClass: 'admin', env })
+  if (!verdict.authorized) return { ok: false, reason: `issuer_unauthorized:${verdict.reason}`, issuedBy: issuedBy || null }
+  const subjectVerdict = evaluateAuthorization({ subjectId, actionClass, env })
+  if (!subjectVerdict.authorized) return { ok: false, reason: `subject_unauthorized:${subjectVerdict.reason}`, subjectId: subjectId || null }
+
+  const loaded = loadSessions({ sessionsPath, env })
+  if (!loaded.ok) return { ok: false, reason: loaded.reason }
+  const expiresAtMs = (now instanceof Date ? now.getTime() : Date.parse(now)) + ttlMs
+  const session = {
+    sessionId: `sup-${randomId()}`,
+    subjectId,
+    actionClass,
+    issuedBy,
+    issuedAt: new Date(now instanceof Date ? now.getTime() : Date.parse(now)).toISOString(),
+    expiresAt: new Date(expiresAtMs).toISOString()
+  }
+  loaded.doc.sessions.push(session)
+  const written = protectedWriteFile(loaded.path, `${JSON.stringify(loaded.doc, null, 2)}\n`)
+  return { ok: true, session, auditPath: written.targetPath }
+}
+
+/** Load sessions, pruning expired ones mechanically (never throws). */
+export function activeSupervisorSessions({ now = new Date(), env = process.env, sessionsPath = null, readFileImpl = fsReadFileSync } = {}) {
+  const loaded = loadSessions({ sessionsPath, env, readFileImpl })
+  if (!loaded.ok) return { ok: false, reason: loaded.reason, active: [] }
+  const at = now instanceof Date ? now.getTime() : Date.parse(now)
+  const active = (loaded.doc.sessions || []).filter((s) => Date.parse(s.expiresAt) > at)
+  return { ok: true, active, expiredCount: (loaded.doc.sessions || []).length - active.length }
+}
+
+/**
+ * S4 (#305) — atomic authorization-to-lease bridge: the lease is acquired ONLY
+ * after a fresh mechanical verdict, in one call. A denied subject never reaches
+ * the lease; a granted one gets verdict + lease result together.
+ */
+export async function authorizeThenAcquireLease({
+  subjectId,
+  actionClass = 'mutate',
+  resource = null,
+  acquire = null,
+  now = new Date(),
+  env = process.env
+} = {}) {
+  const verdict = evaluateAuthorization({ subjectId, actionClass, resource, now, env })
+  if (!verdict.authorized) return { ok: false, authorized: false, reason: verdict.reason, leaseAcquired: false }
+  if (typeof acquire !== 'function') return { ok: true, authorized: true, verdict, leaseAcquired: false, reason: 'no_acquire_callback' }
+  const lease = await acquire(verdict)
+  return { ok: true, authorized: true, verdict, lease, leaseAcquired: Boolean(lease?.ok) }
+}

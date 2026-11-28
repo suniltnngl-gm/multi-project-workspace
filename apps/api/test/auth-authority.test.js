@@ -10,7 +10,10 @@ import {
   loadAuthorityState,
   bootstrapOperator,
   grantDelegation,
-  evaluateAuthorization
+  evaluateAuthorization,
+  issueSupervisorSession,
+  activeSupervisorSessions,
+  authorizeThenAcquireLease
 } from '../src/toolchain/dispatch/auth-authority.js'
 
 function freshEnv() {
@@ -101,6 +104,78 @@ test('S2: corrupt or schema-mismatched authority state authorizes nobody', () =>
     // Missing operator id inside an otherwise valid doc: fail closed.
     writeFileSync(path, JSON.stringify({ schema: AUTHORITY_SCHEMA, operator: {}, delegations: [] }))
     assert.equal(evaluateAuthorization({ subjectId: 'anyone', actionClass: 'read', env }).reason, 'authority_state_operator_missing')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('S3: supervisor sessions — admin-gated issuance, mechanical expiry', () => {
+  const { root, env } = freshEnv()
+  try {
+    bootstrapOperator({ operatorId: 'sunilkr', env })
+    grantDelegation({ subjectId: 'overseer', actionClass: 'admin', env })
+
+    // Unauthorized issuer: no session, fail closed.
+    const denied = issueSupervisorSession({ subjectId: 'worker', issuedBy: 'mallory', env })
+    assert.equal(denied.ok, false)
+    assert.match(denied.reason, /issuer_unauthorized/)
+
+    // Non-admin delegated subject cannot issue either.
+    grantDelegation({ subjectId: 'reader', actionClass: 'read', env })
+    assert.equal(issueSupervisorSession({ subjectId: 'worker', issuedBy: 'reader', env }).ok, false)
+
+    // Operator-issued session is active then expires mechanically.
+    // Fail closed: a subject with no delegation cannot be issued a session.
+    assert.equal(issueSupervisorSession({ subjectId: 'ghost-worker', issuedBy: 'sunilkr', env }).ok, false)
+    grantDelegation({ subjectId: 'worker', actionClass: 'mutate', env })
+    const s1 = issueSupervisorSession({ subjectId: 'worker', actionClass: 'mutate', ttlMs: 1000, issuedBy: 'sunilkr', now: new Date('2026-01-01T00:00:00Z'), env })
+    assert.equal(s1.ok, true)
+    assert.match(s1.session.sessionId, /^sup-/)
+    assert.equal(s1.session.issuedBy, 'sunilkr')
+
+    const activeNow = activeSupervisorSessions({ now: new Date('2026-01-01T00:00:00.500Z'), env })
+    assert.equal(activeNow.active.length, 1)
+    assert.equal(activeNow.expiredCount, 0)
+    const activeLater = activeSupervisorSessions({ now: new Date('2026-01-01T00:02:00Z'), env })
+    assert.equal(activeLater.active.length, 0)
+    assert.equal(activeLater.expiredCount, 1)
+
+    // Admin-delegated subject can issue too (subject still needs its own delegation).
+    grantDelegation({ subjectId: 'worker2', actionClass: 'mutate', env })
+    const s2 = issueSupervisorSession({ subjectId: 'worker2', issuedBy: 'overseer', env })
+    assert.equal(s2.ok, true)
+    assert.equal(s2.session.issuedBy, 'overseer')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('S4: atomic auth-to-lease — denied subjects never reach the lease', async () => {
+  const { root, env } = freshEnv()
+  try {
+    bootstrapOperator({ operatorId: 'sunilkr', env })
+    let leaseCalls = 0
+    const acquire = (verdict) => { leaseCalls++; return { ok: true, runId: 'lease-1' } }
+
+    // Denied: acquire is never invoked.
+    const denied = await authorizeThenAcquireLease({ subjectId: 'ghost', actionClass: 'mutate', acquire, env })
+    assert.equal(denied.ok, false)
+    assert.equal(denied.leaseAcquired, false)
+    assert.equal(leaseCalls, 0, 'denied subject must not touch the lease')
+
+    // Operator: verdict then lease in one atomic call.
+    const granted = await authorizeThenAcquireLease({ subjectId: 'sunilkr', actionClass: 'mutate', resource: '/queue/x', acquire, env })
+    assert.equal(granted.ok, true)
+    assert.equal(granted.authorized, true)
+    assert.equal(granted.leaseAcquired, true)
+    assert.equal(granted.lease.runId, 'lease-1')
+    assert.equal(leaseCalls, 1)
+
+    // Scope check inside the bridge: wrong resource denies before acquire.
+    grantDelegation({ subjectId: 'scoped', actionClass: 'mutate', resourceScope: '/reports/', env })
+    const outOfScope = await authorizeThenAcquireLease({ subjectId: 'scoped', actionClass: 'mutate', resource: '/queue/y', acquire, env })
+    assert.equal(outOfScope.authorized, false)
+    assert.equal(leaseCalls, 1)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
