@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url'
 import { statePaths } from './swarm-state-paths.mjs'
 import { acquireOrchestratorLock, releaseOrchestratorLock } from './swarm-orchestrator-lock.mjs'
 import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
+import { readCases, writeCase } from '../apps/api/src/toolchain/dispatch/case-registry.js'
 import { simulateCaseOptions } from '../apps/api/src/toolchain/dispatch/case-sandbox.js'
 
 const UNRECOVERABLE_RE = /\b(billing|fund|credits?|force[- ]?push|push\s+--force|reset\s+--hard|drop\s+table|gcloud\s+.*delete|rm\s+-rf)\b/i
@@ -55,35 +56,51 @@ export function evaluateOpenCase(caseObj) {
 
 export function solveOpenCases(caseDir, { apply = false } = {}) {
   if (!caseDir || !existsSync(caseDir)) return { ok: true, apply, scanned: 0, resolved: [], paused: [] }
-  const files = readdirSync(caseDir).filter((f) => f.endsWith('.json')).sort()
+  const files = readdirSync(caseDir).filter((f) => f.endsWith('.json')).filter((f) => f !== 'seed.json').sort()
   const resolved = []
   const paused = []
   let scanned = 0
+
+  const handleCase = (c, persist) => {
+    if (c.state !== 'open_case') return
+    scanned += 1
+    const decision = evaluateOpenCase(c)
+    if (decision.action === 'pause_operator') {
+      paused.push({ id: c.id, reason: decision.reason })
+      return
+    }
+    if (decision.action === 'resolve') {
+      resolved.push({ id: c.id, selectedOption: decision.selectedOption, score: decision.score })
+      if (apply) {
+        persist({
+          ...c,
+          state: 'resolved',
+          selectedOption: decision.selectedOption,
+          history: [
+            ...(Array.isArray(c.history) ? c.history : []),
+            { event: 'auto_resolved_by_swarm', selectedOption: decision.selectedOption, score: decision.score, at: new Date().toISOString() }
+          ]
+        })
+      }
+    }
+  }
 
   for (const f of files) {
     const fp = join(caseDir, f)
     let c
     try { c = JSON.parse(readFileSync(fp, 'utf8')) } catch { continue }
-    if (c.state !== 'open_case') continue
-    scanned += 1
-    const decision = evaluateOpenCase(c)
-    if (decision.action === 'pause_operator') {
-      paused.push({ id: c.id, reason: decision.reason })
-      continue
-    }
-    if (decision.action === 'resolve') {
-      resolved.push({ id: c.id, selectedOption: decision.selectedOption, score: decision.score })
-      if (apply) {
-        c.state = 'resolved'
-        c.selectedOption = decision.selectedOption
-        c.history = [
-          ...(Array.isArray(c.history) ? c.history : []),
-          { event: 'auto_resolved_by_swarm', selectedOption: decision.selectedOption, score: decision.score, at: new Date().toISOString() }
-        ]
-        protectedWriteFile(fp, `${JSON.stringify(c, null, 2)}\n`)
-      }
-    }
+    handleCase(c, (next) => protectedWriteFile(fp, `${JSON.stringify(next, null, 2)}\n`))
   }
+
+  // Canonical sqlite case registry (skipped when legacy .json files coexist —
+  // readCases refuses mixed dirs). Each record's payload is the case object.
+  try {
+    const registryCases = readCases(caseDir)
+    for (const c of registryCases) {
+      handleCase(c, (next) => { writeCase(caseDir, next) })
+    }
+  } catch { /* legacy dir layout: the loose-file pass already covered it */ }
+
   return { ok: true, apply, scanned, resolvedCount: resolved.length, resolved, pausedCount: paused.length, paused }
 }
 

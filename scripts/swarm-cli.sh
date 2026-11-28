@@ -179,7 +179,17 @@ case "$cmd" in
       const qDir = path.join(root, "queue/active");
       const cDir = path.join(root, "queue/cases");
       const qCount = fs.existsSync(qDir) ? fs.readdirSync(qDir).filter(f => f.endsWith(".json")).length : 0;
-      const cCount = fs.existsSync(cDir) ? fs.readdirSync(cDir).filter(f => f.endsWith(".json")).length : 0;
+      // Cases live in the sqlite registry; fall back to the legacy loose-file count.
+      let cCount = fs.existsSync(cDir) ? fs.readdirSync(cDir).filter(f => f.endsWith(".json")).length : 0;
+      const casesDb = path.join(cDir, "cases.sqlite");
+      if (fs.existsSync(casesDb)) {
+        try {
+          const { DatabaseSync } = await import("node:sqlite");
+          const db = new DatabaseSync(casesDb, { readOnly: true });
+          cCount = db.prepare("select count(*) n from case_registry_records where json_extract(payload_json, ?) = ?").get("$.state", "open_case").n;
+          db.close();
+        } catch { /* keep legacy count */ }
+      }
       const stop = fs.existsSync(path.join(root, "overnight/STOP_SWARM"));
       console.log(`swarm: sessions=${reg.sessions.length} pools=${pools} live=${idle} queue=${qCount} cases=${cCount} killSwitch=${stop ? "ARMED" : "clear"}`);
     '
