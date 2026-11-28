@@ -424,6 +424,8 @@ if (isMain) {
       --queue-dir <dir>             Task queue directory
       --case-dir <dir>              Case registry directory for multi-option cases
       --seed-json <file>            Optional JSON file of seed tasks/cases
+      --pre-scan                    WFL-309: read-only redundancy scan (codebase + prompt history) for --terms; registers nothing
+      --terms <a,b,c>               Comma-separated canonical terms for --pre-scan
       --external-root <dir>         Opt-in read-only external root (repeatable)
       --no-split-brain              Disable periodic split-brain discovery checks
       --index-workspace             Build the progressive workspace index (index only)
@@ -444,7 +446,9 @@ if (isMain) {
     externalRoots: [],
     indexWorkspace: false,
     apply: false,
-    json: false
+    json: false,
+    preScan: false,
+    terms: null
   }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
@@ -458,8 +462,25 @@ if (isMain) {
     else if (a === '--queue-dir') opts.queueDir = argv[++i]
     else if (a === '--case-dir') opts.caseDir = argv[++i]
     else if (a === '--seed-json') opts.seedJson = argv[++i]
+    else if (a === '--pre-scan') opts.preScan = true
+    else if (a === '--terms') opts.terms = argv[++i]
     else if (a === '--external-root') {
       opts.externalRoots.push({ path: argv[++i], readOnly: true })
+    }
+  }
+
+  // WFL-309 (#308): read-only pre-implementation redundancy scan. Establishes
+  // whether the concept already exists canonically (codebase) or was already
+  // phrased/ratified by the operator (prompt history) BEFORE anything registers.
+  if (opts.preScan) {
+    const { preImplementationScan } = await import('../apps/api/src/toolchain/dispatch/redundancy-scan.js')
+    try {
+      const scan = preImplementationScan({ terms: opts.terms, repoDir: opts.repoDir })
+      process.stdout.write(`${JSON.stringify(scan, null, 2)}\n`)
+      process.exit(0)
+    } catch (err) {
+      process.stderr.write(`swarm discover --pre-scan: ${err?.message || 'scan_failed'}\n`)
+      process.exit(2)
     }
   }
 
