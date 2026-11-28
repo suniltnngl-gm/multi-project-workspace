@@ -13,7 +13,9 @@ import {
   evaluateAuthorization,
   issueSupervisorSession,
   activeSupervisorSessions,
-  authorizeThenAcquireLease
+  authorizeThenAcquireLease,
+  grantAuthorization,
+  operatorAuthorizationGate
 } from '../src/toolchain/dispatch/auth-authority.js'
 
 function freshEnv() {
@@ -176,6 +178,34 @@ test('S4: atomic auth-to-lease — denied subjects never reach the lease', async
     const outOfScope = await authorizeThenAcquireLease({ subjectId: 'scoped', actionClass: 'mutate', resource: '/queue/y', acquire, env })
     assert.equal(outOfScope.authorized, false)
     assert.equal(leaseCalls, 1)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('S5: operator authorization gate — recorded grant or no-go, mechanically', () => {
+  const { root, env } = freshEnv()
+  try {
+    // No authority state: gate refuses.
+    assert.equal(operatorAuthorizationGate({ action: 'implement:auth001', env }).authorized, false)
+
+    bootstrapOperator({ operatorId: 'sunilkr', env })
+
+    // Exceptional action without a recorded grant: no-go, even for the operator id.
+    const noGrant = operatorAuthorizationGate({ action: 'implement:auth001', env })
+    assert.equal(noGrant.authorized, false)
+    assert.equal(noGrant.reason, 'operator_grant_required')
+
+    // Non-operator cannot record a grant (fail closed).
+    grantDelegation({ subjectId: 'clerk', actionClass: 'mutate', env })
+    assert.equal(grantAuthorization({ action: 'x', grantedBy: 'clerk', env }).ok, false)
+
+    // Operator records the grant; gate opens; resource scoping applies.
+    assert.equal(grantAuthorization({ action: 'implement:auth001', grantedBy: 'sunilkr', env }).ok, true)
+    const open = operatorAuthorizationGate({ action: 'implement:auth001', env })
+    assert.equal(open.authorized, true)
+    assert.equal(open.reason, 'operator_grant_active')
+    assert.equal(operatorAuthorizationGate({ action: 'implement:other-thing', env }).authorized, false)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

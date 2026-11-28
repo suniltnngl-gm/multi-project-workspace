@@ -228,3 +228,41 @@ export async function authorizeThenAcquireLease({
   const lease = await acquire(verdict)
   return { ok: true, authorized: true, verdict, lease, leaseAcquired: Boolean(lease?.ok) }
 }
+
+/**
+ * S5 (#306) — operator authorization gate for exceptional/A2 work.
+ *
+ * Exceptional actions (security-critical implementations, unrecoverable-adjacent
+ * operations) require an explicit, recorded operator grant — a spoken "yes" is not
+ * enough; it must exist in the authority document as
+ * `authorizations: [{ action, resourceScope, grantedAt }]` (bootstrap/grant below
+ * appends to it). The gate is mechanical: no recorded grant -> no go, regardless
+ * of who asks.
+ */
+export function grantAuthorization({ action, resourceScope = '*', grantedBy = null, authorityPath = null, env = process.env } = {}) {
+  if (!action || typeof action !== 'string' || !action.trim()) throw new Error('action_required')
+  const loaded = loadAuthorityState({ authorityPath, env })
+  if (!loaded.ok) throw new Error(loaded.reason)
+  // Only the operator (or an admin delegation) may record an authorization grant.
+  const gate = evaluateAuthorization({ subjectId: grantedBy, actionClass: 'admin', env })
+  if (!gate.authorized) return { ok: false, reason: gate.reason }
+  const authority = loaded.authority
+  authority.authorizations = Array.isArray(authority.authorizations) ? authority.authorizations : []
+  authority.authorizations.push({
+    action: action.trim(),
+    resourceScope: String(resourceScope || '*'),
+    grantedAt: new Date().toISOString()
+  })
+  const written = protectedWriteFile(loaded.path, `${JSON.stringify(authority, null, 2)}\n`)
+  return { ok: true, authority, backupPath: written.backupPath }
+}
+
+/** Mechanical check: is there an active operator authorization covering this action/resource? */
+export function operatorAuthorizationGate({ action, resource = null, authorityPath = null, env = process.env, readFileImpl = fsReadFileSync } = {}) {
+  const loaded = loadAuthorityState({ authorityPath, env, readFileImpl })
+  if (!loaded.ok) return { authorized: false, reason: loaded.reason, action: action || null }
+  const grants = Array.isArray(loaded.authority.authorizations) ? loaded.authority.authorizations : []
+  const match = grants.find((g) => g.action === action && (!resource || g.resourceScope === '*' || String(resource).startsWith(g.resourceScope)))
+  if (!match) return { authorized: false, reason: 'operator_grant_required', action }
+  return { authorized: true, reason: 'operator_grant_active', action, grantedAt: match.grantedAt }
+}
