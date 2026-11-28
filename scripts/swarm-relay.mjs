@@ -29,6 +29,7 @@ import {
 } from '../apps/api/src/toolchain/dispatch/overnight-supervisor.js'
 import { protectedWriteFile, snapshotRestorePoints } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
 import { applyPublishGate, deterministicRoundReview, modifiedFilesSince, readReviewVerdict, roundBaseSha } from './swarm-publish-gate.mjs'
+import { cacheAdvisory } from './prompt-cache-policy.mjs'
 export { applyPublishGate, roundBaseSha }
 import { formatQuotaStatusLine } from './swarm-doctor-quota.mjs'
 import { windowPolicyEnv } from './swarm-window-policy.mjs'
@@ -561,12 +562,16 @@ export function buildSiblingPrompt({
     promotedToParentSlot ? `On completion, you are promoted to ${promotedToParentSlot} for the next sibling.` : ''
   ].filter(Boolean).join(' ')
   if (activeJob === 'fix' || activeJob === 'build') {
+    // CACHE-C-314 static-prefix ordering: invariant instructions first, variable
+    // header/deadline/briefs last, so identical-job windows share a byte-identical
+    // prompt prefix and can hit provider prefix caches (e.g. groq gpt-oss 2h TTL).
     return [
-      `swarm relay window ${window}/${windows} -> ${sibling} (mode=${mode}, job=${activeJob}).`,
-      roleLine,
-      `Apply the smallest verified fix set for the active case/task, run focused tests, and write a concise JSON report to ${reportPath}.`,
+      `Apply the smallest verified fix set for the active case/task, run focused tests, and write a concise JSON report to the report path given below.`,
       'Never force-push, never reset --hard, never discard untracked work.',
       'Never git commit or git push in this window: non-publish windows run with SWARM_FORBID_COMMIT=1 and a scoped pre-commit hook; leave edits for W4 review and W5 gated checkpoint.',
+      `swarm relay window ${window}/${windows} -> ${sibling} (mode=${mode}, job=${activeJob}).`,
+      roleLine,
+      `Report path: ${reportPath}.`,
       deadlineLine,
       budget,
       buildBrief,
@@ -574,19 +579,20 @@ export function buildSiblingPrompt({
   }
   if (activeJob === 'case-solve') {
     return [
+      `Triage and score open multi-option cases from parent findings, pause only on unrecoverable options, and write a JSON report to the report path given below.`,
       `swarm relay window ${window}/${windows} -> ${sibling} (mode=${mode}, job=case-solve).`,
       roleLine,
-      `Triage and score open multi-option cases from parent findings, pause only on unrecoverable options, and write a JSON report to ${reportPath}.`,
+      `Report path: ${reportPath}.`,
       deadlineLine,
       budget
     ].filter(Boolean).join(' ')
   }
   if (activeJob === 'review') {
     return [
-      `swarm relay window ${window}/${windows} -> ${sibling} (mode=${mode}, job=review).`,
-      roleLine,
       'Independently cross-review the round diff and parent findings injected below, verify tests for the touched files, then reply with exactly one explicit verdict line: VERDICT: ACCEPT or VERDICT: REJECT plus a reason code and cited evidence (file:line).',
       'This CLI has no file tools: do NOT emit tool-call JSON. Your stdout is authoritative and is captured as the verdict artifact.',
+      `swarm relay window ${window}/${windows} -> ${sibling} (mode=${mode}, job=review).`,
+      roleLine,
       deadlineLine,
       budget,
       reviewBrief,
@@ -594,18 +600,20 @@ export function buildSiblingPrompt({
   }
   if (activeJob === 'publish') {
     return [
+      `Consolidate the round result and write the publish report to the report path given below. The relay enforces the gate automatically: ACCEPT runs swarm checkpoint --push scoped to this round's modified files; REJECT undoes only those files' last edit and emits replan guidance.`,
       `swarm relay window ${window}/${windows} -> ${sibling} (mode=${mode}, job=publish).`,
       roleLine,
-      `Consolidate the round result and write the publish report to ${reportPath}. The relay enforces the gate automatically: ACCEPT runs swarm checkpoint --push scoped to this round's modified files; REJECT undoes only those files' last edit and emits replan guidance.`,
+      `Report path: ${reportPath}.`,
       deadlineLine,
       budget
     ].filter(Boolean).join(' ')
   }
   return [
+    `Discover prioritized work and multi-option cases, then write a concise JSON report to the report path given below.`,
+    'Read-only exploration only: propose options, do not mutate the working tree.',
     `swarm relay window ${window}/${windows} -> ${sibling} (mode=${mode}, job=${activeJob}).`,
     roleLine,
-    `Discover prioritized work and multi-option cases, then write a concise JSON report to ${reportPath}.`,
-    'Read-only exploration only: propose options, do not mutate the working tree.',
+    `Report path: ${reportPath}.`,
     deadlineLine,
     budget
   ].filter(Boolean).join(' ')
@@ -1475,11 +1483,15 @@ export async function runRelay(argv) {
       attemptedModels: [],
       answeredModel: null,
       // #278: prompt size per attempt makes SIBLING_PROMPT_LIMITS measurable from reports.
-      promptChars: prompt.length
+      promptChars: prompt.length,
+      // CACHE-C-314: per-window cache advisory (pool/model cache eligibility + TTL).
+      cacheAdvisory: cacheAdvisory({ pool: choice.pool || null, model: choice.model || null })
     }
-    const recordAttempt = ({ model, status, exitCode = null, signal = null, error = null, res = null }) => {
+    const recordAttempt = ({ model, status, exitCode = null, signal = null, error = null, res = null, usage = null }) => {
       const attempt = { model: model ?? null, status, exitCode: exitCode ?? null, signal: res?.signal ?? signal ?? null }
       if (error) attempt.error = String(error)
+      // CACHE-C-314: capture provider usage (incl. cached input tokens) when reported.
+      if (usage && typeof usage === 'object') attempt.usage = usage
       if (res && (exitCode !== 0 || status !== 'ok')) {
         // Record evidence unconditionally: even an unclassified failure must
         // carry its tail, or the exit stays unmeasurable (the 20 hermes exit_2s

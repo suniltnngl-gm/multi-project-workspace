@@ -52,6 +52,10 @@ function readEnvVal(paths, keyName) {
 
 const home = homedir()
 let callModel
+// CACHE-C-314: last usage object seen from the provider (OpenAI-compatible
+// usage includes prompt_tokens_details.cached_tokens where supported).
+let lastUsage = null
+const captureUsage = (r) => { lastUsage = r?.usage ?? null; return r }
 
 if (opts.provider === 'cloudflare') {
   const paths = [join(home, 'Code/ENTRY/AI/cloudflare-ai/.env'), join(home, 'Code/ENTRY/ENV/.env')]
@@ -63,7 +67,7 @@ if (opts.provider === 'cloudflare') {
       method: 'POST',
       headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages })
-    }).then((x) => x.json())
+    }).then((x) => x.json()).then(captureUsage)
     return r?.result?.response ?? ''
   }
 } else if (opts.provider === 'vercel') {
@@ -75,7 +79,7 @@ if (opts.provider === 'cloudflare') {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: 'google/gemini-2.5-flash-lite', messages })
-    }).then((x) => x.json())
+    }).then((x) => x.json()).then(captureUsage)
     return r?.choices?.[0]?.message?.content ?? ''
   }
 } else if (opts.provider === 'graphn') {
@@ -90,7 +94,7 @@ if (opts.provider === 'cloudflare') {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: 'deepseek-v4.1-flash', messages })
-    }).then((x) => x.json())
+    }).then((x) => x.json()).then(captureUsage)
     return r?.choices?.[0]?.message?.content ?? ''
   }
 } else {
@@ -107,5 +111,7 @@ const res = await runDirectToolLoop({
   allowWrites: opts.allowWrites
 })
 const out = { ...res, provider: opts.provider, durationMs: Date.now() - t0 }
+// CACHE-C-314: surface the provider's usage report (cached tokens where supported).
+if (lastUsage && typeof lastUsage === 'object') out.usage = lastUsage
 process.stdout.write(opts.json ? `${JSON.stringify(out, null, 2)}\n` : `${res.finalAnswer || ''}\n`)
 process.exit(res.ok ? 0 : 1)

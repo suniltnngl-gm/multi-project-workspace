@@ -218,6 +218,8 @@ export const SIBLING_TOKENS = ['gemini-api', 'hermes', 'opencode', 'agy', 'copil
  */
 export function aggregateRelayTelemetry(reportsDir) {
   const agg = { attemptsTotal: 0, ok: 0, failureClasses: {}, failureClassesByToken: {}, missingTelemetryReports: 0 }
+  // CACHE-C-314: cached-token telemetry across pools (null when no attempt reported usage).
+  agg.cacheUsage = { attemptsWithUsage: 0, cachedInputTokens: 0, inputTokens: 0, byPool: {} }
   if (!reportsDir || !existsSync(reportsDir)) return agg
   for (const f of readdirSync(reportsDir).filter((x) => x.startsWith('relay-pipeline-') && x.endsWith('.json'))) {
     let doc
@@ -234,6 +236,23 @@ export function aggregateRelayTelemetry(reportsDir) {
       for (const a of Array.isArray(w?.attemptedModels) ? w.attemptedModels : []) {
         sawAttempt = true
         agg.attemptsTotal += 1
+        // CACHE-C-314: usage objects (swarm-direct surfaces provider usage; relay
+        // records attempt.usage when present). Track cached vs input tokens.
+        const usage = a.usage && typeof a.usage === 'object' ? a.usage : null
+        if (usage) {
+          const cached = Number(usage.cached_input_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? 0) || 0
+          const input = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0) || 0
+          agg.cacheUsage.attemptsWithUsage += 1
+          agg.cacheUsage.cachedInputTokens += cached
+          agg.cacheUsage.inputTokens += input
+          // Attribute only on attempt-level pool; the doc-level advisory describes
+          // the window's primary attempt, not every sibling in it.
+          const poolKey = String(a.pool || 'unknown')
+          const perPool = agg.cacheUsage.byPool[poolKey] || (agg.cacheUsage.byPool[poolKey] = { attemptsWithUsage: 0, cachedInputTokens: 0, inputTokens: 0 })
+          perPool.attemptsWithUsage += 1
+          perPool.cachedInputTokens += cached
+          perPool.inputTokens += input
+        }
         if (a.status === 'ok' || a.status === 'ok_no_findings') agg.ok += 1
         else if (a.failureClass) {
           agg.failureClasses[a.failureClass] = (agg.failureClasses[a.failureClass] || 0) + 1
