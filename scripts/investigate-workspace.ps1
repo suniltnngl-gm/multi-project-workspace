@@ -188,7 +188,7 @@ foreach ($dir in $dirs) {
 
 Write-Header "SUMMARY"
 Write-Info "DEVOPS:          Harness/backup tooling, orchestration scripts, probe outputs"
-Write-Info "public-code:     Agent orchestration framework, TODO register, simulations"
+Write-Info "public-code:     Agent orchestration framework, task register, simulations"
 Write-Info "delta-code:      Delta-Code platform (diff engine, satellites, workspaces, workflows)"
 Write-Info ""
 Write-Info "Note: delta-code\bundle-inspect appears to be a copy of tmp\bundle-inspect"
