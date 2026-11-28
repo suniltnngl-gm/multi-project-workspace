@@ -45,6 +45,16 @@ export const DEFAULT_ALIASES = Object.freeze({
     haulicination: 'hallucination',
     sessiom: 'session',
     versal: 'vercel'
+  }),
+  // Canonical phase labels: shorthand the operator uses -> what the phase actually
+  // does, so briefs/LEDGER entries carry self-describing names. Not term-rewrites:
+  // detection adds to `phases`, it does not rewrite the prompt text.
+  phases: Object.freeze({
+    discover: 'discover and register cases/tasks',
+    decide: 'decide: evaluate options and select winner',
+    solve: 'solve: run options in sandbox and resolve',
+    measure: 'measure: verify decision outcomes and record evidence',
+    review: 'review: cross-examine delivered work against gates'
   })
 })
 
@@ -68,12 +78,13 @@ export function loadTranslationRegistry({ registryPath = null, env = process.env
     path,
     pools: { ...DEFAULT_ALIASES.pools, ...(persisted?.pools || {}) },
     siblings: { ...DEFAULT_ALIASES.siblings, ...(persisted?.siblings || {}) },
-    terms: { ...DEFAULT_ALIASES.terms, ...(persisted?.terms || {}) }
+    terms: { ...DEFAULT_ALIASES.terms, ...(persisted?.terms || {}) },
+    phases: { ...DEFAULT_ALIASES.phases, ...(persisted?.phases || {}) }
   }
 }
 
 export function saveTranslationAlias(category, alias, canonical, { registryPath = null, env = process.env } = {}) {
-  if (!['pools', 'siblings', 'terms'].includes(category)) {
+  if (!['pools', 'siblings', 'terms', 'phases'].includes(category)) {
     throw new Error(`invalid_translation_category:${category}`)
   }
   const key = String(alias || '').trim().toLowerCase()
@@ -87,7 +98,8 @@ export function saveTranslationAlias(category, alias, canonical, { registryPath 
     updatedAt: new Date().toISOString(),
     pools: reg.pools,
     siblings: reg.siblings,
-    terms: reg.terms
+    terms: reg.terms,
+    phases: reg.phases
   }
   protectedWriteFile(reg.path, `${JSON.stringify(payload, null, 2)}\n`)
   return payload
@@ -129,6 +141,16 @@ export function translatePromptDeterministic(prompt, { registry = null, registry
   const taskIds = [...new Set([...normalized.matchAll(/#(\d+)/g)].map((m) => `#${m[1]}`))]
   const canonicalTerms = [...new Set(appliedAliases.map((a) => a.to))]
 
+  // Phase detection (W1 follow-up, #294): which canonical loop phases the prompt
+  // touches, with their self-describing labels. Detection only — the prompt text
+  // is never rewritten for phases.
+  const phases = []
+  for (const [phase, label] of Object.entries(reg.phases || {})) {
+    if (new RegExp(`\\b${escapeRegExp(phase)}\\b`, 'i').test(normalized)) {
+      phases.push({ phase, label })
+    }
+  }
+
   return {
     layer: 'deterministic',
     raw,
@@ -137,6 +159,7 @@ export function translatePromptDeterministic(prompt, { registry = null, registry
     canonicalTerms,
     targetPools: [...targetPools],
     taskIds,
+    phases,
     constraints: [],
     appliedAliases,
     fallbackUsed: false

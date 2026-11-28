@@ -93,3 +93,15 @@ test('recordTranslationUsage requires a path; stats tolerate corrupt lines', () 
     assert.equal(stats.adapters[0].total, 1)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
+
+test('#294: phases registry — canonical labels detected from shorthand, prompt text untouched', async () => {
+  const { translatePromptDeterministic } = await import('../src/toolchain/dispatch/translation-registry.js')
+  const out = translatePromptDeterministic('Discover then measure the fix for #287; maybe solve too')
+  assert.deepEqual(out.phases.map((p) => p.phase), ['discover', 'solve', 'measure'])
+  const disc = out.phases.find((p) => p.phase === 'discover')
+  assert.equal(disc.label, 'discover and register cases/tasks')
+  // Detection must not rewrite the prompt text.
+  assert.equal(out.normalized, 'Discover then measure the fix for #287; maybe solve too')
+  // Operator-free prompt: no phases.
+  assert.deepEqual(translatePromptDeterministic('bump the version').phases, [])
+})
