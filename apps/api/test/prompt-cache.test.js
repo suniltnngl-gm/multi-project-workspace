@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { POOL_CACHE_PROFILES, cacheAdvisory } from '../../../scripts/prompt-cache-policy.mjs'
-import { buildSiblingPrompt } from '../../../scripts/swarm-relay.mjs'
+import { buildSiblingPrompt, buildSiblingCommand, parseOpencodeUsage } from '../../../scripts/swarm-relay.mjs'
 import { aggregateRelayTelemetry } from '../../../scripts/swarm-measure.mjs'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -90,4 +90,38 @@ test('CACHE-C-314: aggregateRelayTelemetry sums cached tokens per pool from atte
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('CACHE-C-314/#313: parseOpencodeUsage extracts tokens.cache from step_finish JSON lines', () => {
+  // Shape captured live from `opencode run --standalone --format json` (2026-11-28 probe).
+  const stdout = [
+    '{"type":"step_start","timestamp":1795876846000,"part":{"type":"step-start"}}',
+    '{"type":"text","part":{"type":"text","text":"PROBE-1"}}',
+    '{"type":"step_finish","timestamp":1795876907513,"part":{"type":"step-finish","reason":"stop","cost":0.0006,"tokens":{"input":7510,"output":13,"reasoning":17,"cache":{"read":7424,"write":0}}}}'
+  ].join('\n')
+  const usage = parseOpencodeUsage(stdout)
+  assert.deepEqual(usage, { input_tokens: 7510, output_tokens: 13, cached_input_tokens: 7424, cache_write_tokens: 0 })
+  assert.equal(parseOpencodeUsage('plain text output\nVERDICT: ACCEPT'), null)
+  assert.equal(parseOpencodeUsage(''), null)
+  assert.equal(parseOpencodeUsage('{"type":"step_finish","part":{"tokens":"junk"}}'), null)
+})
+
+test('CACHE-C-314/#313: opencode gains --format json only for usage-harvest windows', () => {
+  const withJson = buildSiblingCommand('opencode', { prompt: 'p', usageJson: true })
+  assert.deepEqual(withJson.args, ['run', '--standalone', '--model', 'opencode/deepseek-v4.1-flash-free', '--format', 'json', 'p'])
+  const withoutJson = buildSiblingCommand('opencode', { prompt: 'p' })
+  assert.equal(withoutJson.args.includes('--format'), false)
+  // review windows keep plain text stdout (the verdict artifact), even when asked.
+  assert.equal(buildSiblingCommand('opencode', { prompt: 'p', usageJson: true, readOnly: true }).args.includes('--format'), true,
+    'usageJson is the explicit opt-in; readOnly alone must not flip the format')
+})
+
+test('CACHE-C-314: cloudflare-workers-ai is explicitly not cacheable, others stay cacheUnknown', () => {
+  const cf = cacheAdvisory({ pool: 'cloudflare-workers-ai', model: '@cf/meta/llama-3.3-70b' })
+  assert.equal(cf.cacheEligible, false)
+  assert.equal(cf.cacheUnknown, true)
+  assert.equal(cf.reason, 'pool_no_published_cache_contract')
+  const gw = cacheAdvisory({ pool: 'vercel-ai-gateway', model: 'google/gemini-2.5-flash-lite' })
+  assert.equal(gw.cacheUnknown, true)
+  assert.equal(gw.reason, undefined)
 })

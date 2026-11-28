@@ -169,6 +169,34 @@ export function parseSiblingVerdict(stdoutText) {
   return null
 }
 
+/**
+ * CACHE-C-314 / #313: harvest token usage from an opencode sibling run with
+ * `--format json`. Output is newline-delimited JSON events; the final
+ * `step_finish` part carries `tokens` ({input, output, reasoning, cache:{read, write}}).
+ * Returns a provider-neutral usage object or null when nothing is parseable —
+ * never throws (telemetry must not break the window).
+ */
+export function parseOpencodeUsage(stdoutText) {
+  let best = null
+  for (const line of String(stdoutText || '').split(/\r?\n/)) {
+    const t = line.trim()
+    if (!t.startsWith('{')) continue
+    let ev
+    try { ev = JSON.parse(t) } catch { continue }
+    const tokens = ev?.type === 'step_finish' && ev?.part && typeof ev.part === 'object' ? ev.part.tokens : null
+    if (!tokens || typeof tokens !== 'object') continue
+    const input = Number(tokens.input ?? 0) || 0
+    const output = Number(tokens.output ?? 0) || 0
+    best = {
+      input_tokens: input,
+      output_tokens: output,
+      cached_input_tokens: Number(tokens.cache?.read ?? 0) || 0,
+      cache_write_tokens: Number(tokens.cache?.write ?? 0) || 0
+    }
+  }
+  return best
+}
+
 /** Bounded, $0 pre-pack injected into the W4 prompt so a file-less CLI can still review. */
 export function buildReviewBrief({ repoDir, baseSha = null, parentFindingsPath = null, det = null, maxBytes = 12000 } = {}) {
   const range = baseSha || 'HEAD'
@@ -636,13 +664,13 @@ function envBinName(sibling) {
  */
 const MODEL_FLAG = Object.freeze({ __default: '--model', codex: '-m' })
 
-export function buildSiblingCommand(sibling, { prompt, model = null, cwd = null, readOnly = true } = {}) {
+export function buildSiblingCommand(sibling, { prompt, model = null, cwd = null, readOnly = true, usageJson = false } = {}) {
   const override = process.env[envBinName(sibling)]
   const workdir = cwd || process.cwd()
   let base
   if (override && override.trim()) base = override.trim().split(/\s+/)
   else if (sibling === 'hermes') base = ['hermes', '-z']
-  else if (sibling === 'opencode') base = ['opencode', 'run', '--standalone', '--model', 'opencode/deepseek-v4.1-flash-free']
+  else if (sibling === 'opencode') base = ['opencode', 'run', '--standalone', '--model', 'opencode/deepseek-v4.1-flash-free', ...(usageJson ? ['--format', 'json'] : [])]
   else if (sibling === 'direct') base = [process.execPath, resolve(new URL('./swarm-direct.mjs', import.meta.url).pathname), '--provider', 'cloudflare', '--prompt']
   else if (sibling === 'direct-graphn') base = [process.execPath, resolve(new URL('./swarm-direct.mjs', import.meta.url).pathname), '--provider', 'graphn', '--prompt']
   else if (sibling === 'direct-vercel') base = [process.execPath, resolve(new URL('./swarm-direct.mjs', import.meta.url).pathname), '--provider', 'vercel', '--prompt']
@@ -1237,7 +1265,11 @@ export async function runRelay(argv) {
     // Read-only jobs (discover/review) must get the headless read-only flag set;
     // build/fix/publish windows opt into the CLI's write mode explicitly (#205).
     const readOnlyWindow = assignment.job === 'discover' || assignment.job === 'review'
-    const { command, args } = buildSiblingCommand(choice.sibling, { prompt, model: choice.model, cwd, readOnly: readOnlyWindow })
+    // CACHE-C-314: opencode windows (except review, whose stdout is the verdict
+    // artifact) run with --format json so token/cache usage can be harvested.
+    const usageJsonWindow = choice.sibling === 'opencode' && assignment.job !== 'review'
+    const { command, args } = buildSiblingCommand(choice.sibling, { prompt, model: choice.model, cwd, readOnly: readOnlyWindow, usageJson: usageJsonWindow })
+    const attemptUsage = (sibling, res) => (sibling === 'opencode' ? parseOpencodeUsage(res?.stdout) : null)
     // Defense in depth: a publish sibling that self-invokes `swarm checkpoint` is bound
     // to this round's ACCEPT artifact; on a REJECT window no path is exported.
     const roundVerdictPath = roundVerdictPaths.get(assignment.round) || null
@@ -1521,7 +1553,7 @@ export async function runRelay(argv) {
 
     if (exitCode === 0) {
       windowTelemetry.answeredModel = choice.model || null
-      recordAttempt({ model: choice.model, status: 'ok', exitCode: 0, signal: res.signal || null })
+      recordAttempt({ model: choice.model, status: 'ok', exitCode: 0, signal: res.signal || null, usage: attemptUsage(choice.sibling, res) })
       flushWindowReport()
     } else if (res.error && res.error.code === 'ENOENT') {
       // Missing CLI: account the skipped call once, then keep relaying.
@@ -1536,7 +1568,8 @@ export async function runRelay(argv) {
         exitCode,
         signal: res.signal || null,
         error: res.error ? String(res.error.code || res.error.message) : null,
-        res
+        res,
+        usage: attemptUsage(choice.sibling, res)
       })
 
       // Exactly ONE alternate gemini-api model per window, then straight to hermes.

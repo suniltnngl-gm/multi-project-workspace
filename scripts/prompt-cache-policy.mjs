@@ -43,8 +43,21 @@ export const POOL_CACHE_PROFILES = Object.freeze({
     sliding: true,
     discount: 0.5,
     cacheableModelPattern: GPT_OSS_PATTERN
+  }),
+  // Cloudflare Workers AI: no published prompt-cache contract (verified 2026-11-28) —
+  // explicitly NOT cacheable rather than unknown.
+  'cloudflare-workers-ai': Object.freeze({
+    provider: 'cloudflare',
+    cacheable: false,
+    reason: 'pool_no_published_cache_contract'
   })
 })
+// Pools left out of the map (nous-hermes-free, vercel-ai-gateway, graphn-ai,
+// gemini-api-key, opencode-console-{google,nvidia,openrouter}, agy-*, github-copilot,
+// mistral-vibe, codex-exec, local-llama-cpp, cline-free) have no published cache
+// contract on this deployment: cacheAdvisory reports cacheUnknown=true. Never
+// schedule for cache savings on a cacheUnknown pool; measure first (task #313
+// harvests opencode tokens.cache; swarm-direct surfaces provider usage).
 
 /**
  * Advisory for one attempt. Returns a plain JSON-able object:
@@ -57,7 +70,13 @@ export const POOL_CACHE_PROFILES = Object.freeze({
 export function cacheAdvisory({ pool, model, lastAttemptAt = null, now = null } = {}) {
   const profile = pool ? POOL_CACHE_PROFILES[pool] : null
   if (!profile || !profile.cacheable) {
-    return { pool: pool || null, model: model || null, cacheEligible: false, cacheUnknown: true }
+    return {
+      pool: pool || null,
+      model: model || null,
+      cacheEligible: false,
+      cacheUnknown: true,
+      ...(profile && !profile.cacheable && profile.reason ? { reason: profile.reason } : {})
+    }
   }
   const modelEligible = Boolean(model) && profile.cacheableModelPattern.test(String(model))
   const advisory = {
