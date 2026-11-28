@@ -301,7 +301,7 @@ case "$cmd" in
         colab: path.join(home, ".config/colab-cli"),
         local_llama: path.join(home, ".local/state/local-llama-cli/sessions"),
         remote_gpu: path.join(home, ".local/state/remote-gpu-cli/output"),
-        ai_catalog: path.join(home, "Code/AI/opencode-consol"),
+        ai_catalog: path.join(home, "Code/ENTRY/AI/opencode-consol"),
         reports: path.join(root, "reports")
       };
       const metaPath = path.join(root, "notifications/wakeup-meta.json");

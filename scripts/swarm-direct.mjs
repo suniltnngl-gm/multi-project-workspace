@@ -54,7 +54,7 @@ const home = homedir()
 let callModel
 
 if (opts.provider === 'cloudflare') {
-  const paths = [join(home, 'Code/AI/cloudflare-ai/.env'), join(home, 'Code/ENV.env')]
+  const paths = [join(home, 'Code/ENTRY/AI/cloudflare-ai/.env'), join(home, 'Code/ENTRY/ENV/.env')]
   const tok = readEnvVal(paths, 'CLOUDFLARE_API_TOKEN')
   const acc = readEnvVal(paths, 'CLOUDFLARE_ACCOUNT_ID')
   if (!tok || !acc) { process.stderr.write('swarm-direct: missing CLOUDFLARE_API_TOKEN/ACCOUNT_ID\n'); process.exit(1) }
@@ -67,7 +67,7 @@ if (opts.provider === 'cloudflare') {
     return r?.result?.response ?? ''
   }
 } else if (opts.provider === 'vercel') {
-  const paths = [join(home, 'Code/AI/vercel/.env'), join(home, 'Code/ENV.env')]
+  const paths = [join(home, 'Code/ENTRY/AI/vercel/.env'), join(home, 'Code/ENTRY/ENV/.env')]
   const key = readEnvVal(paths, 'AI_GATEWAY_API_KEY')
   if (!key) { process.stderr.write('swarm-direct: missing AI_GATEWAY_API_KEY\n'); process.exit(1) }
   callModel = async (messages) => {
@@ -81,7 +81,7 @@ if (opts.provider === 'cloudflare') {
 } else if (opts.provider === 'graphn') {
   // Graphn AI: OpenAI-compatible gateway (model.graphn.ai). Credentials live in a
   // plain env file outside any repo; it must never be committed.
-  const paths = [join(home, 'Code/AI/graphn/graphn.env'), join(home, 'Code/ENV.env')]
+  const paths = [join(home, 'Code/ENTRY/AI/graphn/graphn.env'), join(home, 'Code/ENTRY/ENV/.env')]
   const key = readEnvVal(paths, 'OPENAI_API_KEY')
   const baseUrl = readEnvVal(paths, 'OPENAI_BASE_URL') || 'https://model.graphn.ai/v1'
   if (!key) { process.stderr.write('swarm-direct: missing OPENAI_API_KEY (graphn.env)\\n'); process.exit(1) }
