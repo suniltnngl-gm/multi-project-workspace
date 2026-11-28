@@ -266,3 +266,26 @@ export function operatorAuthorizationGate({ action, resource = null, authorityPa
   if (!match) return { authorized: false, reason: 'operator_grant_required', action }
   return { authorized: true, reason: 'operator_grant_active', action, grantedAt: match.grantedAt }
 }
+
+/**
+ * #307 — entrypoint pre-flight gate. Used by mutating entrypoints (relay
+ * --execute, queue-run tick) before taking the orchestrator lease.
+ *
+ * Two modes, both explicit in the verdict:
+ *  - authority state exists -> mechanical verdict (fail closed);
+ *  - authority state missing -> single-user local mode (the operator IS the
+ *    machine): authorized, but recorded as such so it is auditable. Deployed
+ *    multi-user setups always have an authority state, so they never see this.
+ */
+export function entrypointAuthorizationGate({ actorId = null, actionClass = 'mutate', resource = null, env = process.env, now = new Date() } = {}) {
+  const path = authorityStatePath(env)
+  if (!existsSync(path)) {
+    const localActor = actorId || process.env.SWARM_ACTOR_ID || 'local-operator'
+    return { authorized: true, mode: 'single_user_local', actorId: localActor, actionClass, reason: 'authority_state_missing_local_mode' }
+  }
+  // Unset actor id on a machine WITH an authority state means the local operator
+  // (root of trust) — an explicit delegation still requires SWARM_ACTOR_ID.
+  const subject = actorId || process.env.SWARM_ACTOR_ID || loadAuthorityState({ env })?.authority?.operator?.id
+  const verdict = evaluateAuthorization({ subjectId: subject, actionClass, resource, now, env })
+  return { ...verdict, actorId: subject, actionClass, mode: 'mechanical' }
+}

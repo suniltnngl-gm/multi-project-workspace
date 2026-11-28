@@ -32,6 +32,7 @@ import { applyPublishGate, deterministicRoundReview, modifiedFilesSince, readRev
 export { applyPublishGate, roundBaseSha }
 import { formatQuotaStatusLine } from './swarm-doctor-quota.mjs'
 import { windowPolicyEnv } from './swarm-window-policy.mjs'
+import { entrypointAuthorizationGate } from '../apps/api/src/toolchain/dispatch/auth-authority.js'
 import {
   acquireOrchestratorLock,
   releaseOrchestratorLock,
@@ -991,6 +992,13 @@ export async function runRelay(argv) {
   // MC-206-LOCK-SCOPE: the shared orchestrator lease comes first (consistent
   // ordering with overnight/run/queue-run/case-solve prevents ABBA deadlock),
   // giving full cross-entrypoint mutual exclusion.
+  // AUTH-001 #307: mechanical authorization pre-flight — an unauthorized actor
+  // never reaches the lease. Fail-closed exit 4.
+  const authGate = entrypointAuthorizationGate({ actorId: process.env.SWARM_ACTOR_ID || null, actionClass: 'mutate', resource: '/orchestrator', env: process.env })
+  if (!authGate.authorized) {
+    process.stderr.write(`swarm-relay: authorization denied: ${authGate.reason} actor=${authGate.actorId}\n`)
+    process.exit(4)
+  }
   for (const [resource, dir] of [['orchestrator', statePaths().root], ['relay-ring', lockDir], ['quota-ledger', stateDir]]) {
     const res = acquireResource(resource, dir)
     if (!res.ok) { failure = res; break }

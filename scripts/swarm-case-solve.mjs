@@ -16,6 +16,7 @@ import { acquireOrchestratorLock, releaseOrchestratorLock } from './swarm-orches
 import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
 import { readCases, writeCase } from '../apps/api/src/toolchain/dispatch/case-registry.js'
 import { classifyMutationRisk } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
+import { entrypointAuthorizationGate } from '../apps/api/src/toolchain/dispatch/auth-authority.js'
 import { simulateCaseOptions } from '../apps/api/src/toolchain/dispatch/case-sandbox.js'
 
 const UNRECOVERABLE_RE = /\b(billing|fund|credits?|force[- ]?push|push\s+--force|reset\s+--hard|drop\s+table|gcloud\s+.*delete|rm\s+-rf)\b/i
@@ -255,6 +256,14 @@ if (isMain) {
   // Inherited lease (e.g. spawned inside overnight's full cycle): the parent already
   // holds the shared orchestrator lease, so re-acquiring would self-deadlock.
   const leaseInherited = Boolean(process.env.SWARM_ORCHESTRATOR_LEASE_PARENT)
+
+  // AUTH-001 #307: mechanical authorization pre-flight — an unauthorized actor
+  // never reaches the lease. Fail-closed exit 4.
+  const authGate = entrypointAuthorizationGate({ actorId: process.env.SWARM_ACTOR_ID || null, actionClass: 'mutate', resource: '/orchestrator', env: process.env })
+  if (!authGate.authorized) {
+    process.stderr.write(`auth denied: ${authGate.reason} actor=${authGate.actorId}\n`)
+    process.exit(4)
+  }
   if (apply && !leaseInherited) {
     const orchRes = acquireOrchestratorLock({
       stateDir: statePaths().root,

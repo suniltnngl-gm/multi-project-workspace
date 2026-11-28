@@ -27,6 +27,7 @@ import {
 import { scanAndCompactLocalSessions } from '../apps/api/src/toolchain/dispatch/session-compactor.js'
 import { createLeaseStore } from '../apps/api/src/toolchain/dispatch/lease-store.js'
 import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
+import { entrypointAuthorizationGate } from '../apps/api/src/toolchain/dispatch/auth-authority.js'
 import {
   acquireOrchestratorLock,
   releaseOrchestratorLock,
@@ -126,6 +127,13 @@ try {
 let overnightLease = null
 const overnightLeaseRunId = `overnight-${startedAtMs}`
 if (opts.execute) {
+  // AUTH-001 #307: mechanical authorization pre-flight — an unauthorized actor
+  // never reaches the lease. Fail-closed exit 4.
+  const authGate = entrypointAuthorizationGate({ actorId: process.env.SWARM_ACTOR_ID || null, actionClass: 'mutate', resource: '/orchestrator', env: opts.stateDir ? { ...process.env, SWARM_STATE_DIR: opts.stateDir } : process.env })
+  if (!authGate.authorized) {
+    process.stderr.write(`auth denied: ${authGate.reason} actor=${authGate.actorId}\n`)
+    process.exit(4)
+  }
   const orchRes = acquireOrchestratorLock({
     stateDir: statePaths().root,
     runId: overnightLeaseRunId,

@@ -30,6 +30,7 @@ import { evaluateFiveHourCap } from '../apps/api/src/toolchain/dispatch/burn-rat
 import { createLeaseStore } from '../apps/api/src/toolchain/dispatch/lease-store.js'
 import { acquireOrchestratorLock, releaseOrchestratorLock } from './swarm-orchestrator-lock.mjs'
 import { classifyFailure, classifyFailureTail } from './swarm-relay.mjs'
+import { entrypointAuthorizationGate } from '../apps/api/src/toolchain/dispatch/auth-authority.js'
 
 const argv = process.argv.slice(2)
 const opts = {}
@@ -211,6 +212,14 @@ async function main() {
   const parentLeaseRunId = process.env.SWARM_ORCHESTRATOR_LEASE_PARENT || null
   const orchRunId = `queue-run-${process.pid}-${Date.now()}`
   let orchLease = null
+
+  // AUTH-001 #307: mechanical authorization pre-flight — an unauthorized actor
+  // never reaches the lease. Fail-closed exit 4.
+  const authGate = entrypointAuthorizationGate({ actorId: process.env.SWARM_ACTOR_ID || null, actionClass: 'mutate', resource: '/orchestrator', env: opts['state-dir'] ? { ...process.env, SWARM_STATE_DIR: opts['state-dir'] } : process.env })
+  if (!authGate.authorized) {
+    process.stderr.write(`auth denied: ${authGate.reason} actor=${authGate.actorId}\n`)
+    process.exit(4)
+  }
   if (!parentLeaseRunId) {
     const orchRes = acquireOrchestratorLock({
       stateDir: statePaths().root,

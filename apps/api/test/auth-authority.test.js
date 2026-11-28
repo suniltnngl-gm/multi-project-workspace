@@ -15,7 +15,8 @@ import {
   activeSupervisorSessions,
   authorizeThenAcquireLease,
   grantAuthorization,
-  operatorAuthorizationGate
+  operatorAuthorizationGate,
+  entrypointAuthorizationGate
 } from '../src/toolchain/dispatch/auth-authority.js'
 
 function freshEnv() {
@@ -206,6 +207,32 @@ test('S5: operator authorization gate — recorded grant or no-go, mechanically'
     assert.equal(open.authorized, true)
     assert.equal(open.reason, 'operator_grant_active')
     assert.equal(operatorAuthorizationGate({ action: 'implement:other-thing', env }).authorized, false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('#307: entrypoint pre-flight — mechanical when authority exists, single-user-local when absent', () => {
+  const { root, env } = freshEnv()
+  try {
+    // No authority state (e.g. fresh temp state / single-user workstation):
+    // authorized, but explicitly recorded as local mode.
+    const local = entrypointAuthorizationGate({ actorId: 'sunilkr', actionClass: 'mutate', env })
+    assert.equal(local.authorized, true)
+    assert.equal(local.mode, 'single_user_local')
+    assert.match(local.reason, /authority_state_missing/)
+
+    // With authority state: mechanical, unauthorized actor fails closed.
+    bootstrapOperator({ operatorId: 'sunilkr', env })
+    const denied = entrypointAuthorizationGate({ actorId: 'stranger', actionClass: 'mutate', env })
+    assert.equal(denied.authorized, false)
+    assert.equal(denied.mode, 'mechanical')
+    assert.equal(entrypointAuthorizationGate({ actorId: 'sunilkr', actionClass: 'mutate', env }).authorized, true)
+    // Unset actor id defaults to the recorded operator (root of trust), so the
+    // local workstation keeps working once an authority state is bootstrapped.
+    const implicitOperator = entrypointAuthorizationGate({ actionClass: 'mutate', env })
+    assert.equal(implicitOperator.authorized, true)
+    assert.equal(implicitOperator.actorId, 'sunilkr')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
