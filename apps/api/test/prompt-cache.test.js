@@ -1,7 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { POOL_CACHE_PROFILES, cacheAdvisory } from '../../../scripts/prompt-cache-policy.mjs'
-import { buildSiblingPrompt, buildSiblingCommand, parseOpencodeUsage } from '../../../scripts/swarm-relay.mjs'
+import { buildSiblingPrompt, buildSiblingCommand, parseOpencodeUsage, parseOpencodeSessionId, resolveResumeSessionId } from '../../../scripts/swarm-relay.mjs'
+import { advanceRingState, createRingState } from '../../../scripts/swarm-ring-state.mjs'
 import { aggregateRelayTelemetry } from '../../../scripts/swarm-measure.mjs'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -124,4 +125,55 @@ test('CACHE-C-314: cloudflare-workers-ai is explicitly not cacheable, others sta
   const gw = cacheAdvisory({ pool: 'vercel-ai-gateway', model: 'google/gemini-2.5-flash-lite' })
   assert.equal(gw.cacheUnknown, true)
   assert.equal(gw.reason, undefined)
+})
+
+test('SESS-C-315: parseOpencodeSessionId returns the last event sessionID', () => {
+  const stdout = [
+    '{"type":"step_start","sessionID":"ses_aaa","part":{}}',
+    '{"type":"step_finish","sessionID":"ses_bbb","part":{"tokens":{}}}'
+  ].join('\n')
+  assert.equal(parseOpencodeSessionId(stdout), 'ses_bbb')
+  assert.equal(parseOpencodeSessionId('no json here'), null)
+  assert.equal(parseOpencodeSessionId(''), null)
+})
+
+test('SESS-C-315: ring state persists per-slot sessionId/sessionOkAt across advances', () => {
+  let state = createRingState({ siblings: ['opencode', 'hermes'], mode: 'pipeline', nowIso: '2026-11-28T10:00:00.000Z' })
+  state = advanceRingState(state, { window: 1, sibling: 'opencode', siblingSlot: 'sibling1' }, {
+    sessionId: 'ses_abc', sessionOkAt: '2026-11-28T10:01:00.000Z'
+  }, { nowIso: '2026-11-28T10:01:00.000Z' })
+  assert.equal(state.slots.sibling1.sessionId, 'ses_abc')
+  assert.equal(state.slots.sibling1.sessionOkAt, '2026-11-28T10:01:00.000Z')
+  // A later window without a session keeps the previous one (resume continuity).
+  state = advanceRingState(state, { window: 2, sibling: 'opencode', siblingSlot: 'sibling1' }, {}, { nowIso: '2026-11-28T10:05:00.000Z' })
+  assert.equal(state.slots.sibling1.sessionId, 'ses_abc')
+})
+
+test('SESS-C-315: resolveResumeSessionId gates on sibling, job, slot state, and pool TTL', () => {
+  const slot = { sessionId: 'ses_abc', sessionOkAt: '2026-11-28T10:00:00.000Z' }
+  // Warm mutating window on a groq gpt-oss model: resume.
+  assert.equal(resolveResumeSessionId({
+    sibling: 'opencode', job: 'build', slot, pool: 'opencode-console-groq',
+    model: 'openai/gpt-oss-120b', nowIso: '2026-11-28T11:00:00.000Z'
+  }), 'ses_abc')
+  // Past the 2h sliding TTL: fresh.
+  assert.equal(resolveResumeSessionId({
+    sibling: 'opencode', job: 'build', slot, pool: 'opencode-console-groq',
+    model: 'openai/gpt-oss-120b', nowIso: '2026-11-28T13:00:00.000Z'
+  }), null)
+  // Read-only jobs always fresh (no context bleed).
+  assert.equal(resolveResumeSessionId({ sibling: 'opencode', job: 'review', slot, pool: 'opencode-console-groq', model: 'openai/gpt-oss-120b' }), null)
+  assert.equal(resolveResumeSessionId({ sibling: 'opencode', job: 'discover', readOnly: true, slot, pool: 'opencode-console-groq', model: 'openai/gpt-oss-120b' }), null)
+  // Non-opencode siblings and empty slots: never resume.
+  assert.equal(resolveResumeSessionId({ sibling: 'hermes', job: 'build', slot, nowIso: '2026-11-28T10:30:00.000Z' }), null)
+  assert.equal(resolveResumeSessionId({ sibling: 'opencode', job: 'build', slot: null }), null)
+  // Unknown pool (cacheUnknown): no warm signal, never resume.
+  assert.equal(resolveResumeSessionId({ sibling: 'opencode', job: 'build', slot, pool: 'nous-hermes-free', nowIso: '2026-11-28T10:30:00.000Z' }), null)
+})
+
+test('SESS-C-315: buildSiblingCommand appends -s <id> only when resuming', () => {
+  const resume = buildSiblingCommand('opencode', { prompt: 'p', usageJson: true, resumeSessionId: 'ses_abc' })
+  assert.deepEqual(resume.args, ['run', '--standalone', '--model', 'opencode/deepseek-v4.1-flash-free', '--format', 'json', '-s', 'ses_abc', 'p'])
+  const fresh = buildSiblingCommand('opencode', { prompt: 'p', usageJson: true })
+  assert.equal(fresh.args.includes('-s'), false)
 })

@@ -102,6 +102,10 @@ export function advanceRingState(state, assignment, detail = {}, { nowIso = new 
   slot.cli = assignment.sibling
   slot.model = detail.model ?? slot.model
   slot.pool = detail.pool ?? slot.pool
+  // SESS-C-315: per-slot CLI session id + last-ok timestamp, so the relay can
+  // resume the sibling's session while the pool's prompt-cache TTL is still warm.
+  slot.sessionId = detail.sessionId ?? slot.sessionId ?? null
+  slot.sessionOkAt = detail.sessionOkAt ?? slot.sessionOkAt ?? null
   slot.parentSlot = assignment.parentSlot || null
   slot.findingsPath = detail.findingsPath ?? slot.findingsPath
 

@@ -197,6 +197,38 @@ export function parseOpencodeUsage(stdoutText) {
   return best
 }
 
+/** SESS-C-315: last sessionID from opencode --format json event lines (null when absent). */
+export function parseOpencodeSessionId(stdoutText) {
+  let best = null
+  for (const line of String(stdoutText || '').split(/\r?\n/)) {
+    const t = line.trim()
+    if (!t.startsWith('{')) continue
+    try {
+      const ev = JSON.parse(t)
+      if (typeof ev?.sessionID === 'string' && ev.sessionID) best = ev.sessionID
+    } catch { /* non-JSON line */ }
+  }
+  return best
+}
+
+/**
+ * SESS-C-315: TTL-gated per-sibling session resume. A window may resume the
+ * sibling slot's stored CLI session only when ALL hold:
+ *  - sibling is opencode (the only CLI we both create and resume this way),
+ *  - the job is a mutating window (read-only discover/review always start a
+ *    fresh session — no cross-window context bleed),
+ *  - the slot carries a sessionId + last-ok timestamp,
+ *  - the slot's pool TTL (cacheAdvisory.warmReturnWithinTtl) is still warm.
+ * Otherwise null: fresh session.
+ */
+export function resolveResumeSessionId({ sibling, job = null, readOnly = false, slot = null, pool = null, model = null, nowIso = null } = {}) {
+  if (sibling !== 'opencode') return null
+  if (readOnly || job === 'review' || job === 'discover') return null
+  if (!slot?.sessionId || !slot?.sessionOkAt) return null
+  const warm = cacheAdvisory({ pool, model, lastAttemptAt: slot.sessionOkAt, ...(nowIso ? { now: nowIso } : {}) })
+  return warm.warmReturnWithinTtl ? slot.sessionId : null
+}
+
 /** Bounded, $0 pre-pack injected into the W4 prompt so a file-less CLI can still review. */
 export function buildReviewBrief({ repoDir, baseSha = null, parentFindingsPath = null, det = null, maxBytes = 12000 } = {}) {
   const range = baseSha || 'HEAD'
@@ -664,13 +696,13 @@ function envBinName(sibling) {
  */
 const MODEL_FLAG = Object.freeze({ __default: '--model', codex: '-m' })
 
-export function buildSiblingCommand(sibling, { prompt, model = null, cwd = null, readOnly = true, usageJson = false } = {}) {
+export function buildSiblingCommand(sibling, { prompt, model = null, cwd = null, readOnly = true, usageJson = false, resumeSessionId = null } = {}) {
   const override = process.env[envBinName(sibling)]
   const workdir = cwd || process.cwd()
   let base
   if (override && override.trim()) base = override.trim().split(/\s+/)
   else if (sibling === 'hermes') base = ['hermes', '-z']
-  else if (sibling === 'opencode') base = ['opencode', 'run', '--standalone', '--model', 'opencode/deepseek-v4.1-flash-free', ...(usageJson ? ['--format', 'json'] : [])]
+  else if (sibling === 'opencode') base = ['opencode', 'run', '--standalone', '--model', 'opencode/deepseek-v4.1-flash-free', ...(usageJson ? ['--format', 'json'] : []), ...(resumeSessionId ? ['-s', String(resumeSessionId)] : [])]
   else if (sibling === 'direct') base = [process.execPath, resolve(new URL('./swarm-direct.mjs', import.meta.url).pathname), '--provider', 'cloudflare', '--prompt']
   else if (sibling === 'direct-graphn') base = [process.execPath, resolve(new URL('./swarm-direct.mjs', import.meta.url).pathname), '--provider', 'graphn', '--prompt']
   else if (sibling === 'direct-vercel') base = [process.execPath, resolve(new URL('./swarm-direct.mjs', import.meta.url).pathname), '--provider', 'vercel', '--prompt']
@@ -1268,8 +1300,19 @@ export async function runRelay(argv) {
     // CACHE-C-314: opencode windows (except review, whose stdout is the verdict
     // artifact) run with --format json so token/cache usage can be harvested.
     const usageJsonWindow = choice.sibling === 'opencode' && assignment.job !== 'review'
-    const { command, args } = buildSiblingCommand(choice.sibling, { prompt, model: choice.model, cwd, readOnly: readOnlyWindow, usageJson: usageJsonWindow })
+    // SESS-C-315: TTL-gated session resume for mutating opencode windows.
+    const resumeSessionId = resolveResumeSessionId({
+      sibling: choice.sibling,
+      job: assignment.job,
+      readOnly: readOnlyWindow,
+      slot: ringState?.slots?.[assignment.siblingSlot] || null,
+      pool: choice.pool || null,
+      model: choice.model || null,
+      nowIso: windowStartedAt
+    })
+    const { command, args } = buildSiblingCommand(choice.sibling, { prompt, model: choice.model, cwd, readOnly: readOnlyWindow, usageJson: usageJsonWindow, resumeSessionId })
     const attemptUsage = (sibling, res) => (sibling === 'opencode' ? parseOpencodeUsage(res?.stdout) : null)
+    if (resumeSessionId) entry.sessionReuse = { resumed: true, sessionId: resumeSessionId }
     // Defense in depth: a publish sibling that self-invokes `swarm checkpoint` is bound
     // to this round's ACCEPT artifact; on a REJECT window no path is exported.
     const roundVerdictPath = roundVerdictPaths.get(assignment.round) || null
@@ -1554,6 +1597,21 @@ export async function runRelay(argv) {
     if (exitCode === 0) {
       windowTelemetry.answeredModel = choice.model || null
       recordAttempt({ model: choice.model, status: 'ok', exitCode: 0, signal: res.signal || null, usage: attemptUsage(choice.sibling, res) })
+      // SESS-C-315: capture the opencode session id so the next warm mutating
+      // window for this slot can resume it (cache-friendly prefix continuity).
+      if (choice.sibling === 'opencode') {
+        const sid = parseOpencodeSessionId(res.stdout)
+        if (sid) {
+          const slotKey = assignment.siblingSlot
+          ringState.slots[slotKey] = {
+            ...(ringState.slots[slotKey] || {}),
+            sessionId: sid,
+            sessionOkAt: windowStartedAt
+          }
+          entry.sessionReuse = { ...(entry.sessionReuse || {}), capturedSessionId: sid }
+          writeRingState(opts.ringStateDir, ringState)
+        }
+      }
       flushWindowReport()
     } else if (res.error && res.error.code === 'ENOENT') {
       // Missing CLI: account the skipped call once, then keep relaying.
