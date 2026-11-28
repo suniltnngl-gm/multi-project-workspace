@@ -19,6 +19,19 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { statePaths } from './swarm-state-paths.mjs'
+import { classifyMutationRisk } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
+
+/**
+ * Operator policy: only unrecoverable mutations escalate to the operator (fail
+ * closed, already wired via classifyMutationRisk); wholesale reverts are never
+ * allowed anywhere; the only revert is the atomic last-edit diff via
+ * protectedWriteFile/undoLastEdit (lean backup, thin undo). A workflow `command:`
+ * step is raw argv, so it is screened here — any unrecoverable pattern is a
+ * validation failure, not a runtime surprise.
+ */
+export function commandStepRisk(step) {
+  return classifyMutationRisk((step.command || []).join(' '))
+}
 
 export const WORKFLOW_SCHEMA = 'workflow/v1'
 
@@ -66,8 +79,12 @@ export function validateWorkflow(def) {
   if (!Array.isArray(steps) || steps.length === 0) return { ok: false, reason: 'no_steps' }
   for (const [i, s] of steps.entries()) {
     if (!s?.id) return { ok: false, reason: `step_${i}_missing_id` }
-    if (!WORKFLOW_ACTIONS[s.action]) return { ok: false, reason: `step_${i}_unknown_action:${s.action}` }
+    if (!(s.action in WORKFLOW_ACTIONS)) return { ok: false, reason: `step_${i}_unknown_action:${s.action}` }
     if (s.action === 'command' && !Array.isArray(s.command)) return { ok: false, reason: `step_${i}_command_requires_argv` }
+    if (s.action === 'command') {
+      const risk = commandStepRisk(s)
+      if (!risk.allowed) return { ok: false, reason: `step_${i}_${risk.reason}` }
+    }
     if (s.when && !['ok', 'any'].includes(s.when)) return { ok: false, reason: `step_${i}_invalid_when:${s.when}` }
     if (s.evidence && s.evidence !== 'ledger') return { ok: false, reason: `step_${i}_invalid_evidence:${s.evidence}` }
   }

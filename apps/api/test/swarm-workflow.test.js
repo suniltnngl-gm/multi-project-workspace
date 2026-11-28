@@ -96,3 +96,17 @@ test('W2: file-registered workflow overrides nothing but lists alongside built-i
     assert.equal(loadWorkflow('missing', { workflowsDir: wfDir }).reason, 'workflow_not_found:missing')
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
+
+test('policy: workflow command steps refuse unrecoverable mutations (wholesale revert never planable)', async () => {
+  const { commandStepRisk } = await import('../../../scripts/swarm-workflow.mjs')
+  // Wholesale reverts are rejected at validation — the workflow cannot even be planned.
+  for (const argv of [['git', 'reset', '--hard'], ['git', 'push', '--force'], ['rm', '-rf', '/tmp/x']]) {
+    const def = { schema: WORKFLOW_SCHEMA, id: 'reverter', title: 'no', steps: [{ id: 's', action: 'command', command: argv }] }
+    assert.equal(validateWorkflow(def).ok, false, argv.join(' '))
+  }
+  // The risk classifier is reachable and names the rule.
+  assert.equal(commandStepRisk({ command: ['git', 'reset', '--hard'] }).reason, 'blocked_unrecoverable_mutation:git_hard_reset')
+  // Safe, recoverable command steps still plan.
+  const ok = validateWorkflow({ schema: WORKFLOW_SCHEMA, id: 'safe', title: 'ok', steps: [{ id: 's', action: 'command', command: ['npm', 'test'] }] })
+  assert.equal(ok.ok, true)
+})
