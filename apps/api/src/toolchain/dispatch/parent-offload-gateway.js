@@ -8,6 +8,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { translatePrompt } from './translation-registry.js'
+import { resolveLayer2Callers } from './layer2-callers.js'
 import { evaluateDeterministicDiff } from '../../../../../scripts/swarm-review.mjs'
 import { DEFAULT_RING_STATE_DIR, readRingState, resolveSlot } from '../../../../../scripts/swarm-ring-state.mjs'
 
@@ -28,12 +29,20 @@ export async function handleParentOffload({
   useLocalLlm = false,
   callLocalLlama = null,
   callRemoteFallback = null,
+  layer2 = {}, // W5: { localLlama, graphn } options for the default callers
   env = process.env
 } = {}) {
   const act = String(action || '').trim().toLowerCase()
   if (!OFFLOAD_ACTIONS.includes(act)) {
     throw new Error(`unsupported_offload_action:${action}`)
   }
+
+  // W5 (#293): default Layer-2 chain is local-GGUF ($0) -> graphn (cheap remote),
+  // replacing the Colab cold-start fallback. Injected callouts win.
+  const resolved = resolveLayer2Callers({ callLocalLlama, callRemoteFallback, useLocalLlm, localLlama: layer2.localLlama, graphn: layer2.graphn })
+  useLocalLlm = resolved.useLocalLlm
+  callLocalLlama = resolved.callLocalLlama
+  callRemoteFallback = resolved.callRemoteFallback
 
   const state = ringState || readRingState(ringStateDir)
   const resolvedParentKey = parentSlot || state?.activeParentSlot || null
