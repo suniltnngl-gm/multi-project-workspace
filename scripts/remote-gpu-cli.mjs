@@ -20,8 +20,14 @@ export const REMOTE_GPU_MODELS = Object.freeze({
   colab: { lane: 'colab', quotaPool: 'colab-gpu', transport: 'cli', modelId: 'colab-gpu-runtime' },
   kaggle: { lane: 'kaggle', quotaPool: 'kaggle-gpu', transport: 'kaggle-cli', modelId: 'Qwen/Qwen2.5-Coder-3B-Instruct' },
   'kaggle-tpu': { lane: 'kaggle-tpu', quotaPool: 'kaggle-tpu', transport: 'kaggle-cli', modelId: 'kaggle-tpu-jax-placeholder', placeholder: true },
-  'kaggle-ai-models': { lane: 'kaggle-ai-models', quotaPool: 'kaggle-ai-models', transport: 'kaggle-api', modelId: 'kaggle-ai-models-placeholder', placeholder: true }
+  'kaggle-ai-models': { lane: 'kaggle-ai-models', quotaPool: 'kaggle-ai-models', transport: 'kaggle-api', modelId: 'kaggle-ai-models-placeholder', placeholder: true },
+  // Lightning AI Studios (T4 chain tail): opt-in — auto mode only reaches this lane
+  // when `--lightning-state gpu` (or config) marks it available.
+  lightning: { lane: 'lightning', quotaPool: 'lightning-gpu', transport: 'lightning-cli', modelId: 'lightning-studios-runtime' }
 })
+
+// Lightning CLI lives in its own venv (never a repo-local one); overridable via env/config.
+const DEFAULT_LIGHTNING_BIN = process.env.LIGHTNING_BIN || join(homedir(), '.venvs/lightning/bin/lightning')
 
 export function loadRemoteGpuConfig(configPath = DEFAULT_CONFIG_PATH) {
   if (!configPath || !existsSync(configPath)) return {}
@@ -65,10 +71,14 @@ export function selectRemoteGpuLane({
   colabHasGpu = true,
   colabFreeTierBlocked = false,
   kaggleAvailable = true,
-  kaggleHasGpu = true
+  kaggleHasGpu = true,
+  // Opt-in lane (default unavailable) so existing auto chains are unchanged.
+  lightningAvailable = false,
+  lightningHasGpu = true
 } = {}) {
   const colabEligible = colabAvailable && colabHasGpu && !colabFreeTierBlocked
   const kaggleEligible = kaggleAvailable && kaggleHasGpu
+  const lightningEligible = lightningAvailable && lightningHasGpu
 
   if (preferred === 'colab') {
     if (colabEligible) return { ok: true, lane: 'colab', quotaPool: 'colab-gpu', fallbackUsed: false, reason: 'colab_gpu_primary' }
@@ -94,6 +104,11 @@ export function selectRemoteGpuLane({
     return { ok: true, lane: 'kaggle-ai-models', quotaPool: 'kaggle-ai-models', fallbackUsed: false, reason: 'kaggle_ai_models_explicit' }
   }
 
+  if (preferred === 'lightning') {
+    if (lightningEligible) return { ok: true, lane: 'lightning', quotaPool: 'lightning-gpu', fallbackUsed: false, reason: 'lightning_gpu_explicit' }
+    return { ok: false, lane: null, quotaPool: 'lightning-gpu', fallbackUsed: false, reason: 'lightning_unavailable' }
+  }
+
   // auto: Colab Direct primary -> Kaggle GPU fallback
   if (colabEligible) {
     return { ok: true, lane: 'colab', quotaPool: 'colab-gpu', fallbackUsed: false, reason: 'colab_gpu_primary' }
@@ -101,6 +116,10 @@ export function selectRemoteGpuLane({
   if (kaggleEligible) {
     const colabSkip = colabFreeTierBlocked ? 'colab_free_tier_restricted' : (!colabHasGpu ? 'colab_cpu_only' : 'colab_unavailable')
     return { ok: true, lane: 'kaggle', quotaPool: 'kaggle-gpu', fallbackUsed: true, reason: `fallback_to_kaggle:${colabSkip}` }
+  }
+  if (lightningEligible) {
+    const skip = colabFreeTierBlocked ? 'colab_free_tier_restricted' : (!colabHasGpu ? 'colab_cpu_only' : 'colab_unavailable')
+    return { ok: true, lane: 'lightning', quotaPool: 'lightning-gpu', fallbackUsed: true, reason: `fallback_to_lightning:${skip}` }
   }
   return { ok: false, lane: null, quotaPool: null, fallbackUsed: false, reason: 'no_remote_gpu_lane_available' }
 }
@@ -151,6 +170,10 @@ export function buildRemoteGpuCommand({
   if (lane === 'kaggle-ai-models') {
     return { bin: 'kaggle', argv: ['models', 'list'] }
   }
+  if (lane === 'lightning') {
+    const bin = process.env.LIGHTNING_BIN || join(homedir(), '.venvs/lightning/bin/lightning')
+    return { bin, argv: ['run', 'status'] }
+  }
   return null
 }
 
@@ -160,8 +183,9 @@ const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(new URL(i
 if (isMain) {
   if (argv.includes('--help') || argv.includes('-h')) {
     process.stdout.write(`Usage: node scripts/remote-gpu-cli.mjs [options]
-  -m, --model, --lane <auto|colab|kaggle|kaggle-tpu|kaggle-ai-models>
+  -m, --model, --lane <auto|colab|kaggle|kaggle-tpu|kaggle-ai-models|lightning>
       --colab-transport <cli|ssh|papermill>  Colab transport (default: cli)
+      --lightning-state <gpu|cpu_only|unavailable>  Lightning Studios lane (default: unavailable)
       --ssh-target <user@host>               SSH target for --colab-transport ssh
       --notebook <path>                      Notebook path for Colab/papermill
       --kernel <dir>                         Kaggle kernel directory
@@ -185,12 +209,14 @@ if (isMain) {
   const cfg = loadRemoteGpuConfig(configPath)
   const modelsCfg = {
     colab: { ...REMOTE_GPU_MODELS.colab, ...(cfg.models?.colab || {}) },
-    kaggle: { ...REMOTE_GPU_MODELS.kaggle, ...(cfg.models?.kaggle || {}) }
+    kaggle: { ...REMOTE_GPU_MODELS.kaggle, ...(cfg.models?.kaggle || {}) },
+    lightning: { ...REMOTE_GPU_MODELS.lightning, ...(cfg.models?.lightning || {}) }
   }
   const opts = {
     lane: cfg.defaultLane || cfg.defaultModel || 'auto',
     colabState: cfg.colabState || 'gpu',
     kaggleState: cfg.kaggleState || 'gpu',
+    lightningState: cfg.lightningState || 'unavailable',
     colabTransport: modelsCfg.colab.transport || 'cli',
     sshTarget: modelsCfg.colab.sshTarget || null,
     remoteCommand: modelsCfg.colab.remoteCommand || null,
@@ -211,6 +237,7 @@ if (isMain) {
     else if (a === '--lane' || a === '--model' || a === '-m') opts.lane = argv[++i]
     else if (a === '--colab-state') opts.colabState = argv[++i]
     else if (a === '--kaggle-state') opts.kaggleState = argv[++i]
+    else if (a === '--lightning-state') opts.lightningState = argv[++i]
     else if (a === '--colab-transport') opts.colabTransport = argv[++i]
     else if (a === '--ssh-target') opts.sshTarget = argv[++i]
     else if (a === '--remote-cmd') opts.remoteCommand = argv[++i]
@@ -248,7 +275,9 @@ if (isMain) {
     colabHasGpu: opts.colabState === 'gpu',
     colabFreeTierBlocked: opts.colabState === 'free_tier_blocked',
     kaggleAvailable: opts.kaggleState !== 'unavailable',
-    kaggleHasGpu: opts.kaggleState === 'gpu'
+    kaggleHasGpu: opts.kaggleState === 'gpu',
+    lightningAvailable: opts.lightningState !== 'unavailable',
+    lightningHasGpu: opts.lightningState !== 'unavailable' && opts.lightningState !== 'cpu_only'
   })
 
   if (!selection.ok) fail(selection.reason, 2)
