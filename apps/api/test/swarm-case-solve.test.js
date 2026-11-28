@@ -147,3 +147,29 @@ test('#233: case-solve scans cases under SWARM_STATE_DIR, not the default state 
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('SOLVE-005: the default runner penalizes options referencing siblings with recent throttled failures', async () => {
+  const { solveCaseWithSandbox } = await import('../../../scripts/swarm-case-solve.mjs')
+  const dir = mkdtempSync(join(tmpdir(), 'case-tel-'))
+  try {
+    const reportsDir = join(dir, 'reports')
+    mkdirSync(reportsDir, { recursive: true })
+    writeFileSync(join(reportsDir, 'relay-pipeline-tel.json'), JSON.stringify({
+      windows: [{ attemptedModels: [{ model: 'gemini-3.8-flash', status: 'exit_1', failureClass: 'rpm_throttled' }] }]
+    }))
+    const caseObj = {
+      id: 'case-tel-check',
+      state: 'open_case',
+      options: [
+        { id: 'opt-1', label: 'Retry with gemini-api directly' },
+        { id: 'opt-2', label: 'Retry with hermes instead' }
+      ],
+      findings: {}
+    }
+    const verdict = await solveCaseWithSandbox(caseObj, { reportsDir })
+    assert.equal(verdict.action, 'select_winner')
+    assert.equal(verdict.selectedOption, 'opt-2', 'the throttled-sibling option must lose to clean telemetry: ' + JSON.stringify(verdict.results))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

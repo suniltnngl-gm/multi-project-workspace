@@ -10,7 +10,8 @@
  * Explicit operator/parent runs may pass --allow-publish once checkpointed + reviewed + green CI.
  */
 import { readFileSync, existsSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { statePaths } from './swarm-state-paths.mjs'
 import { spawn } from 'node:child_process'
 import {
@@ -28,6 +29,7 @@ import {
 import { evaluateFiveHourCap } from '../apps/api/src/toolchain/dispatch/burn-rate-pacer.js'
 import { createLeaseStore } from '../apps/api/src/toolchain/dispatch/lease-store.js'
 import { acquireOrchestratorLock, releaseOrchestratorLock } from './swarm-orchestrator-lock.mjs'
+import { classifyFailure, classifyFailureTail } from './swarm-relay.mjs'
 
 const argv = process.argv.slice(2)
 const opts = {}
@@ -41,9 +43,15 @@ for (let i = 0; i < argv.length; i++) {
 }
 const fail = (msg) => { process.stderr.write(`swarm-queue-run: ${msg}\n`); process.exit(1) }
 
+// Importing the module (tests use buildFailureTelemetry) must not exit on missing args.
+const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 const queueDir = opts['queue-dir'] ? resolve(opts['queue-dir']) : null
-if (!queueDir) fail('missing --queue-dir <dir>')
-const wrapper = opts.wrapper ? resolve(opts.wrapper) : resolve(process.cwd(), 'scripts/swarm-run.mjs')
+if (isMain && !queueDir) fail('missing --queue-dir <dir>')
+// Resolve the wrapper relative to this script's own directory, not process.cwd():
+// under `npm --workspace apps/api test` the cwd is apps/api, and a cwd-relative path
+// would spawn a missing module (exit 1 "Cannot find module") that failure telemetry
+// would honestly but wrongly classify as a provider real_failure.
+const wrapper = opts.wrapper ? resolve(opts.wrapper) : resolve(dirname(fileURLToPath(import.meta.url)), 'swarm-run.mjs')
 
 function readVerdictFile(path) {
   if (!path || !existsSync(path)) return null
@@ -56,6 +64,22 @@ function readVerdictFile(path) {
 }
 
 /** Run one bounded job. Returns { status, result, reason }. */
+// SOLVE-005: a failed job must carry its provider's actual error, not a bare exit
+// code — same CLI_OUTCOME_FAILED masking that #278 fixed in the relay.
+export function buildFailureTelemetry(outcome) {
+  // job_blocked means the wrapper refused before the CLI ever ran — any stderr is
+  // the gate's own message, not provider evidence, so no failureClass is fabricated.
+  if (outcome?.status !== 'failed' || outcome?.reason === 'job_blocked' || !outcome?.result?.stderr) return {}
+  const failureClass = classifyFailure({ exitCode: 1, stderr: outcome.result.stderr || '', stdout: outcome.result.stdout || '' })
+  const stderrTail = classifyFailureTail({ exitCode: 1, stderr: outcome.result.stderr || '', stdout: outcome.result.stdout || '' })
+  if (!failureClass) return {}
+  return { failureClass, ...(stderrTail ? { stderrTail } : {}) }
+}
+
+// SOLVE-005: runId of the orchestrator lease this runner holds (set in main, null
+// when inherited or dry-run); spawned wrappers inherit it instead of re-acquiring.
+let activeOrchestratorLeaseRunId = null
+
 function runJob({ job, task, ctx }) {
   return new Promise((resolvePromise) => {
     if (job.type === 'review') {
@@ -94,7 +118,10 @@ function runJob({ job, task, ctx }) {
     const child = spawn(process.execPath, args, {
       cwd: process.cwd(),
       detached: true, // own process group, so a timeout can reap the whole CLI tree
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // SOLVE-005: the wrapper must inherit the parent's orchestrator lease instead
+      // of re-acquiring it (self-deadlock), mirroring the overnight->queue-run chain.
+      env: { ...process.env, SWARM_ORCHESTRATOR_LEASE_PARENT: activeOrchestratorLeaseRunId || process.env.SWARM_ORCHESTRATOR_LEASE_PARENT || '' }
     })
     let stdout = ''
     let stderr = ''
@@ -201,6 +228,7 @@ async function main() {
       process.exit(3)
     }
     orchLease = orchRes
+    activeOrchestratorLeaseRunId = orchRunId
   }
   const releaseOrchestrator = () => {
     if (!orchLease) return
@@ -274,6 +302,10 @@ async function main() {
     }
   }
 
+  // SOLVE-005: a failed job must carry its provider's actual error, not a bare exit
+  // code — same CLI_OUTCOME_FAILED masking that #278 fixed in the relay.
+  const failureTelemetry = buildFailureTelemetry(outcome)
+
   let next = task
   if (outcome.status === 'done') {
     const state = job.type === 'plan' ? 'review_plan' : job.type === 'build' ? 'review_build' : task.state
@@ -289,11 +321,11 @@ async function main() {
   const written = writeTask(queueDir, next, { expectedRevision: task.queue?.revision ?? null })
 
   if (opts.json) {
-    process.stdout.write(`${JSON.stringify({ tick: 'job', taskId: task.taskId, job: job.id, type: job.type, status: outcome.status, reason: outcome.reason, state: written.state, revision: written.queue.revision }, null, 2)}\n`)
+    process.stdout.write(`${JSON.stringify({ tick: 'job', taskId: task.taskId, job: job.id, type: job.type, status: outcome.status, reason: outcome.reason, ...failureTelemetry, state: written.state, revision: written.queue.revision }, null, 2)}\n`)
   } else {
     process.stdout.write(`${task.taskId} ${job.type} -> ${outcome.status}${outcome.reason ? ` (${outcome.reason})` : ''} [${written.state}]\n`)
   }
   process.exit(outcome.status === 'failed' ? 1 : 0)
 }
 
-main()
+if (isMain) main()

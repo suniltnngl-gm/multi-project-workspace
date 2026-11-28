@@ -202,7 +202,11 @@ async function main() {
   // Dry-runs stay lease-free. A live holder fails closed with exit 3.
   const runLeaseRunId = `swarm-run-${process.pid}-${Date.now()}`
   let runLease = null
-  if (opts.execute) {
+  // Inherited lease (e.g. spawned by swarm-queue-run or overnight's full cycle):
+  // the parent already holds the shared orchestrator lease, so re-acquiring would
+  // self-deadlock. The env value identifies the holding parent run.
+  const leaseInherited = Boolean(process.env.SWARM_ORCHESTRATOR_LEASE_PARENT)
+  if (opts.execute && !leaseInherited) {
     const orchRes = acquireOrchestratorLock({
       stateDir: statePaths().root,
       runId: runLeaseRunId,

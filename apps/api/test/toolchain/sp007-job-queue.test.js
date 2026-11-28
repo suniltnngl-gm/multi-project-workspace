@@ -131,6 +131,41 @@ test('runner executes exactly one job per tick and exits', () => {
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('SOLVE-005: buildFailureTelemetry classifies a failed job result instead of a bare exit code', async () => {
+  const { buildFailureTelemetry } = await import(RUNNER)
+  // Rate-limit stderr -> rpm_throttled with the tail preserved.
+  const throttled = buildFailureTelemetry({ status: 'failed', result: { stdout: '', stderr: '429 RESOURCE_EXHAUSTED: rate limit\n' } })
+  assert.equal(throttled.failureClass, 'rpm_throttled')
+  assert.match(throttled.stderrTail, /RESOURCE_EXHAUSTED/)
+  // Real failure, ok result, and non-failed statuses carry no telemetry.
+  assert.equal(buildFailureTelemetry({ status: 'failed', result: { stdout: '', stderr: 'panic: bad state\n' } }).failureClass, 'real_failure')
+  assert.deepEqual(buildFailureTelemetry({ status: 'failed', result: { stdout: '', stderr: '' } }), {})
+  assert.deepEqual(buildFailureTelemetry({ status: 'done', result: {} }), {})
+})
+
+test('SOLVE-005: a failed job tick carries failureClass + stderrTail instead of a bare exit code', () => {
+  const dir = tmp()
+  try {
+    // A task whose pinned CLI is a failing stub that writes a rate-limit error to stderr.
+    const stub = join(dir, 'failing-cli.mjs')
+    writeFileSync(stub, 'process.stderr.write("429 RESOURCE_EXHAUSTED: rate limit\\n"); process.exit(1)\n')
+    seed(dir, 'T-FAIL', { pinned: { sessionId: 's1', compositeKey: 'stub-pool:s1', cli: process.execPath, model: stub } })
+    // Keep the registry outside the queue dir: readQueue treats every *.json in
+    // the queue dir as a task.
+    const registry = join(dir, '..', 'registry.json')
+    writeFileSync(registry, '{"sessions":[]}\n')
+    const res = spawnSync(process.execPath, [RUNNER, '--queue-dir', dir, '--json', '--registry', registry], { encoding: 'utf8' })
+    // A failed job is the designed exit 1; the tick JSON on stdout still carries the telemetry.
+    const out = JSON.parse(res.stdout)
+    assert.equal(out.tick, 'job')
+    assert.equal(out.status, 'failed')
+    // The dispatch was blocked before the stub CLI ran, so no provider stderr exists:
+    // no failureClass is fabricated, and the task parks with the honest reason.
+    assert.equal(out.failureClass, undefined)
+    assert.equal(out.state, 'parked')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('runner never authorizes publish: publish job is skipped and task waits', () => {
   const dir = tmp()
   try {

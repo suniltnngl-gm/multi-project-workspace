@@ -132,9 +132,17 @@ export async function measureResolvedCases(caseDir, { apply = false } = {}) {
   }
 }
 
-/** Sum the failureClass/ok distribution over relay-pipeline-*.json reports. Never throws per file. */
+/** Sibling pool tokens shared with case-solve's telemetry penalty (SOLVE-005). */
+export const SIBLING_TOKENS = ['gemini-api', 'hermes', 'opencode', 'agy', 'copilot', 'cline', 'codex', 'vibe', 'direct']
+
+/**
+ * Sum the failureClass/ok distribution over relay-pipeline-*.json reports. Never throws per file.
+ * failureClassesByToken attributes each failed attempt to any sibling token whose first
+ * hyphen segment prefixes the model name (e.g. `gemini-api` matches `gemini-3.8-flash`),
+ * so case-solve can penalize only the siblings that actually failed.
+ */
 export function aggregateRelayTelemetry(reportsDir) {
-  const agg = { attemptsTotal: 0, ok: 0, failureClasses: {}, missingTelemetryReports: 0 }
+  const agg = { attemptsTotal: 0, ok: 0, failureClasses: {}, failureClassesByToken: {}, missingTelemetryReports: 0 }
   if (!reportsDir || !existsSync(reportsDir)) return agg
   for (const f of readdirSync(reportsDir).filter((x) => x.startsWith('relay-pipeline-') && x.endsWith('.json'))) {
     let doc
@@ -146,8 +154,15 @@ export function aggregateRelayTelemetry(reportsDir) {
         sawAttempt = true
         agg.attemptsTotal += 1
         if (a.status === 'ok' || a.status === 'ok_no_findings') agg.ok += 1
-        else if (a.failureClass) agg.failureClasses[a.failureClass] = (agg.failureClasses[a.failureClass] || 0) + 1
-        else agg.failureClasses.unclassified = (agg.failureClasses.unclassified || 0) + 1
+        else if (a.failureClass) {
+          agg.failureClasses[a.failureClass] = (agg.failureClasses[a.failureClass] || 0) + 1
+          const model = String(a.model || '').toLowerCase()
+          for (const token of SIBLING_TOKENS) {
+            if (model.startsWith(token.split('-')[0])) {
+              agg.failureClassesByToken[token] = (agg.failureClassesByToken[token] || 0) + 1
+            }
+          }
+        } else agg.failureClasses.unclassified = (agg.failureClasses.unclassified || 0) + 1
       }
     }
     if (!sawAttempt) agg.missingTelemetryReports += 1

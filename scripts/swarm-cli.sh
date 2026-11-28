@@ -256,9 +256,31 @@ case "$cmd" in
         return fs.readdirSync(d).filter(f => f.endsWith(".json")).map(f => JSON.parse(fs.readFileSync(path.join(d, f), "utf8")));
       };
       const q = list("queue/active").filter(t => t.state !== "done").slice(0, 5);
-      const c = list("queue/cases").filter(x => x.state === "open_case").slice(0, 5);
+      let c = list("queue/cases").filter(x => x.state === "open_case").slice(0, 5);
+      // SOLVE-005: cases live in the sqlite registry — read open cases + measure summary from it.
+      const casesDb = path.join(root, "queue/cases/cases.sqlite");
+      if (fs.existsSync(casesDb)) {
+        try {
+          const { DatabaseSync } = await import("node:sqlite");
+          const db = new DatabaseSync(casesDb, { readOnly: true });
+          const rows = db.prepare("select case_id, payload_json from case_registry_records order by updated_at desc").all();
+          const open = rows.map(r => JSON.parse(r.payload_json)).filter(x => x.state === "open_case");
+          c = open.slice(0, 5);
+          console.log("open_cases_total:", open.length);
+          db.close();
+        } catch { /* fall back to legacy loose files */ }
+      }
       console.log("active_tasks:", q.map(t => `${t.taskId}(${t.priority || "P2"},${t.state})`).join(", ") || "none");
       console.log("open_cases:", c.map(x => `${x.id}(${(x.options||[]).length} opts)`).join(", ") || "none");
+      // SOLVE-005: measure-phase summary (decision outcomes + failed-evidence reopens).
+      const ledger = path.join(root, "queue/measurements/decision-outcomes.jsonl");
+      if (fs.existsSync(ledger)) {
+        const rows = fs.readFileSync(ledger, "utf8").split("\\n").filter(Boolean).map(l => { try { return JSON.parse(l) } catch { return null } }).filter(Boolean);
+        const reopens = rows.filter(r => r.decision === "reopen").length;
+        const withEvidence = rows.filter(r => typeof r.evidenceScore === "number");
+        const avg = withEvidence.length ? Math.round(withEvidence.reduce((s, r) => s + r.evidenceScore, 0) / withEvidence.length) : null;
+        console.log("measure: decisions=" + rows.length, "reopens=" + reopens, avg !== null ? "avg_evidence=" + avg : "");
+      }
       const lp = path.join(root, "lessons/lesson-register.json");
       if (fs.existsSync(lp)) {
         const l = JSON.parse(fs.readFileSync(lp, "utf8")).lessons || {};

@@ -20,6 +20,10 @@ import { simulateCaseOptions } from '../apps/api/src/toolchain/dispatch/case-san
 
 const UNRECOVERABLE_RE = /\b(billing|fund|credits?|force[- ]?push|push\s+--force|reset\s+--hard|drop\s+table|gcloud\s+.*delete|rm\s+-rf)\b/i
 
+// SOLVE-005: sibling pool tokens (kept in sync with swarm-measure.mjs, which owns
+// failureClassesByToken attribution) used by the telemetry penalty in the default runner.
+const SIBLING_TOKENS = ['gemini-api', 'hermes', 'opencode', 'agy', 'copilot', 'cline', 'codex', 'vibe', 'direct']
+
 export function isUnrecoverableOption(opt = {}) {
   const text = `${opt.id || ''} ${opt.label || ''} ${opt.notes || ''}`
   return UNRECOVERABLE_RE.test(text)
@@ -149,7 +153,28 @@ export async function solveOpenCases(caseDir, { apply = false, sandbox = false, 
  * Runs candidate options in isolated temp sandboxes, auto-selecting a clear winner and
  * pausing/escalating only on all-fail, ambiguous tie, or unrecoverable risk.
  */
-export async function solveCaseWithSandbox(caseObj, { runOption = null, minScoreMargin = 5 } = {}) {
+export async function solveCaseWithSandbox(caseObj, { runOption = null, minScoreMargin = 5, reportsDir = null } = {}) {
+  // SOLVE-005: relay failure telemetry is decision evidence — an option that routes
+  // work to a sibling with recent throttled/real failures is penalized before any
+  // live attempt is made. Existing recorded findings still take precedence.
+  let telemetry = null
+  try {
+    const { aggregateRelayTelemetry } = await import('./swarm-measure.mjs')
+    telemetry = aggregateRelayTelemetry(reportsDir || statePaths().reportsDir)
+  } catch { telemetry = null }
+  const telemetryPenalty = (text) => {
+    if (!telemetry) return 0
+    let penalty = 0
+    for (const token of SIBLING_TOKENS) {
+      if (!new RegExp(`\\b${token.replace(/[^a-z0-9-]/gi, '')}`, 'i').test(text)) continue
+      // Only siblings that actually failed are penalized (failureClassesByToken),
+      // so a clean sibling is never charged for another's throttling. The weight
+      // (15/failure, capped) must clear the 5-point position decay + minScoreMargin
+      // so a throttled sibling always loses to clean telemetry.
+      penalty += 15 * (telemetry.failureClassesByToken?.[token] || 0)
+    }
+    return Math.min(penalty, 30)
+  }
   const runner = runOption || (async ({ option }) => {
     const f = caseObj?.findings?.[option.id]
     if (f && typeof f.score === 'number') {
@@ -160,7 +185,12 @@ export async function solveCaseWithSandbox(caseObj, { runOption = null, minScore
     const risk = classifyMutationRisk(`${option.label || ''} ${option.command || ''}`)
     if (!risk.allowed) return { ok: false, score: 0, notes: `unrecoverable:${risk.rule}` }
     const idx = (caseObj?.options || []).findIndex((o) => o.id === option.id)
-    return { ok: true, score: 55 - 5 * Math.max(0, idx), notes: 'heuristic_safe_option' }
+    const penalty = telemetryPenalty(`${option.label || ''} ${option.command || ''}`)
+    return {
+      ok: 55 - 5 * Math.max(0, idx) - penalty > 0,
+      score: 55 - 5 * Math.max(0, idx) - penalty,
+      notes: penalty ? `heuristic_safe_option+telemetry_penalty(${penalty})` : 'heuristic_safe_option'
+    }
   })
   return simulateCaseOptions(caseObj, { runOption: runner, minScoreMargin })
 }
