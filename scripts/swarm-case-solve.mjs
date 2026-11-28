@@ -276,6 +276,15 @@ if (isMain) {
     for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(130))
   }
   const res = await solveOpenCases(caseDir, { apply, sandbox: useSandbox, caseId: caseIdFilter })
+  // #303: inline discovery-registration — candidates surfaced while solving are
+  // registered immediately regardless of scope; the lease is already held on --apply.
+  if (apply) {
+    try {
+      const { registerDiscoveredImmediately } = await import('./swarm-discover.mjs')
+      const paths = statePaths()
+      res.inlineDiscovery = registerDiscoveredImmediately({ queueDir: paths.queueActiveDir, caseDir: paths.casesDir, auditDir: paths.root })
+    } catch { res.inlineDiscovery = { ok: false, reason: 'inline_registration_error' } }
+  }
   if (argv.includes('--json')) console.log(JSON.stringify(res, null, 2))
   else console.log(`swarm case-solve (${apply ? 'apply' : 'dry-run'}): scanned=${res.scanned} resolved=${res.resolvedCount} paused=${res.pausedCount}`)
 }

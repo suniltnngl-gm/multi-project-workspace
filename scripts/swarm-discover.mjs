@@ -387,6 +387,33 @@ export function syncDiscoveredToQueue(queueDir, candidates, { apply = false, cas
 }
 
 const argv = process.argv.slice(2)
+/**
+ * #303: inline discovery-registration. Called by executing entrypoints (relay,
+ * case-solve) at the end of a run so ANY candidate discovered while carrying out
+ * a task is registered immediately — regardless of current scope. Scope gating
+ * applies to *execution* (the serialized lease), never to *registration*.
+ * Never throws: registration failure must not fail the carrying task.
+ */
+export function registerDiscoveredImmediately({ repoDir = process.cwd(), queueDir, caseDir = null, auditDir = null, seedTasks = [], splitBrain = true, externalRoots = [] } = {}) {
+  if (!queueDir) return { ok: false, reason: 'queue_dir_required', registered: 0, cases: 0, skipped: [] }
+  try {
+    const seedItems = Array.isArray(seedTasks) ? seedTasks : parseSeedPayload(seedTasks)
+    const candidates = discoverCandidates({ repoDir, seedTasks: seedItems, splitBrain, externalRoots })
+    const sync = syncDiscoveredToQueue(queueDir, candidates, { apply: true, caseDir, auditDir })
+    return {
+      ok: true,
+      inline: true,
+      candidateCount: candidates.length,
+      registered: sync?.created?.length ?? 0,
+      cases: sync?.cases?.length ?? 0,
+      skipped: sync?.skipped ?? [],
+      created: sync?.created ?? []
+    }
+  } catch (err) {
+    return { ok: false, reason: `registration_error:${err?.message || 'unknown'}`, registered: 0, cases: 0, skipped: [] }
+  }
+}
+
 const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)
 
 if (isMain) {

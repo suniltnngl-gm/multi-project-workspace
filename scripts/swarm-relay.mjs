@@ -1611,6 +1611,24 @@ export async function runRelay(argv) {
   ringState.roundsCompleted = roundsCompleted
   writeRingState(opts.ringStateDir, ringState)
 
+  // #303: inline discovery-registration — candidates found while carrying out this
+  // task are registered immediately regardless of scope. The relay already holds
+  // the orchestrator lease, so registration is serialized; execution scope is
+  // untouched (discovered items land as queued tasks / open cases for later).
+  let inlineDiscovery = null
+  if (opts.execute) {
+    try {
+      const paths = statePaths()
+      const { registerDiscoveredImmediately } = await import('./swarm-discover.mjs')
+      inlineDiscovery = registerDiscoveredImmediately({
+        repoDir: cwd,
+        queueDir: paths.queueActiveDir,
+        caseDir: paths.casesDir,
+        auditDir: paths.root
+      })
+    } catch { inlineDiscovery = { ok: false, reason: 'inline_registration_error' } }
+  }
+
   const summary = {
     ok: windows.every((w) => isSuccessfulWindowStatus(w.status)),
     mode: 'execute',
@@ -1622,6 +1640,7 @@ export async function runRelay(argv) {
     cumulativeDriftMs,
     roundsCompleted,
     noHardKill: true,
+    inlineDiscovery,
     startedAt,
     finishedAt: new Date().toISOString(),
     plan,
