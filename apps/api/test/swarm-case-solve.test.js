@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -200,4 +200,40 @@ test('W3 (#290): cold-start lesson penalty — a previously failed option class 
     const notes = verdict.caseRecord?.findings?.['opt-1']?.notes || ''
     assert.match(notes, /lesson_penalty\(15\)/)
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('#299: --case scopes solve to one case; unknown --flags fail with usage', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'case-solve-scope-'))
+  try {
+    const casesDir = join(dir, 'queue', 'cases')
+    mkdirSync(casesDir, { recursive: true })
+    const mk = (id, title) => ({
+      id, title, kind: 'case', state: 'open_case', priority: 'P3', costTier: 'local',
+      options: [{ id: 'opt-1', label: 'Recommended safe option' }, { id: 'opt-2', label: 'Alternative safe option' }],
+      findings: {}
+    })
+    // Two open cases in a legacy loose-file layout (solveOpenCases reads both layouts).
+    writeFileSync(join(casesDir, 'case-a.json'), `${JSON.stringify(mk('case-a', 'A'))}\n`)
+    writeFileSync(join(casesDir, 'case-b.json'), `${JSON.stringify(mk('case-b', 'B'))}\n`)
+
+    // Scoped apply resolves ONLY the named case.
+    const scoped = spawnSync(process.execPath, [CLI, '--case', 'case-a', '--apply', '--json'], { encoding: 'utf8', env: { ...process.env, SWARM_STATE_DIR: dir } })
+    assert.equal(scoped.status, 0, scoped.stderr)
+    const out = JSON.parse(scoped.stdout)
+    assert.equal(out.scanned, 1, 'only the scoped case is scanned')
+    assert.equal(out.resolvedCount, 1)
+    assert.deepEqual(out.resolved.map((r) => r.id), ['case-a'])
+    const a = JSON.parse(readFileSync(join(casesDir, 'case-a.json'), 'utf8'))
+    const b = JSON.parse(readFileSync(join(casesDir, 'case-b.json'), 'utf8'))
+    assert.equal(a.state, 'resolved')
+    assert.equal(b.state, 'open_case', 'unrelated case must stay untouched')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('#299: unknown --flag exits 2 with usage error, never swallowed into state', () => {
+  const bad = spawnSync(process.execPath, [CLI, '--bogus-flag'], { encoding: 'utf8' })
+  assert.equal(bad.status, 2)
+  assert.match(bad.stderr, /unknown flag --bogus-flag/)
 })

@@ -86,8 +86,12 @@ function defaultEvidenceRunner() {
   }
 }
 
-export async function solveOpenCases(caseDir, { apply = false, sandbox = false, minScoreMargin } = {}) {
+export async function solveOpenCases(caseDir, { apply = false, sandbox = false, minScoreMargin, caseId = null } = {}) {
   if (!caseDir || !existsSync(caseDir)) return { ok: true, apply, sandbox, sandboxEnabled: Boolean(sandbox), scanned: 0, resolved: [], paused: [] }
+  // #299: `--case <id>` scopes the run to exactly one case — a filter is not a
+  // blanket pass; the 2026-11-28 over-application incident is the regression this
+  // prevents (7 unrelated open cases were blanket-resolved by an ignored flag).
+  const matchesScope = (c) => !caseId || c.id === caseId
   const files = readdirSync(caseDir).filter((f) => f.endsWith('.json')).filter((f) => f !== 'seed.json').sort()
   const resolved = []
   const paused = []
@@ -113,6 +117,7 @@ export async function solveOpenCases(caseDir, { apply = false, sandbox = false, 
     let c
     try { c = JSON.parse(readFileSync(fp, 'utf8')) } catch { continue }
     if (c.state !== 'open_case') continue
+    if (!matchesScope(c)) continue
     scanned += 1
     if (sandbox) {
       const verdict = await solveCaseWithSandbox(c, { minScoreMargin })
@@ -138,6 +143,7 @@ export async function solveOpenCases(caseDir, { apply = false, sandbox = false, 
     const registryCases = readCases(caseDir)
     for (const c of registryCases) {
       if (c.state !== 'open_case') continue
+      if (!matchesScope(c)) continue
       scanned += 1
       if (sandbox) {
         const verdict = await solveCaseWithSandbox(c, { minScoreMargin })
@@ -224,10 +230,20 @@ const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(imp
 if (isMain) {
   const argv = process.argv.slice(2)
   if (argv.includes('--help') || argv.includes('-h')) {
-    console.log('Usage: swarm case-solve [--case-dir <dir>] [--sandbox] [--apply] [--json]')
+    console.log('Usage: swarm case-solve [--case <id>] [--case-dir <dir>] [--sandbox] [--apply] [--json]')
     process.exit(0)
   }
+  // #299: unknown --flags fail with usage instead of being silently ignored —
+  // a silently-ignored --case filter caused a 7-case blanket over-application.
+  const KNOWN_FLAGS = new Set(['--help', '-h', '--case', '--case-dir', '--sandbox', '--apply', '--json'])
+  for (const a of argv) {
+    if (a.startsWith('--') && !KNOWN_FLAGS.has(a)) {
+      console.error(`swarm case-solve: unknown flag ${a} (use --help for usage)`)
+      process.exit(2)
+    }
+  }
   const flag = (n, fb) => { const i = argv.indexOf(n); return i >= 0 && i + 1 < argv.length ? argv[i + 1] : fb }
+  const caseIdFilter = flag('--case', null)
   const defaultDir = statePaths().casesDir
   const caseDir = resolve(flag('--case-dir', defaultDir))
   const apply = argv.includes('--apply')
@@ -259,7 +275,7 @@ if (isMain) {
     })
     for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(130))
   }
-  const res = await solveOpenCases(caseDir, { apply, sandbox: useSandbox })
+  const res = await solveOpenCases(caseDir, { apply, sandbox: useSandbox, caseId: caseIdFilter })
   if (argv.includes('--json')) console.log(JSON.stringify(res, null, 2))
   else console.log(`swarm case-solve (${apply ? 'apply' : 'dry-run'}): scanned=${res.scanned} resolved=${res.resolvedCount} paused=${res.pausedCount}`)
 }
