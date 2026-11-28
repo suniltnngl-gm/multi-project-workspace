@@ -28,6 +28,41 @@ if (isMain) {
   const apply = argv.includes('--apply')
   const env = process.env
   const paths = statePaths(env)
+
+  // #302: --apply mutates the lessons ledger, so it takes the shared orchestrator
+  // lease (fail-closed exit 3 on a live holder) — the cron improve cycle cannot
+  // split-work with relay/run/overnight/queue-run/case-solve/discover.
+  let improveLease = null
+  let improveLeaseBackup = null
+  const improveLeaseRunId = `swarm-improve-${process.pid}-${Date.now()}`
+  const leaseInherited = Boolean(process.env.SWARM_ORCHESTRATOR_LEASE_PARENT)
+  if (apply && !leaseInherited) {
+    const { acquireOrchestratorLock, releaseOrchestratorLock } = await import('./swarm-orchestrator-lock.mjs')
+    const orchRes = acquireOrchestratorLock({
+      stateDir: paths.root,
+      runId: improveLeaseRunId,
+      resource: 'orchestrator',
+      holder: 'swarm-improve',
+      auditDir: paths.root
+    })
+    if (!orchRes.ok) {
+      process.stderr.write(`swarm improve: ${orchRes.reason}: orchestrator held by ${orchRes.holder} runId=${orchRes.runId}\n`)
+      process.exit(3)
+    }
+    improveLease = orchRes
+    process.on('exit', () => {
+      try {
+        releaseOrchestratorLock({ stateDir: paths.root, runId: improveLeaseRunId, generation: improveLease.lock.generation, resource: 'orchestrator' })
+      } catch { /* already released */ }
+    })
+  }
+  // #302: snapshot the registries before mutating (lean, read-only source).
+  if (apply) {
+    try {
+      const { backupRegistries } = await import('./swarm-backup.mjs')
+      improveLeaseBackup = backupRegistries({ stateDir: paths.root })
+    } catch { /* best-effort pre-mutation snapshot */ }
+  }
   const usage = translationUsageStats(null, { env })
   const telemetry = aggregateRelayTelemetry(paths.reportsDir)
   const result = evaluateProgressiveLoop({

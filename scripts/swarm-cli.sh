@@ -33,6 +33,7 @@ Commands:
   lessons [args...]    Sync advisory lesson register (protected single-file backup)
   compact [args...]    Compact JSONL session history (protected single-file backup)
   improve [--apply]    Progressive improvement loop: usage ok-rates + telemetry -> lessons (dry-run default)
+  backup [--keep n]    Atomic snapshot of cases.sqlite + board sqlite into backups/sqlite/ (rotate keep-N)
   handoff [args...]    Save/read <=30-line Session Handoff Card (zero-LLM)
   retire [args...]     Retire a session (save handoff card + record in retired-sessions.json)
   ask [args...]        Query an old session (default: $0 grep; optional READ-ONLY llm)
@@ -72,6 +73,7 @@ case "$cmd" in
   workflow)     exec node "$MPW_DIR/scripts/swarm-workflow.mjs" "$@" ;;
   compact)      exec node "$MPW_DIR/scripts/swarm-compact.mjs" "$@" ;;
   improve)      exec node "$MPW_DIR/scripts/swarm-improve.mjs" "$@" ;;
+  backup)       exec node "$MPW_DIR/scripts/swarm-backup.mjs" "$@" ;;
   handoff)      exec node "$MPW_DIR/scripts/swarm-handoff.mjs" "$@" ;;
   retire)       exec node "$MPW_DIR/scripts/swarm-handoff.mjs" --retire "$@" ;;
   ask)          exec node "$MPW_DIR/scripts/swarm-ask.mjs" "$@" ;;

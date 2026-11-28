@@ -139,6 +139,28 @@ if (isMain) {
     else if (a === '--cases-dir') opts.casesDir = argv[++i]
     else if (a === '--queue-dir') opts.queueDir = argv[++i]
   }
+  // #302: --apply mutates the lesson register, so it takes the shared orchestrator
+  // lease (fail-closed exit 3 on a live holder); dry-runs stay lease-free.
+  if (opts.apply && !process.env.SWARM_ORCHESTRATOR_LEASE_PARENT) {
+    import('./swarm-orchestrator-lock.mjs').then(async ({ acquireOrchestratorLock, releaseOrchestratorLock }) => {
+      const paths = statePaths()
+      const runId = `swarm-lesson-sync-${process.pid}-${Date.now()}`
+      const orchRes = acquireOrchestratorLock({ stateDir: paths.root, runId, resource: 'orchestrator', holder: 'swarm-lesson-sync', auditDir: paths.root })
+      if (!orchRes.ok) {
+        process.stderr.write(`swarm lessons: ${orchRes.reason}: orchestrator held by ${orchRes.holder} runId=${orchRes.runId}\n`)
+        process.exit(3)
+      }
+      process.on('exit', () => {
+        try { releaseOrchestratorLock({ stateDir: paths.root, runId, generation: orchRes.lock.generation, resource: 'orchestrator' }) } catch { /* released */ }
+      })
+      runSync()
+    }).catch((err) => { process.stderr.write(`swarm lessons: ${err.message}\n`); process.exit(1) })
+  } else {
+    runSync()
+  }
+
+  function runSync() {
   const res = syncLessonRegister(opts)
   process.stdout.write(opts.json ? `${JSON.stringify(res, null, 2)}\n` : `lessons: +${res.addedCount} (total ${res.totalCount})\n`)
+  }
 }
