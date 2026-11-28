@@ -93,10 +93,20 @@ export function resolveAllowlistEntry(rawPath, repositories, { taskId = null } =
 }
 
 export function parseTaskAllowlistLines(relevantFilesText, repositories, { taskId = null } = {}) {
-  const lines = String(relevantFilesText || '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
+  const raw = String(relevantFilesText || '')
+  // AUTH-C-308: planning-gate scopes may be stored as a JSON object of
+  // { CREATE: [paths], MODIFY: [paths], DELETE: [paths] } — normalize it to the
+  // canonical line shape before parsing.
+  let lines
+  if (raw.trim().startsWith('{')) {
+    let doc
+    try { doc = JSON.parse(raw) } catch { throw new Error('task_allowlist_line_invalid:{json}') }
+    lines = ['CREATE', 'MODIFY', 'DELETE'].flatMap((op) =>
+      (Array.isArray(doc?.[op]) ? doc[op] : []).map((p) => `${op} ${p}`)
+    )
+  } else {
+    lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  }
   if (lines.length === 0) {
     throw new Error('task_allowlist_empty')
   }
@@ -114,7 +124,7 @@ export function parseTaskAllowlistLines(relevantFilesText, repositories, { taskI
   })
 }
 
-function runCli() {
+async function runCli() {
   const args = process.argv.slice(2)
   const command = args.shift() || 'status'
   function opt(name, fallback = null) {
@@ -140,11 +150,24 @@ function runCli() {
         'SELECT id, project, relevant_files, status, work_blocked, important_context FROM tasks WHERE id = ?'
       ).get(taskId)
       if (!task) throw new Error('task_not_found')
-      if (task.status === 'blocked' || task.work_blocked.trim()) throw new Error('task_blocked')
-      if (
+      // AUTH-C-308: a blocked task is normally un-acquirable, which made
+      // unblock->close circular (the lease is the only path to change status).
+      // Escape hatch: the operator may unblock a task ONLY with a recorded
+      // authority grant (unblock:board-task) — mechanical, fail-closed when no
+      // authority state exists, and auditable via --unblock-reason + auth-ref.
+      let unblocked = false
+      if (task.status === 'blocked' || task.work_blocked.trim()) {
+        const { operatorAuthorizationGate } = await import('../apps/api/src/toolchain/dispatch/auth-authority.js')
+        const gate = operatorAuthorizationGate({ action: 'unblock:board-task', env: process.env })
+        if (!gate.authorized || !opt('unblock-reason')) {
+          throw new Error(gate.authorized ? 'task_blocked:unblock_reason_required' : `task_blocked:${gate.reason}`)
+        }
+        unblocked = true
+      }
+      if (!unblocked && (
         !task.important_context.includes('state=complete') ||
         !task.important_context.includes('disposition=ready_for_serialized_implementation')
-      ) {
+      )) {
         throw new Error('task_planning_gate_not_complete')
       }
       const repoRows = db.db.prepare(
@@ -213,5 +236,5 @@ function runCli() {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  runCli()
+  await runCli()
 }

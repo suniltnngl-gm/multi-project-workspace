@@ -164,6 +164,44 @@ test('projectWriterLeaseCli: end-to-end acquire maps repo ID 4 paths and fails c
       '--worker-id', 'worker-1',
       '--auth-ref', 'AUTH-TEST-2'
     ], { encoding: 'utf8', stdio: 'pipe' }), /task_blocked/)
+
+    // AUTH-C-308: with a recorded operator grant (unblock:board-task) in an
+    // isolated authority state (SWARM_STATE_DIR temp), a blocked task acquires
+    // — but only with --unblock-reason. Fail-closed without it.
+    const stateDir = join(dir, 'state')
+    mkdirSync(join(stateDir, 'identity'), { recursive: true })
+    writeFileSync(join(stateDir, 'identity', 'authority-state.json'), JSON.stringify({
+      schema: 'auth-authority/v1',
+      operator: { id: 'sunilkr', bootstrappedAt: now },
+      delegations: [],
+      authorizations: [{ action: 'unblock:board-task', resourceScope: '*', grantedAt: now }]
+    }))
+    assert.throws(() => execFileSync(process.execPath, [
+      cliPath, 'acquire',
+      '--db', dbPath,
+      '--task', String(blockedTaskId),
+      '--run-id', 'run-3',
+      '--worker-id', 'worker-1',
+      '--auth-ref', 'AUTH-TEST-3'
+    ], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, SWARM_STATE_DIR: stateDir } }), /unblock_reason_required/)
+    // Only one active lease per project: release run-1's before the unblock acquire.
+    execFileSync(process.execPath, [
+      cliPath, 'release',
+      '--db', dbPath,
+      '--lease', lease.leaseId,
+      '--generation', String(lease.fencingGeneration),
+      '--owner', 'worker-1'
+    ], { encoding: 'utf8', stdio: 'pipe' })
+    const unblockLease = JSON.parse(execFileSync(process.execPath, [
+      cliPath, 'acquire',
+      '--db', dbPath,
+      '--task', String(blockedTaskId),
+      '--run-id', 'run-4',
+      '--worker-id', 'worker-1',
+      '--auth-ref', 'AUTH-TEST-4',
+      '--unblock-reason', 'operator-ratified: AUTH-C-308 implementation complete'
+    ], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, SWARM_STATE_DIR: stateDir } }))
+    assert.equal(unblockLease.taskId, blockedTaskId)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
