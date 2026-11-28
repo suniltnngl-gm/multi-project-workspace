@@ -222,7 +222,13 @@ export function aggregateRelayTelemetry(reportsDir) {
   for (const f of readdirSync(reportsDir).filter((x) => x.startsWith('relay-pipeline-') && x.endsWith('.json'))) {
     let doc
     try { doc = JSON.parse(readFileSync(join(reportsDir, f), 'utf8')) } catch { continue }
-    const windows = Array.isArray(doc?.windows) ? doc.windows : []
+    // MEAS-C-311: per-window reports carry attemptedModels at the TOP level
+    // (flushWindowReport merges windowTelemetry into the entry), not only under
+    // doc.windows. Scan both shapes or the recent attempts are invisible.
+    const windows = [
+      ...(Array.isArray(doc?.windows) ? doc.windows : []),
+      ...(Array.isArray(doc?.attemptedModels) ? [{ attemptedModels: doc.attemptedModels }] : [])
+    ]
     let sawAttempt = false
     for (const w of windows) {
       for (const a of Array.isArray(w?.attemptedModels) ? w.attemptedModels : []) {

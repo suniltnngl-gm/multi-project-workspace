@@ -274,3 +274,23 @@ test('MEASURE #309: decided registry cases are measured with their decision rati
     assert.equal(again.measuredCount, 0)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
+
+test('MEASURE MEAS-C-311: top-level attemptedModels in per-window reports are aggregated', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'measure-toplevel-'))
+  try {
+    const reportsDir = join(dir, 'reports')
+    mkdirSync(reportsDir, { recursive: true })
+    // Shape written by relay flushWindowReport: entry + windowTelemetry merged.
+    writeFileSync(join(reportsDir, 'relay-pipeline-w3.json'), JSON.stringify({
+      window: 3, status: 'exit_null', signal: 'SIGTERM', hardKilled: true,
+      attemptedModels: [{ model: 'cline-3', status: 'exit_null', exitCode: null, signal: 'SIGTERM' }]
+    }))
+    writeFileSync(join(reportsDir, 'relay-pipeline-w4.json'), JSON.stringify({
+      windows: [{ attemptedModels: [{ model: 'hermes', status: 'ok' }] }]
+    }))
+    const agg = aggregateRelayTelemetry(reportsDir)
+    assert.equal(agg.attemptsTotal, 2)
+    assert.equal(agg.failureClasses.stall_killed, 1, '#298 backfill applies to top-level attempts')
+    assert.equal(agg.ok, 1)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
