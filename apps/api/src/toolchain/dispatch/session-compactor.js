@@ -121,13 +121,25 @@ export function parseJsonl(text) {
     .filter(Boolean)
 }
 
-export function compactTurns(turns, { keepRecent = 4, maxSummaryChars = 1200 } = {}) {
+/**
+ * W6 (#295): canonical envelopes are durable structured state, not prose —
+ * they survive compaction verbatim. Only schema-tagged records are protected,
+ * so plain turns still fold normally.
+ */
+export function isCanonicalEnvelope(turn) {
+  return Boolean(turn && typeof turn === 'object' && typeof turn.schema === 'string' && turn.schema.includes('/v'))
+}
+
+export function compactTurns(turns, { keepRecent = 4, maxSummaryChars = 1200, now = () => new Date().toISOString() } = {}) {
   const list = Array.isArray(turns) ? turns : []
   if (list.length <= keepRecent) {
-    return { compacted: false, beforeCount: list.length, afterCount: list.length, foldedCount: 0, turns: list }
+    return { compacted: false, beforeCount: list.length, afterCount: list.length, foldedCount: 0, turns: list, preservedEnvelopes: 0 }
   }
-  const older = list.slice(0, list.length - keepRecent)
-  const recent = list.slice(-keepRecent)
+  // W6: envelopes are never folded — they are the reconstruction payload.
+  const protectedTurns = list.filter(isCanonicalEnvelope)
+  const foldable = list.filter((t) => !isCanonicalEnvelope(t))
+  const older = foldable.slice(0, Math.max(0, foldable.length - keepRecent))
+  const recent = foldable.slice(-keepRecent)
 
   const bullets = older.map((t, idx) => {
     const p = String(t.prompt || t.summary || '').replace(/\s+/g, ' ').trim().slice(0, 100)
@@ -144,16 +156,58 @@ export function compactTurns(turns, { keepRecent = 4, maxSummaryChars = 1200 } =
     compactedTurns: older.length,
     prompt: '[COMPACTED_HISTORY]',
     reply: summaryText,
-    compactedAt: new Date().toISOString()
+    compactedAt: now()
   }
 
-  const next = [summaryRecord, ...recent]
+  // Order preserved: envelopes keep their original positions relative to the
+  // compacted prose; the summary leads.
+  const next = [summaryRecord, ...recent, ...protectedTurns.filter((t) => !recent.includes(t))]
   return {
     compacted: true,
     beforeCount: list.length,
     afterCount: next.length,
     foldedCount: older.length,
+    preservedEnvelopes: protectedTurns.length,
     turns: next
+  }
+}
+
+/**
+ * W6 (#295): compaction integrity check — every canonical envelope in the
+ * original must survive in the compacted output, byte-for-byte in content.
+ * A violation means the compaction was lossy for structured state: fail closed.
+ */
+export function verifyCompactionIntegrity(originalTurns, compactedTurns) {
+  const keyOf = (t) => JSON.stringify(t)
+  const surviving = new Set((Array.isArray(compactedTurns) ? compactedTurns : []).map(keyOf))
+  const envelopes = (Array.isArray(originalTurns) ? originalTurns : []).filter(isCanonicalEnvelope)
+  const lost = envelopes.filter((t) => !surviving.has(keyOf(t)))
+  return {
+    ok: lost.length === 0,
+    envelopesTotal: envelopes.length,
+    preservedCount: envelopes.length - lost.length,
+    lost: lost.map((t) => t.schema)
+  }
+}
+
+/**
+ * W6 (#295): context budgeter — deterministic verdict + prune advice, driven by
+ * thresholds and translation-usage stats (adapters at 100% ok-rate are healthy,
+ * so their hot session context is a prune candidate, not a keeper).
+ */
+export function contextBudget({ bytes = 0, lines = 0, thresholds = DEFAULT_COMPACT_THRESHOLDS, usageAdapters = [] } = {}) {
+  const byteBudget = thresholds.jsonlBytes
+  const withinBudget = bytes <= byteBudget && lines <= thresholds.jsonlLines
+  const pruneCandidates = usageAdapters
+    .filter((a) => a.okRate >= 1 && a.total >= 3)
+    .map((a) => `${a.kind}:${a.adapter}`)
+  return {
+    bytes,
+    lines,
+    byteBudget,
+    withinBudget,
+    verdict: withinBudget ? 'within_budget' : bytes > byteBudget ? 'over_byte_budget' : 'over_line_budget',
+    pruneCandidates
   }
 }
 
@@ -163,12 +217,18 @@ export function compactSessionFile(filePath, { keepRecent = 4, maxSummaryChars =
   }
   const turns = parseJsonl(readFileSync(filePath, 'utf8'))
   const res = compactTurns(turns, { keepRecent, maxSummaryChars })
+  const integrity = verifyCompactionIntegrity(turns, res.turns)
   let backupPath = null
   if (apply && res.compacted) {
+    // W6: fail closed — never write a compaction that loses canonical envelopes.
+    if (!integrity.ok) {
+      return { ok: false, apply, filePath, reason: 'compaction_integrity_violation', integrity }
+    }
     const content = `${res.turns.map((t) => JSON.stringify(t)).join('\n')}\n`
     const written = protectedWriteFile(filePath, content)
     backupPath = written.backupPath
   }
+  const stats = inspectFileStats(filePath)
   return {
     ok: true,
     apply,
@@ -177,6 +237,9 @@ export function compactSessionFile(filePath, { keepRecent = 4, maxSummaryChars =
     beforeCount: res.beforeCount,
     afterCount: res.afterCount,
     foldedCount: res.foldedCount,
+    preservedEnvelopes: res.preservedEnvelopes || 0,
+    integrity,
+    budget: contextBudget({ bytes: stats.bytes, lines: stats.lines, thresholds: DEFAULT_COMPACT_THRESHOLDS }),
     backupPath
   }
 }
