@@ -104,6 +104,29 @@ test('MEASURE: aggregateRelayTelemetry sums failureClass distribution from relay
   }
 })
 
+test('MEASURE #298: legacy unclassified rows are backfilled from exit shape and stderr evidence', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'measure-backfill-'))
+  try {
+    const reportsDir = join(dir, 'reports')
+    mkdirSync(reportsDir, { recursive: true })
+    writeFileSync(join(reportsDir, 'relay-pipeline-legacy.json'), JSON.stringify({
+      windows: [{ attemptedModels: [
+        { model: null, status: 'exit_2', exitCode: 2, signal: null },
+        { model: null, status: 'exit_null', exitCode: null, signal: 'SIGTERM' },
+        { model: 'gemini-2.5-flash', status: 'cli_outcome_failed', stderrTail: 'Error 429: resource_exhausted' }
+      ] }]
+    }))
+    const agg = aggregateRelayTelemetry(reportsDir)
+    assert.equal(agg.failureClasses.unclassified, undefined, 'nothing stays unclassified')
+    assert.equal(agg.failureClasses.legacy_exit_failure, 1)
+    assert.equal(agg.failureClasses.stall_killed, 1)
+    assert.equal(agg.failureClasses.rpm_throttled, 1)
+    assert.equal(agg.failureClassesByToken['gemini-api'], 1, 'throttle attributed to gemini-api token')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('MEASURE: swarm measure CLI runs read-only against an isolated state dir', () => {
   const dir = mkdtempSync(join(tmpdir(), 'measure-cli-'))
   try {

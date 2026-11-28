@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, append
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { statePaths } from './swarm-state-paths.mjs'
+import { RPM_THROTTLE_PATTERN, AUTH_FAILURE_PATTERN, TRANSIENT_PATTERN } from './swarm-relay.mjs'
 import { readCases, readCase, writeCase } from '../apps/api/src/toolchain/dispatch/case-registry.js'
 import { protectedWriteFile } from '../apps/api/src/toolchain/dispatch/mutation-guard.js'
 
@@ -221,7 +222,29 @@ export function aggregateRelayTelemetry(reportsDir) {
               agg.failureClassesByToken[token] = (agg.failureClassesByToken[token] || 0) + 1
             }
           }
-        } else agg.failureClasses.unclassified = (agg.failureClasses.unclassified || 0) + 1
+        } else {
+          // #298: backfill legacy pre-#278 rows — classify from whatever evidence
+          // the attempt still carries (status string + stderr tail) so the improve
+          // loop sees real failure classes instead of an `unclassified` bucket.
+          const evidence = `${a.status || ''}\n${a.stderrTail || a.error || ''}`
+          let backfilled = null
+          if (RPM_THROTTLE_PATTERN.test(evidence)) backfilled = 'rpm_throttled'
+          else if (AUTH_FAILURE_PATTERN.test(evidence)) backfilled = 'auth_failure'
+          else if (TRANSIENT_PATTERN.test(evidence)) backfilled = 'transient'
+          // Legacy pre-#278 rows carry no output at all — only exit shape.
+          else if (a.status === 'exit_null' || a.signal) backfilled = 'stall_killed'
+          else if (/^exit_\d+$/.test(String(a.status))) backfilled = 'legacy_exit_failure'
+          else if (a.status === 'cli_outcome_failed') backfilled = 'legacy_cli_outcome_failed'
+          agg.failureClasses[backfilled || 'unclassified'] = (agg.failureClasses[backfilled || 'unclassified'] || 0) + 1
+          if (backfilled) {
+            const model = String(a.model || '').toLowerCase()
+            for (const token of SIBLING_TOKENS) {
+              if (model.startsWith(token.split('-')[0])) {
+                agg.failureClassesByToken[token] = (agg.failureClassesByToken[token] || 0) + 1
+              }
+            }
+          }
+        }
       }
     }
     if (!sawAttempt) agg.missingTelemetryReports += 1

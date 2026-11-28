@@ -670,9 +670,9 @@ function writeReport(path, payload) {
 // #278: sibling failure telemetry — a bare exit code (CLI_OUTCOME_FAILED) masks
 // RPM throttling and transient backend errors. Classify from the child's stderr
 // so relay reports can distinguish quota pressure from real failures.
-const RPM_THROTTLE_PATTERN = /429|resource_exhausted|rate.?limit|too many requests|quota.*(exceed|exhaust)|exhausted.*quota/i
-const AUTH_FAILURE_PATTERN = /401|403|unauthenticated|unauthorized|invalid api key|api key (not valid|expired|invalid)/i
-const TRANSIENT_PATTERN = /500|502|503|504|unavailable|timeout|timed out|connection reset|econnreset|socket hang up|internal error/i
+export const RPM_THROTTLE_PATTERN = /429|resource_exhausted|rate.?limit|too many requests|quota.*(exceed|exhaust)|exhausted.*quota/i
+export const AUTH_FAILURE_PATTERN = /401|403|unauthenticated|unauthorized|invalid api key|api key (not valid|expired|invalid)/i
+export const TRANSIENT_PATTERN = /500|502|503|504|unavailable|timeout|timed out|connection reset|econnreset|socket hang up|internal error/i
 
 export function classifyFailure({ exitCode, stderr = '', stdout = '' }) {
   if (exitCode === 0 || exitCode === null) return null
