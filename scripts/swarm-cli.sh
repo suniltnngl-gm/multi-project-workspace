@@ -41,6 +41,7 @@ Commands:
   notify [args...]     Send Ubuntu desktop/log alert or --check-remote (Kaggle/Colab/GitHub)
   stop                 Arm graceful kill-switch (STOP_SWARM)
   resume               Clear kill-switch (STOP_SWARM)
+  measure [args]       Measure phase: decision-outcome ledger + relay telemetry aggregation
   status               Show registry, queue, cases, and kill-switch status
   doctor               Check guardrails: kill-switch, 5h ledger, overnight report, git cleanliness
   wakeup [since_sha]   Emit portable zero-LLM wakeup brief after a short/long break
@@ -163,6 +164,7 @@ case "$cmd" in
     ;;
   health)
     exec node "$MPW_DIR/scripts/swarm-health.mjs" "$@" ;;
+  measure)      exec node "$MPW_DIR/scripts/swarm-measure.mjs" "$@" ;;
   status)
     if [ "${1:-}" = "--json" ]; then
       # SWARM-HEALTH-001: machine-readable rollup (read-only).
