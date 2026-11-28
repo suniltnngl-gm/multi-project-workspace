@@ -1287,3 +1287,11 @@ test('discoverExternalRoots delegates to the canonical 4-bucket classifier, read
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('direct-graphn sibling routes through swarm-direct --provider graphn', () => {
+  const cmd = buildSiblingCommand('direct-graphn', { prompt: 'hello' })
+  assert.equal(cmd.command, process.execPath)
+  assert.ok(cmd.args[0].endsWith('swarm-direct.mjs'))
+  assert.equal(cmd.args[cmd.args.indexOf('--provider') + 1], 'graphn')
+  assert.equal(cmd.args[cmd.args.indexOf('--prompt') + 1], 'hello')
+})

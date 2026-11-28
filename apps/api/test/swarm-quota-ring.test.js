@@ -367,3 +367,11 @@ test('SWARM-BACKOFF-RING-001 exponential backoff 1m->2m->4m->8m, reset on succes
   assert.equal(failed.earliestNextEligibleAtMs, 1_060_000)
   assert.equal(failed.earliestEntity, 'agy')
 })
+
+test('direct-graphn is a registered roster entity with its own uncapped graphn-ai pool', () => {
+  assert.equal(ENTITY_ROSTER['direct-graphn'].pool, 'graphn-ai')
+  assert.equal(ENTITY_ROSTER['direct-graphn'].canEdit, true)
+  assert.equal(poolForSibling('direct-graphn'), 'graphn-ai')
+  const budget = loadPoolBudgets({ quotaStatus: null })
+  assert.ok('graphn-ai' in budget)
+})

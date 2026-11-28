@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * Lightweight direct tool-calling CLI (`swarm direct`, <30 MB RAM).
- * Supports Cloudflare Workers AI (`cloudflare`) and Vercel AI Gateway (`vercel`)
+ * Supports Cloudflare Workers AI (`cloudflare`), Vercel AI Gateway (`vercel`),
+ * and Graphn AI (`graphn`)
  * with allowlisted local tools (`read_file`, `git_grep`, opt-in `protected_write`).
  */
 import { existsSync, readFileSync } from 'node:fs'
@@ -11,8 +12,8 @@ import { runDirectToolLoop } from '../apps/api/src/toolchain/dispatch/direct-too
 
 const argv = process.argv.slice(2)
 if (argv.includes('--help') || argv.includes('-h')) {
-  process.stdout.write(`Usage: node scripts/swarm-direct.mjs --provider <cloudflare|vercel> --prompt <text> [options]
-      --provider <cloudflare|vercel>  Direct endpoint (default: cloudflare)
+  process.stdout.write(`Usage: node scripts/swarm-direct.mjs --provider <cloudflare|vercel|graphn> --prompt <text> [options]
+      --provider <cloudflare|vercel|graphn>  Direct endpoint (default: cloudflare)
   -p, --prompt <text>                 Prompt text (required)
       --repo <dir>                    Repository root for local tools (default: cwd)
       --max-turns <n>                 Max tool-loop turns (default: 4)
@@ -74,6 +75,21 @@ if (opts.provider === 'cloudflare') {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: 'google/gemini-2.5-flash-lite', messages })
+    }).then((x) => x.json())
+    return r?.choices?.[0]?.message?.content ?? ''
+  }
+} else if (opts.provider === 'graphn') {
+  // Graphn AI: OpenAI-compatible gateway (model.graphn.ai). Credentials live in a
+  // plain env file outside any repo; it must never be committed.
+  const paths = [join(home, 'Code/AI/graphn/graphn.env'), join(home, 'Code/ENV.env')]
+  const key = readEnvVal(paths, 'OPENAI_API_KEY')
+  const baseUrl = readEnvVal(paths, 'OPENAI_BASE_URL') || 'https://model.graphn.ai/v1'
+  if (!key) { process.stderr.write('swarm-direct: missing OPENAI_API_KEY (graphn.env)\\n'); process.exit(1) }
+  callModel = async (messages) => {
+    const r = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'deepseek-v4.1-flash', messages })
     }).then((x) => x.json())
     return r?.choices?.[0]?.message?.content ?? ''
   }
